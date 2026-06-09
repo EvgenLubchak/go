@@ -111,22 +111,35 @@ func (g *Game) updateEnemies() {
 			e.HitTimer--
 		}
 
-		e.X += e.VX
-		e.Y += e.VY
+		// Рух: відбивання від тайлових стін і країв екрану.
+		newX := e.X + e.VX
+		newY := e.Y + e.VY
 
-		if e.X <= 0 {
+		if !isWallRect(newX, e.Y) {
+			e.X = newX
+		} else {
+			e.VX = -e.VX
+		}
+		if !isWallRect(e.X, newY) {
+			e.Y = newY
+		} else {
+			e.VY = -e.VY
+		}
+
+		// Додатковий захист від виходу за межі (якщо ворог якось вийшов)
+		if e.X < 0 {
 			e.X = 0
 			e.VX = -e.VX
 		}
-		if e.X >= screenWidth-pixelSize {
+		if e.X > screenWidth-pixelSize {
 			e.X = screenWidth - pixelSize
 			e.VX = -e.VX
 		}
-		if e.Y <= 0 {
+		if e.Y < 0 {
 			e.Y = 0
 			e.VY = -e.VY
 		}
-		if e.Y >= screenHeight-pixelSize {
+		if e.Y > screenHeight-pixelSize {
 			e.Y = screenHeight - pixelSize
 			e.VY = -e.VY
 		}

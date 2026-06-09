@@ -60,7 +60,21 @@ func drawPixel(screen *ebiten.Image, p Pixel) {
 
 // Draw малює поточний стан на екрані.
 func (g *Game) Draw(screen *ebiten.Image) {
-	screen.Fill(color.Black)
+	screen.Fill(color.RGBA{15, 15, 25, 255}) // темно-синій фон замість чистого чорного
+
+	// Малюємо тайли рівня.
+	// Стіни — темно-сірі, підлога — не малюється (фон і є підлогою).
+	for row := 0; row < boidMapH; row++ {
+		for col := 0; col < boidMapW; col++ {
+			if tileMap[row][col] {
+				x := float32(col * pixelSize)
+				y := float32(row * pixelSize)
+				vector.FillRect(screen, x, y, pixelSize, pixelSize, color.RGBA{55, 55, 75, 255}, false)
+				// Тонкий контур стіни для об'єму
+				vector.StrokeRect(screen, x, y, pixelSize, pixelSize, 1, color.RGBA{80, 80, 110, 255}, false)
+			}
+		}
+	}
 
 	for _, e := range g.enemies {
 		// Радіус огляду — дуже прозоре кільце навколо ворога
@@ -91,6 +105,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	fps := ebiten.ActualFPS()
 	drawText(screen, fmt.Sprintf("LVL %d", level), 10, 30, 10, white)
 	drawText(screen, fmt.Sprintf("SPD %.1f", playerSpeed), 10, screenWidth-32, 10, cyan)
+	drawText(screen, fmt.Sprintf("DIF %.1f", g.difficulty), 10, screenWidth-32, 25, color.RGBA{255, 140, 50, 255})
 	drawText(screen, fmt.Sprintf("FPS %.0f", fps), 10, screenWidth/2, 10, color.RGBA{150, 150, 150, 255})
 
 	if g.gameOver {

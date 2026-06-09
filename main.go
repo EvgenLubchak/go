@@ -16,7 +16,7 @@ const (
 	screenWidth  = 1680
 	screenHeight = 960
 	pixelSize    = 55
-	enemyCount   = 10
+	enemyCount   = 3752
 
 	// Глобальна фізика — однакова для всіх типів ворогів.
 	// Поведінка (швидкість, агресія, burst) — в EnemyConfig у pixel.go.
@@ -24,11 +24,11 @@ const (
 	visionRadius        = 3     // радіус огляду в клітинках boidMap
 	showDetectionCircle = false // показувати радіус огляду ворогів (true/false)
 
-	attackRadius      = 180 // радіус удару в пікселях
+	attackRadius      = 320 // радіус удару в пікселях
 	attackDamage      = 1   // пошкодження за один удар
 	attackCooldownMax = 10  // кадрів між ударами
 	attackDuration    = 10  // кадрів відображення кола атаки
-	hitFlashDuration  = 4   // кадрів білого миготіння після удару
+	hitFlashDuration  = 7   // кадрів білого миготіння після удару
 
 	playerAccel     = 0.45 // прискорення при натисканні клавіші
 	playerFriction  = 0.90 // тертя щокадру
@@ -38,8 +38,8 @@ const (
 	gameOverFontSize = 20.0 // розмір шрифту екрану GAME OVER
 
 	levelUpEvery   = 60 * 20 // кожні 10 секунд (60fps × 5)
-	difficultyStep = 0.3     // наскільки зростає складність за рівень
-	maxDifficulty  = 50.0    // стеля складності
+	difficultyStep = 2.8     // наскільки зростає складність за рівень
+	maxDifficulty  = 250.0   // стеля складності
 
 	// Аудіо: темп зростає разом зі складністю
 	baseBPM          = 90.0   // BPM на рівні 1
@@ -72,8 +72,8 @@ func main() {
 	game := &Game{
 		difficulty: 1.0,
 		player: Pixel{
-			X:     screenWidth/2 - pixelSize/2,
-			Y:     screenHeight/2 - pixelSize/2,
+			X:     playerSpawn.X,
+			Y:     playerSpawn.Y,
 			Color: color.RGBA{R: 0, G: 255, B: 180, A: 255},
 			Label: "YOU",
 		},

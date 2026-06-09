@@ -116,9 +116,20 @@ func newEnemies(count int) []Pixel {
 			col = aggressionColor(aggression)
 		}
 
+		// Спавн: якщо в levelLayout є 'E' → циклічно по ним; інакше — рандом.
+		// [GO: MODULO] i%len(enemySpawns) — циклічний перебір без виходу за межі.
+		var spawnX, spawnY float32
+		if len(enemySpawns) > 0 {
+			sp := enemySpawns[i%len(enemySpawns)]
+			spawnX, spawnY = sp.X, sp.Y
+		} else {
+			spawnX = float32(rand.Intn(screenWidth - pixelSize))
+			spawnY = float32(rand.Intn(screenHeight - pixelSize))
+		}
+
 		enemies[i] = Pixel{
-			X:          float32(rand.Intn(screenWidth - pixelSize)),
-			Y:          float32(rand.Intn(screenHeight - pixelSize)),
+			X:          spawnX,
+			Y:          spawnY,
 			VX:         (rand.Float32() - 0.5) * cfg.MaxSpeed,
 			VY:         (rand.Float32() - 0.5) * cfg.MaxSpeed,
 			Aggression: aggression,

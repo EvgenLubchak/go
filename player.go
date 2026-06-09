@@ -38,10 +38,23 @@ func (g *Game) updatePlayer() {
 		g.player.VY = g.player.VY / speed * maxSpeed
 	}
 
-	g.player.X += g.player.VX
-	g.player.Y += g.player.VY
+	newX := g.player.X + g.player.VX
+	newY := g.player.Y + g.player.VY
 
-	// Wrap-around: вилітаєш за край — з'являєшся з іншого боку
+	// Внутрішні стіни — slide (зупиняємо відповідну вісь).
+	// Межі екрану — ігноруємо тут, wrap-around нижче.
+	if !isInteriorWallRect(newX, g.player.Y) {
+		g.player.X = newX
+	} else {
+		g.player.VX = 0
+	}
+	if !isInteriorWallRect(g.player.X, newY) {
+		g.player.Y = newY
+	} else {
+		g.player.VY = 0
+	}
+
+	// Wrap-around: вилітаєш за край — з'являєшся з іншого боку.
 	if g.player.X > screenWidth {
 		g.player.X = 0
 	}

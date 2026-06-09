@@ -41,8 +41,8 @@ var errExit = errors.New("exit")
 
 // restart скидає стан гри до початкового.
 func (g *Game) restart() {
-	g.player.X = screenWidth/2 - pixelSize/2
-	g.player.Y = screenHeight/2 - pixelSize/2
+	g.player.X = playerSpawn.X
+	g.player.Y = playerSpawn.Y
 	g.player.VX = 0
 	g.player.VY = 0
 	g.attackCooldown = 0
