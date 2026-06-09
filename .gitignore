@@ -1,0 +1,12 @@
+# Скомпільовані бінарники
+boids
+boids-macos
+*.exe
+*.dylib
+
+# Артефакти збірки
+/dist/
+
+# IDE
+.idea/
+*.iml
