@@ -39,14 +39,13 @@ func (g *Game) calcAcceleration() {
 	}
 
 	// [GO: SNAPSHOT PATTERN]
-	// Копіюємо VX/VY всіх ворогів перед паралельним обрахунком.
+	// Копіюємо VX/VY/X/Y всіх ворогів перед паралельним обрахунком.
 	// Goroutines читають snapshot (незмінний) → пишуть тільки у свій AX/AY.
-	// Без snapshot: одна goroutine читала б VX сусіда поки інша пише його AX
-	// (різні поля struct, але Go race detector це все одно помічає).
-	type vel struct{ VX, VY float32 }
+	// X/Y потрібні для cohesion: середня позиція сусідів (центр маси).
+	type vel struct{ VX, VY, X, Y float32 }
 	vels := make([]vel, n)
 	for i := range g.enemies {
-		vels[i] = vel{g.enemies[i].VX, g.enemies[i].VY}
+		vels[i] = vel{g.enemies[i].VX, g.enemies[i].VY, g.enemies[i].X, g.enemies[i].Y}
 	}
 
 	// Ділимо ворогів рівномірно між CPU ядрами
@@ -82,6 +81,7 @@ func (g *Game) calcAcceleration() {
 				cy := int(e.Y) / pixelSize
 
 				var avgVX, avgVY float32
+				var avgX, avgY float32 // cohesion: центр маси сусідів
 				count := 0
 
 				for dy := -visionRadius; dy <= visionRadius; dy++ {
@@ -94,18 +94,25 @@ func (g *Game) calcAcceleration() {
 						if idx == 0 || idx-1 == i {
 							continue
 						}
-						// Читаємо з snapshot — race-free
 						avgVX += vels[idx-1].VX
 						avgVY += vels[idx-1].VY
+						avgX += vels[idx-1].X
+						avgY += vels[idx-1].Y
 						count++
 					}
 				}
 
 				if count > 0 {
-					avgVX /= float32(count)
-					avgVY /= float32(count)
-					e.AX = (avgVX - e.VX) * e.Cfg.AlignmentRate
-					e.AY = (avgVY - e.VY) * e.Cfg.AlignmentRate
+					fc := float32(count)
+
+					// Alignment: тягнемо швидкість до середньої швидкості сусідів
+					e.AX = (avgVX/fc - e.VX) * e.Cfg.AlignmentRate
+					e.AY = (avgVY/fc - e.VY) * e.Cfg.AlignmentRate
+
+					// Cohesion: тягнемо до центру маси сусідів
+					// (avgPos - ePos) = вектор напрямку до центру
+					e.AX += (avgX/fc - e.X) * e.Cfg.CohesionRate
+					e.AY += (avgY/fc - e.Y) * e.Cfg.CohesionRate
 				} else {
 					e.AX = 0
 					e.AY = 0

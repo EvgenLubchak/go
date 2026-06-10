@@ -13,6 +13,7 @@ import (
 type EnemyConfig struct {
 	WanderStrength  float32    // сила випадкового блукання
 	AlignmentRate   float32    // сила вирівнювання до зграї (boids)
+	CohesionRate    float32    // сила притягування до центру маси сусідів
 	MaxSpeed        float32    // стеля швидкості
 	AggressionForce float32    // базова сила переслідування гравця
 	BurstChance     float32    // ймовірність поштовху за кадр
@@ -31,6 +32,7 @@ var (
 	ConfigBoid = EnemyConfig{
 		WanderStrength:  0.2,
 		AlignmentRate:   0.03,
+		CohesionRate:    0.002,
 		MaxSpeed:        0.9,
 		AggressionForce: 0.04,
 		BurstChance:     0.0001,
@@ -46,11 +48,12 @@ var (
 	ConfigPredator = EnemyConfig{
 		WanderStrength:  0.1,
 		AlignmentRate:   0.01,
+		CohesionRate:    0.0005,
 		MaxSpeed:        1.4,
 		AggressionForce: 0.12,
 		BurstChance:     0.0003,
 		BurstForce:      80.0,
-		DetectionRange:  160.0,
+		DetectionRange:  180.0,
 		PounceMulti:     14.0,
 		MaxHP:           5,
 		Color:           color.RGBA{220, 50, 50, 255},
@@ -61,6 +64,7 @@ var (
 	ConfigSpeeder = EnemyConfig{
 		WanderStrength:  0.6,
 		AlignmentRate:   0.005,
+		CohesionRate:    0.0001,
 		MaxSpeed:        2.8,
 		AggressionForce: 0.02,
 		BurstChance:     0.004,
