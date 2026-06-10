@@ -23,7 +23,7 @@ Update():
         → updatePlayer()       (friction, max speed, wrap-around)
         → playerAttack()       (SPACE → damage enemies in radius)
         → updateBoidMap()      (rebuild 2D grid of enemy positions)
-        → calcAcceleration()   (boids alignment + predator chase)
+        → calcAcceleration()   (boids alignment + predator chase) ← parallel goroutines
         → updateEnemies()      (wander, burst, apply accel, bounce walls)
         → removeDeadEnemies()  (filter slice in-place)
         → checkCollisions()    (enemy touches player → game over)
@@ -130,6 +130,33 @@ Toggle: `soundEnabled = true/false` (var in main.go)
 
 ---
 
+## Concurrency — Worker Pool in calcAcceleration
+
+`calcAcceleration` is the most expensive function: O(n × visionRadius²) per frame.
+With 3000+ enemies it becomes the bottleneck → parallelized across CPU cores.
+
+```
+Main goroutine:
+  updateBoidMap()         ← single-threaded (builds shared read-only grid)
+  calcAcceleration()      ← spawns NumCPU workers via sync.WaitGroup
+    ├── goroutine [0..n/8)    reads boidMap + vels snapshot → writes enemies[i].AX/AY
+    ├── goroutine [n/8..n/4)  reads boidMap + vels snapshot → writes enemies[i].AX/AY
+    ├── ...
+    └── goroutine [7n/8..n)   reads boidMap + vels snapshot → writes enemies[i].AX/AY
+  wg.Wait()               ← blocks until all workers done
+  updateEnemies()         ← single-threaded (uses freshly written AX/AY)
+```
+
+**Snapshot pattern** — before parallelizing, VX/VY of all enemies are copied into
+a local `[]vel` slice. Goroutines read from this snapshot (immutable), write only
+to their own chunk of `enemies[i].AX/AY`. This avoids data races without any mutex.
+
+**Why not one goroutine per enemy?** Goroutine creation has overhead (~1µs).
+With 3752 enemies × 120 FPS = 450k goroutine launches/sec — marginal.
+Worker pool (NumCPU goroutines) amortizes this: each goroutine processes n/CPU enemies.
+
+---
+
 ## Go Patterns Used
 
 | Pattern | Where | Why |
@@ -139,6 +166,8 @@ Toggle: `soundEnabled = true/false` (var in main.go)
 | Slice filter in-place | `removeDeadEnemies` | `alive := g.enemies[:0]` — no alloc |
 | Zero value check | `pixel.go` | `cfg.Color.A == 0` detects Boid type |
 | Sentinel error | `game.go` | `errors.New("exit")` for clean Ebiten exit |
-| `sync.Mutex` | `game.go` | Reserved — will protect shared state when goroutines are added |
-| `init()` | `main.go`, `sound.go` | One-time setup before `main()` |
+| `sync.WaitGroup` | `boids.go` | Synchronizes worker goroutines in calcAcceleration |
+| Snapshot before parallel work | `boids.go` | `[]vel` copy → race-free reads in goroutines |
+| Closure argument capture | `boids.go` | `go func(start, end int)` avoids loop variable capture bug |
+| `init()` | `main.go`, `sound.go`, `level.go` | One-time setup before `main()` |
 | `var` over `const` for flags | `main.go` | Avoids linter "always true/false" warnings |
