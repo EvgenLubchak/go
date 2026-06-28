@@ -39,13 +39,13 @@ func (g *Game) calcAcceleration() {
 	}
 
 	// [GO: SNAPSHOT PATTERN]
-	// Копіюємо VX/VY/X/Y всіх ворогів перед паралельним обрахунком.
-	// Goroutines читають snapshot (незмінний) → пишуть тільки у свій AX/AY.
+	// Копіюємо VelX/VelY/X/Y всіх ворогів перед паралельним обрахунком.
+	// Goroutines читають snapshot (незмінний) → пишуть тільки у свій AccX/AccY.
 	// X/Y потрібні для cohesion: середня позиція сусідів (центр маси).
-	type vel struct{ VX, VY, X, Y float32 }
-	vels := make([]vel, n)
+	type snap struct{ VelX, VelY, X, Y float32 }
+	snaps := make([]snap, n)
 	for i := range g.enemies {
-		vels[i] = vel{g.enemies[i].VX, g.enemies[i].VY, g.enemies[i].X, g.enemies[i].Y}
+		snaps[i] = snap{g.enemies[i].VelX, g.enemies[i].VelY, g.enemies[i].X, g.enemies[i].Y}
 	}
 
 	// Ділимо ворогів рівномірно між CPU ядрами
@@ -81,7 +81,8 @@ func (g *Game) calcAcceleration() {
 				cy := int(e.Y) / pixelSize
 
 				var avgVX, avgVY float32
-				var avgX, avgY float32 // cohesion: центр маси сусідів
+				var avgX, avgY float32   // cohesion: центр маси сусідів
+				var sepX, sepY float32   // separation: сума векторів відштовхування
 				count := 0
 
 				for dy := -visionRadius; dy <= visionRadius; dy++ {
@@ -94,10 +95,22 @@ func (g *Game) calcAcceleration() {
 						if idx == 0 || idx-1 == i {
 							continue
 						}
-						avgVX += vels[idx-1].VX
-						avgVY += vels[idx-1].VY
-						avgX += vels[idx-1].X
-						avgY += vels[idx-1].Y
+						avgVX += snaps[idx-1].VelX
+						avgVY += snaps[idx-1].VelY
+						avgX += snaps[idx-1].X
+						avgY += snaps[idx-1].Y
+
+						// [GO: SEPARATION]
+						// Вектор від сусіда до мене (repulsion direction).
+						// Ділимо на відстань: ближчий сусід = сильніше відштовхування.
+						rdx := e.X - snaps[idx-1].X
+						rdy := e.Y - snaps[idx-1].Y
+						d := float32(math.Sqrt(float64(rdx*rdx + rdy*rdy)))
+						if d > 0 {
+							sepX += rdx / d
+							sepY += rdy / d
+						}
+
 						count++
 					}
 				}
@@ -106,16 +119,20 @@ func (g *Game) calcAcceleration() {
 					fc := float32(count)
 
 					// Alignment: тягнемо швидкість до середньої швидкості сусідів
-					e.AX = (avgVX/fc - e.VX) * e.Cfg.AlignmentRate
-					e.AY = (avgVY/fc - e.VY) * e.Cfg.AlignmentRate
+					e.AccX = (avgVX/fc - e.VelX) * e.Cfg.AlignmentRate
+					e.AccY = (avgVY/fc - e.VelY) * e.Cfg.AlignmentRate
 
-					// Cohesion: тягнемо до центру маси сусідів
-					// (avgPos - ePos) = вектор напрямку до центру
-					e.AX += (avgX/fc - e.X) * e.Cfg.CohesionRate
-					e.AY += (avgY/fc - e.Y) * e.Cfg.CohesionRate
+					// Cohesion: тягнемо до центру маси (одна сила до середньої позиції)
+					e.AccX += (avgX/fc - e.X) * e.Cfg.CohesionRate
+					e.AccY += (avgY/fc - e.Y) * e.Cfg.CohesionRate
+
+					// Separation: відштовхуємось від кожного сусіда окремо
+					// sum(repulsion/dist) — не ділимо на count, бо сума, а не середнє
+					e.AccX += sepX * e.Cfg.SeparationRate
+					e.AccY += sepY * e.Cfg.SeparationRate
 				} else {
-					e.AX = 0
-					e.AY = 0
+					e.AccX = 0
+					e.AccY = 0
 				}
 
 				// Chase: пишемо тільки у g.enemies[i] — виключно наш chunk
@@ -125,8 +142,8 @@ func (g *Game) calcAcceleration() {
 				if dist > 0 && e.Aggression > 0 {
 					if dist < e.Cfg.DetectionRange {
 						pounce := (1 - dist/e.Cfg.DetectionRange) * e.Cfg.PounceMulti
-						e.AX += (fdx / dist) * e.Cfg.AggressionForce * e.Aggression * g.difficulty * (1 + pounce)
-						e.AY += (fdy / dist) * e.Cfg.AggressionForce * e.Aggression * g.difficulty * (1 + pounce)
+						e.AccX += (fdx / dist) * e.Cfg.AggressionForce * e.Aggression * g.difficulty * (1 + pounce)
+						e.AccY += (fdy / dist) * e.Cfg.AggressionForce * e.Aggression * g.difficulty * (1 + pounce)
 					}
 				}
 			}
@@ -145,28 +162,28 @@ func (g *Game) updateEnemies() {
 		e := &g.enemies[i]
 
 		// [GO: e.Cfg.WanderStrength] — Speeder блукає хаотично, Predator — плавно
-		e.VX += (rand.Float32() - 0.5) * e.Cfg.WanderStrength
-		e.VY += (rand.Float32() - 0.5) * e.Cfg.WanderStrength
+		e.VelX += (rand.Float32() - 0.5) * e.Cfg.WanderStrength
+		e.VelY += (rand.Float32() - 0.5) * e.Cfg.WanderStrength
 
 		// Burst: Speeder б'є часто і сильно, Boid — рідко і слабко
 		if rand.Float32() < e.Cfg.BurstChance {
 			angle := rand.Float64() * 2 * math.Pi
-			e.VX += float32(math.Cos(angle)) * e.Cfg.BurstForce
-			e.VY += float32(math.Sin(angle)) * e.Cfg.BurstForce
+			e.VelX += float32(math.Cos(angle)) * e.Cfg.BurstForce
+			e.VelY += float32(math.Sin(angle)) * e.Cfg.BurstForce
 		}
 
-		e.VX += e.AX
-		e.VY += e.AY
+		e.VelX += e.AccX
+		e.VelY += e.AccY
 
-		e.VX *= damping
-		e.VY *= damping
+		e.VelX *= damping
+		e.VelY *= damping
 
 		// [GO: e.Cfg.MaxSpeed] — стеля швидкості своя у кожного типу
 		currentMaxSpeed := e.Cfg.MaxSpeed * g.difficulty
-		speed := float32(math.Sqrt(float64(e.VX*e.VX + e.VY*e.VY)))
+		speed := float32(math.Sqrt(float64(e.VelX*e.VelX + e.VelY*e.VelY)))
 		if speed > currentMaxSpeed {
-			e.VX = e.VX / speed * currentMaxSpeed
-			e.VY = e.VY / speed * currentMaxSpeed
+			e.VelX = e.VelX / speed * currentMaxSpeed
+			e.VelY = e.VelY / speed * currentMaxSpeed
 		}
 
 		if e.HitTimer > 0 {
@@ -174,36 +191,36 @@ func (g *Game) updateEnemies() {
 		}
 
 		// Рух: відбивання від тайлових стін і країв екрану.
-		newX := e.X + e.VX
-		newY := e.Y + e.VY
+		newX := e.X + e.VelX
+		newY := e.Y + e.VelY
 
 		if !isWallRect(newX, e.Y) {
 			e.X = newX
 		} else {
-			e.VX = -e.VX
+			e.VelX = -e.VelX
 		}
 		if !isWallRect(e.X, newY) {
 			e.Y = newY
 		} else {
-			e.VY = -e.VY
+			e.VelY = -e.VelY
 		}
 
 		// Додатковий захист від виходу за межі (якщо ворог якось вийшов)
 		if e.X < 0 {
 			e.X = 0
-			e.VX = -e.VX
+			e.VelX = -e.VelX
 		}
 		if e.X > screenWidth-pixelSize {
 			e.X = screenWidth - pixelSize
-			e.VX = -e.VX
+			e.VelX = -e.VelX
 		}
 		if e.Y < 0 {
 			e.Y = 0
-			e.VY = -e.VY
+			e.VelY = -e.VelY
 		}
 		if e.Y > screenHeight-pixelSize {
 			e.Y = screenHeight - pixelSize
-			e.VY = -e.VY
+			e.VelY = -e.VelY
 		}
 	}
 }

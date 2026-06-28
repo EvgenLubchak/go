@@ -10,3 +10,4 @@ boids-macos
 # IDE
 .idea/
 *.iml
+.DS_Store

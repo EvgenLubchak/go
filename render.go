@@ -99,7 +99,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 	// HUD
 	level := g.tick/levelUpEvery + 1
-	playerSpeed := math.Sqrt(float64(g.player.VX*g.player.VX + g.player.VY*g.player.VY))
+	playerSpeed := math.Sqrt(float64(g.player.VelX*g.player.VelX + g.player.VelY*g.player.VelY))
 	white := color.RGBA{255, 255, 255, 255}
 	cyan := color.RGBA{0, 220, 180, 255}
 	fps := ebiten.ActualFPS()

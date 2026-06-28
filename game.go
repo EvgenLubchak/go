@@ -43,8 +43,8 @@ var errExit = errors.New("exit")
 func (g *Game) restart() {
 	g.player.X = playerSpawn.X
 	g.player.Y = playerSpawn.Y
-	g.player.VX = 0
-	g.player.VY = 0
+	g.player.VelX = 0
+	g.player.VelY = 0
 	g.attackCooldown = 0
 	g.attackTimer = 0
 	g.enemies = newEnemies(enemyCount)

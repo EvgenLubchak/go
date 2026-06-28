@@ -14,6 +14,7 @@ type EnemyConfig struct {
 	WanderStrength  float32    // сила випадкового блукання
 	AlignmentRate   float32    // сила вирівнювання до зграї (boids)
 	CohesionRate    float32    // сила притягування до центру маси сусідів
+	SeparationRate  float32    // сила відштовхування від кожного сусіда (ближче = сильніше)
 	MaxSpeed        float32    // стеля швидкості
 	AggressionForce float32    // базова сила переслідування гравця
 	BurstChance     float32    // ймовірність поштовху за кадр
@@ -33,6 +34,7 @@ var (
 		WanderStrength:  0.2,
 		AlignmentRate:   0.03,
 		CohesionRate:    0.002,
+		SeparationRate:  0.03,
 		MaxSpeed:        0.9,
 		AggressionForce: 0.04,
 		BurstChance:     0.0001,
@@ -41,7 +43,7 @@ var (
 		PounceMulti:     7.0,
 		MaxHP:           2,
 		// Color.A == 0 → aggressionColor() визначить колір
-		Label: "FOE",
+		Label: "",
 	}
 
 	// ConfigPredator — повільний але смертоносний: великий радіус, сильний кидок.
@@ -49,6 +51,7 @@ var (
 		WanderStrength:  0.1,
 		AlignmentRate:   0.01,
 		CohesionRate:    0.0005,
+		SeparationRate:  0.01,
 		MaxSpeed:        1.4,
 		AggressionForce: 0.12,
 		BurstChance:     0.0003,
@@ -57,7 +60,7 @@ var (
 		PounceMulti:     14.0,
 		MaxHP:           5,
 		Color:           color.RGBA{220, 50, 50, 255},
-		Label:           "PRD",
+		Label:           "",
 	}
 
 	// ConfigSpeeder — хаотичний, дуже швидкий, крихкий, майже не флокується.
@@ -65,7 +68,8 @@ var (
 		WanderStrength:  0.6,
 		AlignmentRate:   0.005,
 		CohesionRate:    0.0001,
-		MaxSpeed:        2.8,
+		SeparationRate:  0.05,
+		MaxSpeed:        1.6,
 		AggressionForce: 0.02,
 		BurstChance:     0.004,
 		BurstForce:      120.0,
@@ -73,15 +77,47 @@ var (
 		PounceMulti:     2.0,
 		MaxHP:           1,
 		Color:           color.RGBA{200, 220, 50, 255},
-		Label:           "SPD",
+		Label:           "",
+	}
+
+	ConfigHP = EnemyConfig{
+		WanderStrength:  0.01,
+		AlignmentRate:   0.0001,
+		CohesionRate:    0.00001,
+		SeparationRate:  0.1,
+		MaxSpeed:        0.3,
+		AggressionForce: 0,
+		BurstChance:     0.01,
+		BurstForce:      10,
+		DetectionRange:  400,
+		PounceMulti:     1,
+		MaxHP:           1,
+		Color:           color.RGBA{255, 255, 255, 255},
+		Label:           "",
+	}
+
+	ConfigGroup = EnemyConfig{
+		WanderStrength:  0.02,  // майже без хаосу — плавний рух
+		AlignmentRate:   0.08,  // сильно рівняється на сусідів (головний пріоритет)
+		CohesionRate:    0.005, // сильно тягнеться до центру групи
+		SeparationRate:  0.02,  // не накладається, але тримається близько
+		MaxSpeed:        0.7,   // повільний — не розбігається
+		AggressionForce: 0.01,  // майже ігнорує гравця
+		BurstChance:     0.0,   // ніяких ривків
+		BurstForce:      0.0,
+		DetectionRange:  50.0, // маленький радіус — реагує тільки впритул
+		PounceMulti:     1.0,
+		MaxHP:           5,
+		Color:           color.RGBA{100, 180, 255, 255}, // блакитний — виділяється
+		Label:           "",
 	}
 )
 
 // Pixel описує одну частинку — гравця або ворога.
 type Pixel struct {
 	X, Y       float32
-	VX, VY     float32 // вектор швидкості
-	AX, AY     float32 // вектор прискорення (alignment + chase)
+	VelX, VelY float32 // velocity — вектор швидкості (куди і як швидко рухається)
+	AccX, AccY float32 // acceleration — вектор прискорення (сума сил: alignment + chase)
 	Aggression float32 // 0.0..1.0: для Boid — рандомний, для інших — 1.0
 	HP, MaxHP  int
 	HitTimer   int
@@ -105,7 +141,8 @@ func aggressionColor(a float32) color.RGBA {
 // [GO: MODULO CYCLING]
 // i % len(configs) циклічно перебирає типи: 0,1,2,0,1,2,...
 func newEnemies(count int) []Pixel {
-	configs := []EnemyConfig{ConfigBoid, ConfigPredator, ConfigSpeeder}
+	//configs := []EnemyConfig{ConfigBoid, ConfigPredator, ConfigSpeeder, ConfigHP, ConfigGroup}
+	configs := []EnemyConfig{ConfigPredator, ConfigGroup}
 	enemies := make([]Pixel, count)
 
 	for i := range enemies {
@@ -134,8 +171,8 @@ func newEnemies(count int) []Pixel {
 		enemies[i] = Pixel{
 			X:          spawnX,
 			Y:          spawnY,
-			VX:         (rand.Float32() - 0.5) * cfg.MaxSpeed,
-			VY:         (rand.Float32() - 0.5) * cfg.MaxSpeed,
+			VelX:       (rand.Float32() - 0.5) * cfg.MaxSpeed,
+			VelY:       (rand.Float32() - 0.5) * cfg.MaxSpeed,
 			Aggression: aggression,
 			HP:         cfg.MaxHP,
 			MaxHP:      cfg.MaxHP,

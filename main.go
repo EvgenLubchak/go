@@ -15,8 +15,8 @@ import (
 const (
 	screenWidth  = 1680
 	screenHeight = 960
-	pixelSize    = 55
-	enemyCount   = 3752
+	pixelSize    = 18
+	enemyCount   = 555
 
 	// Глобальна фізика — однакова для всіх типів ворогів.
 	// Поведінка (швидкість, агресія, burst) — в EnemyConfig у pixel.go.
@@ -24,7 +24,7 @@ const (
 	visionRadius        = 3     // радіус огляду в клітинках boidMap
 	showDetectionCircle = false // показувати радіус огляду ворогів (true/false)
 
-	attackRadius      = 320 // радіус удару в пікселях
+	attackRadius      = 120 // радіус удару в пікселях
 	attackDamage      = 1   // пошкодження за один удар
 	attackCooldownMax = 10  // кадрів між ударами
 	attackDuration    = 10  // кадрів відображення кола атаки
@@ -37,8 +37,8 @@ const (
 	labelFontSize    = 6.0  // розмір шрифту мітки на пікселі
 	gameOverFontSize = 20.0 // розмір шрифту екрану GAME OVER
 
-	levelUpEvery   = 60 * 20 // кожні 10 секунд (60fps × 5)
-	difficultyStep = 2.8     // наскільки зростає складність за рівень
+	levelUpEvery   = 60 * 60 // кожні 10 секунд (60fps × 5)
+	difficultyStep = 2       // наскільки зростає складність за рівень
 	maxDifficulty  = 250.0   // стеля складності
 
 	// Аудіо: темп зростає разом зі складністю
@@ -75,7 +75,7 @@ func main() {
 			X:     playerSpawn.X,
 			Y:     playerSpawn.Y,
 			Color: color.RGBA{R: 0, G: 255, B: 180, A: 255},
-			Label: "YOU",
+			Label: "Y}{IJIEC",
 		},
 		enemies: newEnemies(enemyCount),
 	}

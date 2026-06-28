@@ -52,8 +52,8 @@ type Game struct {
 ```go
 type Pixel struct {
     X, Y       float32
-    VX, VY     float32     // velocity vector
-    AX, AY     float32     // acceleration (boids alignment + chase)
+    VelX, VelY     float32     // velocity vector
+    AccX, AccY     float32     // acceleration (boids alignment + chase)
     Aggression float32     // 0..1: Boid=random, Predator/Speeder=1.0
     HP, MaxHP  int
     HitTimer   int         // flash white for N frames after hit
@@ -98,7 +98,7 @@ Enemies cycle: `FOE, PRD, SPD, FOE, PRD, SPD, ...` (index % 3)
 
 ```
 pounce = (1 - dist/DetectionRange) * PounceMulti
-AX += (dx/dist) * AggressionForce * Aggression * difficulty * (1 + pounce)
+AccX += (dx/dist) * AggressionForce * Aggression * difficulty * (1 + pounce)
 ```
 
 ---
@@ -139,17 +139,17 @@ With 3000+ enemies it becomes the bottleneck → parallelized across CPU cores.
 Main goroutine:
   updateBoidMap()         ← single-threaded (builds shared read-only grid)
   calcAcceleration()      ← spawns NumCPU workers via sync.WaitGroup
-    ├── goroutine [0..n/8)    reads boidMap + vels snapshot → writes enemies[i].AX/AY
-    ├── goroutine [n/8..n/4)  reads boidMap + vels snapshot → writes enemies[i].AX/AY
+    ├── goroutine [0..n/8)    reads boidMap + snaps snapshot → writes enemies[i].AccX/AccY
+    ├── goroutine [n/8..n/4)  reads boidMap + snaps snapshot → writes enemies[i].AccX/AccY
     ├── ...
-    └── goroutine [7n/8..n)   reads boidMap + vels snapshot → writes enemies[i].AX/AY
+    └── goroutine [7n/8..n)   reads boidMap + snaps snapshot → writes enemies[i].AccX/AccY
   wg.Wait()               ← blocks until all workers done
-  updateEnemies()         ← single-threaded (uses freshly written AX/AY)
+  updateEnemies()         ← single-threaded (uses freshly written AccX/AccY)
 ```
 
-**Snapshot pattern** — before parallelizing, VX/VY of all enemies are copied into
-a local `[]vel` slice. Goroutines read from this snapshot (immutable), write only
-to their own chunk of `enemies[i].AX/AY`. This avoids data races without any mutex.
+**Snapshot pattern** — before parallelizing, VelX/VelY of all enemies are copied into
+a local `[]snap` slice. Goroutines read from this snapshot (immutable), write only
+to their own chunk of `enemies[i].AccX/AccY`. This avoids data races without any mutex.
 
 **Why not one goroutine per enemy?** Goroutine creation has overhead (~1µs).
 With 3752 enemies × 120 FPS = 450k goroutine launches/sec — marginal.
@@ -167,7 +167,7 @@ Worker pool (NumCPU goroutines) amortizes this: each goroutine processes n/CPU e
 | Zero value check | `pixel.go` | `cfg.Color.A == 0` detects Boid type |
 | Sentinel error | `game.go` | `errors.New("exit")` for clean Ebiten exit |
 | `sync.WaitGroup` | `boids.go` | Synchronizes worker goroutines in calcAcceleration |
-| Snapshot before parallel work | `boids.go` | `[]vel` copy → race-free reads in goroutines |
+| Snapshot before parallel work | `boids.go` | `[]snap` copy → race-free reads in goroutines |
 | Closure argument capture | `boids.go` | `go func(start, end int)` avoids loop variable capture bug |
 | `init()` | `main.go`, `sound.go`, `level.go` | One-time setup before `main()` |
 | `var` over `const` for flags | `main.go` | Avoids linter "always true/false" warnings |
