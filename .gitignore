@@ -11,3 +11,6 @@ boids-macos
 .idea/
 *.iml
 .DS_Store
+
+# Brain — вивчені ваги нейрона (генеруються під час гри)
+brain_weights.json

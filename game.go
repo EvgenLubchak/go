@@ -27,6 +27,12 @@ type Game struct {
 	// Фіксований 2D масив — розмір відомий на компіляції, пам'ять одним блоком.
 	boidMap [boidMapH][boidMapW]int
 
+	// [СТИГМЕРГІЯ] Сітка «феромонів фрустрації»: де учні застрягають/б'ються об
+	// стіни — накопичується слід, від якого рій відштовхується (і з часом тане).
+	// Той самий патерн безпеки, що й boidMap: пишемо однопотоково (updateEnemies),
+	// читаємо паралельно (calcAcceleration) — фази не перетинаються, гонок нема.
+	frustration [boidMapH][boidMapW]float32
+
 	tick       int     // лічильник кадрів
 	difficulty float32 // множник складності (1.0 = старт)
 
@@ -58,11 +64,17 @@ func (g *Game) restart() {
 			g.boidMap[y][x] = 0
 		}
 	}
+	for y := range g.frustration {
+		for x := range g.frustration[y] {
+			g.frustration[y][x] = 0
+		}
+	}
 }
 
 // Update — головний цикл логіки, викликається ~60 разів на секунду.
 func (g *Game) Update() error {
 	if ebiten.IsKeyPressed(ebiten.KeyEscape) {
+		g.saveBrains() // зберігаємо мозок перед виходом
 		return errExit
 	}
 
@@ -80,7 +92,7 @@ func (g *Game) Update() error {
 
 	// % — залишок від ділення (як в PHP/JS). tick%levelUpEvery==0 → новий рівень.
 	g.tick++
-	if g.tick%levelUpEvery == 0 && g.difficulty < maxDifficulty {
+	if difficultyGrowth && g.tick%levelUpEvery == 0 && g.difficulty < maxDifficulty {
 		g.difficulty += difficultyStep
 		startBeat(g.difficulty) // темп зростає щорівня
 	}
@@ -101,6 +113,20 @@ func (g *Game) Update() error {
 	g.removeDeadEnemies()
 	g.checkCollisions()
 	return nil
+}
+
+// saveBrains зберігає ваги першого Learner-ворога у файл.
+//
+// [GO: JSON PERSISTENCE]
+// Зберігаємо тільки першого — всі Learner-и починають з однакових ваг,
+// тому зберігати кожного окремо не потрібно на цьому етапі.
+func (g *Game) saveBrains() {
+	for _, e := range g.enemies {
+		if e.Brain != nil {
+			SaveBrain(e.Brain)
+			return
+		}
+	}
 }
 
 // Layout — розмір логічного екрану (Ebiten масштабує під вікно).

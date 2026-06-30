@@ -23,7 +23,8 @@ type EnemyConfig struct {
 	PounceMulti     float32    // множник кидка при зближенні
 	MaxHP           int        // початкове HP
 	Color           color.RGBA // базовий колір; A==0 → колір визначається Aggression
-	Label           string     // мітка всередині пікселя
+	Label           string     // мітка всередині пікселя (ЛИШЕ відображення)
+	IsLearner       bool       // true → створюємо Brain (Q-learning); незалежно від Label
 }
 
 // [GO: PACKAGE-LEVEL VAR]
@@ -96,6 +97,26 @@ var (
 		Label:           "",
 	}
 
+	// ConfigLearner — ворог-учень з нейронною мережею замість захардкоджених правил.
+	// Не використовує AggressionForce/PounceMulti — замість них Brain підбирає ваги сам.
+	// MaxSpeed і DetectionRange задають фізичні межі, а рішення приймає нейрон.
+	ConfigLearner = EnemyConfig{
+		WanderStrength:  0.1, // мінімальне блукання для дослідження
+		AlignmentRate:   0.0, // не флокується — думає сам
+		CohesionRate:    0.0,
+		SeparationRate:  0.01,
+		MaxSpeed:        0.5, // середня швидкість
+		AggressionForce: 0.0, // НЕ використовується — замість цього Brain
+		BurstChance:     0.0,
+		BurstForce:      0.0,
+		DetectionRange:  300.0, // бачить далеко — щоб було що вивчати
+		PounceMulti:     0.0,
+		MaxHP:           8,                            // живучий — більше часу на навчання
+		Color:           color.RGBA{0, 255, 100, 255}, // зелений — учень
+		Label:           "AI",
+		IsLearner:       true, // ← саме це вмикає мозок, а не мітка
+	}
+
 	ConfigGroup = EnemyConfig{
 		WanderStrength:  0.02,  // майже без хаосу — плавний рух
 		AlignmentRate:   0.08,  // сильно рівняється на сусідів (головний пріоритет)
@@ -121,9 +142,11 @@ type Pixel struct {
 	Aggression float32 // 0.0..1.0: для Boid — рандомний, для інших — 1.0
 	HP, MaxHP  int
 	HitTimer   int
+	HitWall    bool // [RL] чи врізався у стіну цього кадру (сигнал штрафу для Brain)
 	Color      color.RGBA
 	Label      string
 	Cfg        EnemyConfig // конфіг типу (порожній для гравця)
+	Brain      *Brain      // нейронна мережа (nil для звичайних ворогів, не nil для Learner)
 }
 
 // aggressionColor повертає колір від синього (пасивний) до червоного (агресивний).
@@ -142,7 +165,7 @@ func aggressionColor(a float32) color.RGBA {
 // i % len(configs) циклічно перебирає типи: 0,1,2,0,1,2,...
 func newEnemies(count int) []Pixel {
 	//configs := []EnemyConfig{ConfigBoid, ConfigPredator, ConfigSpeeder, ConfigHP, ConfigGroup}
-	configs := []EnemyConfig{ConfigPredator, ConfigGroup}
+	configs := []EnemyConfig{ConfigLearner}
 	enemies := make([]Pixel, count)
 
 	for i := range enemies {
@@ -168,6 +191,20 @@ func newEnemies(count int) []Pixel {
 			spawnY = float32(rand.Intn(screenHeight - pixelSize))
 		}
 
+		// [GO: POINTER = nil для звичайних ворогів]
+		// Brain створюємо тільки для Learner (cfg.IsLearner) — інші типи
+		// користуються правилами з EnemyConfig. Тригер — прапорець, НЕ мітка,
+		// тож Label можна задати будь-який (хоч порожній).
+		// Learner: спочатку пробуємо завантажити збережені ваги (LoadBrain);
+		// якщо файлу немає — створюємо новий мозок з рандомними вагами.
+		var brain *Brain
+		if cfg.IsLearner {
+			brain = LoadBrain()
+			if brain == nil {
+				brain = NewBrain()
+			}
+		}
+
 		enemies[i] = Pixel{
 			X:          spawnX,
 			Y:          spawnY,
@@ -179,6 +216,7 @@ func newEnemies(count int) []Pixel {
 			Color:      col,
 			Label:      cfg.Label,
 			Cfg:        cfg,
+			Brain:      brain,
 		}
 	}
 	return enemies

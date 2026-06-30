@@ -58,6 +58,28 @@ func drawPixel(screen *ebiten.Image, p Pixel) {
 	}
 }
 
+// drawBrainSensors візуалізує «під капотом» Q-learner-а:
+//   - 8 whiskers: лінія в кожен напрямок, довжина = вільний простір до стіни,
+//     колір від зеленого (чисто) до червоного (стіна близько);
+//   - жовта стрілка — напрямок дії, яку мережа щойно обрала.
+func drawBrainSensors(screen *ebiten.Image, e Pixel, cx, cy float32) {
+	for i := 0; i < brainWhiskers; i++ {
+		w := e.Brain.lastWhiskers[i]
+		length := float32(whiskerRange)
+		if w > 0 {
+			length = whiskerRange * (1 - w) // відстань до стіни
+		}
+		ex := cx + dirs8[i][0]*length
+		ey := cy + dirs8[i][1]*length
+		col := color.RGBA{R: uint8(60 + 195*w), G: uint8(200 * (1 - w)), B: 60, A: 150}
+		vector.StrokeLine(screen, cx, cy, ex, ey, 1, col, false)
+	}
+	// Обрана дія — яскрава жовта стрілка.
+	a := e.Brain.lastAction
+	vector.StrokeLine(screen, cx, cy, cx+dirs8[a][0]*45, cy+dirs8[a][1]*45, 2,
+		color.RGBA{255, 255, 0, 255}, false)
+}
+
 // Draw малює поточний стан на екрані.
 func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(color.RGBA{15, 15, 25, 255}) // темно-синій фон замість чистого чорного
@@ -76,12 +98,35 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		}
 	}
 
+	// [СТИГМЕРГІЯ] Теплова карта феромонів фрустрації (під ворогами).
+	// Чим яскравіше-червоніше — тим сильніший слід «тут застрягали».
+	if showFrustration && pheromonesEnabled {
+		for row := 0; row < boidMapH; row++ {
+			for col := 0; col < boidMapW; col++ {
+				f := g.frustration[row][col]
+				if f <= 0.05 {
+					continue
+				}
+				a := f * 12
+				if a > 140 {
+					a = 140
+				}
+				x := float32(col * pixelSize)
+				y := float32(row * pixelSize)
+				vector.FillRect(screen, x, y, pixelSize, pixelSize, color.RGBA{255, 80, 0, uint8(a)}, false)
+			}
+		}
+	}
+
 	for _, e := range g.enemies {
 		// Радіус огляду — дуже прозоре кільце навколо ворога
 		cx := e.X + pixelSize/2
 		cy := e.Y + pixelSize/2
 		if showDetectionCircle {
 			vector.StrokeCircle(screen, cx, cy, e.Cfg.DetectionRange, 1, color.RGBA{255, 255, 255, 5}, false)
+		}
+		if showWhiskers && e.Brain != nil {
+			drawBrainSensors(screen, e, cx, cy)
 		}
 		drawPixel(screen, e)
 	}

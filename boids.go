@@ -81,8 +81,8 @@ func (g *Game) calcAcceleration() {
 				cy := int(e.Y) / pixelSize
 
 				var avgVX, avgVY float32
-				var avgX, avgY float32   // cohesion: центр маси сусідів
-				var sepX, sepY float32   // separation: сума векторів відштовхування
+				var avgX, avgY float32 // cohesion: центр маси сусідів
+				var sepX, sepY float32 // separation: сума векторів відштовхування
 				count := 0
 
 				for dy := -visionRadius; dy <= visionRadius; dy++ {
@@ -135,11 +135,33 @@ func (g *Game) calcAcceleration() {
 					e.AccY = 0
 				}
 
-				// Chase: пишемо тільки у g.enemies[i] — виключно наш chunk
+				// Chase або Brain — залежить від типу ворога.
 				fdx := g.player.X - e.X
 				fdy := g.player.Y - e.Y
 				dist := float32(math.Sqrt(float64(fdx*fdx + fdy*fdy)))
-				if dist > 0 && e.Aggression > 0 {
+
+				if e.Brain != nil {
+					// [RL: Q-LEARNING — агент без вчителя]
+					// 1. state: куди гравець + 8 whiskers (зір на стіни)
+					// 2. Step: оцінює минулу дію за reward і обирає нову (ε-greedy)
+					// 3. дія = один з 8 напрямків → прискорення туди
+					// e.HitWall (наслідок минулого руху, виставлений у updateEnemies)
+					// стає сигналом штрафу за зіткнення зі стіною.
+					state := GatherInputs(e, &g.player)
+					action := e.Brain.Step(state, dist, e.HitWall)
+
+					e.AccX += dirs8[action][0] * brainForce * g.difficulty
+					e.AccY += dirs8[action][1] * brainForce * g.difficulty
+
+					// [СТИГМЕРГІЯ] Відштовхування від слідів фрустрації навколо (лише
+					// якщо феромони ввімкнені): рій уникає місць, де вже застрягав.
+					if pheromonesEnabled {
+						ffx, ffy := g.frustrationForce(e.X, e.Y)
+						e.AccX += ffx
+						e.AccY += ffy
+					}
+				} else if dist > 0 && e.Aggression > 0 {
+					// Звичайні вороги: hardcoded chase з pounce
 					if dist < e.Cfg.DetectionRange {
 						pounce := (1 - dist/e.Cfg.DetectionRange) * e.Cfg.PounceMulti
 						e.AccX += (fdx / dist) * e.Cfg.AggressionForce * e.Aggression * g.difficulty * (1 + pounce)
@@ -158,8 +180,14 @@ func (g *Game) calcAcceleration() {
 
 // updateEnemies застосовує блукання, burst, прискорення, damping, рух і відбивання.
 func (g *Game) updateEnemies() {
+	g.decayFrustration() // [СТИГМЕРГІЯ] сліди тануть щокадру (однопотоково)
+
 	for i := range g.enemies {
 		e := &g.enemies[i]
+
+		// [RL] Скидаємо прапор удару — фіксуємо зіткнення саме цього кадру.
+		// calcAcceleration наступного кадру прочитає його як сигнал штрафу.
+		e.HitWall = false
 
 		// [GO: e.Cfg.WanderStrength] — Speeder блукає хаотично, Predator — плавно
 		e.VelX += (rand.Float32() - 0.5) * e.Cfg.WanderStrength
@@ -198,29 +226,87 @@ func (g *Game) updateEnemies() {
 			e.X = newX
 		} else {
 			e.VelX = -e.VelX
+			e.HitWall = true
 		}
 		if !isWallRect(e.X, newY) {
 			e.Y = newY
 		} else {
 			e.VelY = -e.VelY
+			e.HitWall = true
 		}
 
 		// Додатковий захист від виходу за межі (якщо ворог якось вийшов)
 		if e.X < 0 {
 			e.X = 0
 			e.VelX = -e.VelX
+			e.HitWall = true
 		}
 		if e.X > screenWidth-pixelSize {
 			e.X = screenWidth - pixelSize
 			e.VelX = -e.VelX
+			e.HitWall = true
 		}
 		if e.Y < 0 {
 			e.Y = 0
 			e.VelY = -e.VelY
+			e.HitWall = true
 		}
 		if e.Y > screenHeight-pixelSize {
 			e.Y = screenHeight - pixelSize
 			e.VelY = -e.VelY
+			e.HitWall = true
+		}
+
+		// [СТИГМЕРГІЯ] Учень ОФІЦІЙНО застряг (спрацювала фрустрація) → лишаємо слід
+		// саме в цій клітинці (лише якщо феромони ввімкнені). НЕ на кожен дотик
+		// стіни (інакше «слимачий слід»), а лише в реальних глухих кутах.
+		if pheromonesEnabled && e.Brain != nil && e.Brain.markStuck {
+			e.Brain.markStuck = false
+			cx := int(e.X) / pixelSize
+			cy := int(e.Y) / pixelSize
+			if cx >= 0 && cx < boidMapW && cy >= 0 && cy < boidMapH {
+				g.frustration[cy][cx] += frustrationDeposit
+			}
 		}
 	}
+}
+
+// decayFrustration притлумлює всі сліди феромонів (однопотоково, щокадру).
+// Завдяки затуханню «погане місце» з часом забувається й стає прохідним знову.
+func (g *Game) decayFrustration() {
+	for y := range g.frustration {
+		for x := range g.frustration[y] {
+			g.frustration[y][x] *= frustrationDecay
+		}
+	}
+}
+
+// frustrationForce — сила відштовхування від слідів феромонів навколо точки.
+// Сумуємо вектори «від клітинки-сліду до агента», зважені силою сліду й поділені
+// на відстань (ближчий слід штовхає сильніше). Лише ЧИТАННЯ сітки → безпечно
+// в паралельному calcAcceleration (запис відбувається в окремій фазі).
+func (g *Game) frustrationForce(x, y float32) (fx, fy float32) {
+	cx := int(x) / pixelSize
+	cy := int(y) / pixelSize
+	for dy := -frustrationRadius; dy <= frustrationRadius; dy++ {
+		for dx := -frustrationRadius; dx <= frustrationRadius; dx++ {
+			nx, ny := cx+dx, cy+dy
+			if nx < 0 || nx >= boidMapW || ny < 0 || ny >= boidMapH {
+				continue
+			}
+			f := g.frustration[ny][nx]
+			if f <= 0 {
+				continue
+			}
+			rx := x - (float32(nx)*pixelSize + pixelSize/2)
+			ry := y - (float32(ny)*pixelSize + pixelSize/2)
+			d := float32(math.Sqrt(float64(rx*rx + ry*ry)))
+			if d < 1 {
+				d = 1
+			}
+			fx += rx / d * f
+			fy += ry / d * f
+		}
+	}
+	return fx * frustrationRepel, fy * frustrationRepel
 }
