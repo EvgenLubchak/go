@@ -176,4 +176,9 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		drawText(screen, "Use arrows / WASD to escape!", gameOverFontSize*0.6, cx, cy+10, gray)
 		drawText(screen, "R - restart    ESC - exit", gameOverFontSize*0.6, cx, cy+28, white)
 	}
+
+	// [МЕТРИКИ] Панель кривої навчання (клавіша G) — поверх усього.
+	if showMetrics {
+		g.metrics.draw(screen)
+	}
 }

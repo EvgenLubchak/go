@@ -43,6 +43,8 @@ type Game struct {
 	// 2D — змінюється ЛИШЕ камера/рендер. Перемикач: клавіша F.
 	firstPerson bool    // false = вид зверху; true = від першої особи
 	camAngle    float32 // напрямок камери (рад), слідує за напрямком руху гравця
+
+	metrics Metrics // [МЕТРИКИ] крива навчання рою (клавіша G)
 }
 
 // [GO: SENTINEL ERROR]
@@ -93,6 +95,11 @@ func (g *Game) Update() error {
 		g.firstPerson = !g.firstPerson
 	}
 
+	// G — перемикач панелі метрик (крива навчання)
+	if inpututil.IsKeyJustPressed(ebiten.KeyG) {
+		showMetrics = !showMetrics
+	}
+
 	if g.gameOver {
 		if ebiten.IsKeyPressed(ebiten.KeyR) {
 			g.restart()
@@ -119,7 +126,8 @@ func (g *Game) Update() error {
 	g.playerAttack()
 	g.updateBoidMap()
 	g.calcAcceleration()
-	g.trainBrains() // [SHARED BRAIN] навчання мереж раз/кадр, ОДНОПОТОКОВО
+	g.trainBrains()      // [SHARED BRAIN] навчання мереж раз/кадр, ОДНОПОТОКОВО
+	g.metrics.collect(g) // [МЕТРИКИ] збір показників навчання (однопотоково)
 	g.updateEnemies()
 	g.removeDeadEnemies()
 	g.checkCollisions()

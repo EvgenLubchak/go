@@ -67,6 +67,7 @@ var (
 	soundEnabled        = false // false — вимкнути фоновий ритм
 	difficultyGrowth    = false // false — складність не росте (для тренування AI)
 	showWhiskers        = false // показувати сенсори стін і обрану дію Learner-а
+	showMetrics         = true  // показувати панель метрик навчання (крива reward/TD) — клавіша G
 	showFrustration     = false // показувати теплову карту феромонів фрустрації
 	pheromonesEnabled   = true  // вмикає феромони фрустрації (стигмергію); false = чистий Q-learning без слідів
 	epsilonDecayEnabled = false // ε: false = постійна (qEpsilonConst); true = автоспад max→min

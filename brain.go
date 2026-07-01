@@ -134,6 +134,12 @@ type Net struct {
 	// через РОЗДІЛЕННЯ ФАЗ: forward читається паралельно, train пише однопотоково
 	// (g.trainBrains) — фази не перетинаються.
 	mu sync.Mutex
+
+	// [МЕТРИКИ] акумулятори за період (скидаються в Metrics.collect). Пишуться
+	// у tdUpdate (однопотоково в trainBrains) → без локу.
+	mTDSum float32 // сума |TD-error| (сирого) — «здивування» мережі
+	mQSum  float32 // сума max Q(s) — канарка розбіжності (росте безмежно = біда)
+	mTDN   int     // кількість оновлень за період
 }
 
 // Brain — «голова» одного ворога-учня: указник на мережу + ОСОБИСТА пам'ять.
@@ -159,6 +165,7 @@ type Brain struct {
 	// Для візуалізації (читає Draw, пише calcAcceleration — різні фази, без гонки).
 	lastWhiskers [brainWhiskers]float32
 	lastAction   int
+	lastReward   float32 // [МЕТРИКИ] нагорода останнього кроку (для середнього по рою)
 }
 
 // tanh — активація прихованого шару. Похідна: tanh'(z) = 1 - tanh(z)².
@@ -376,6 +383,7 @@ func (b *Brain) Step(state [brainInputs]float32, dist float32, hitWall bool) int
 		// пішли минулого кадру. Градієнт «тримай дистанцію» ще ДО зіткнення.
 		reward += rewardNearWall * b.prevState[5+b.prevAction]
 
+		b.lastReward = reward // [МЕТРИКИ] для середньої нагороди по рою
 		b.net.remember(transition{s: b.prevState, a: b.prevAction, r: reward, s2: state})
 	}
 
@@ -437,8 +445,13 @@ func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainI
 
 	// Поточна оцінка + активації прихованого шару (для backprop) — по ЖИВІЙ мережі.
 	q1, hidden := n.forwardQ(s)
+	rawTD := target - q1[a]
+	// [МЕТРИКИ] сира величина «здивування» + рівень Q (канарки навчання/розбіжності).
+	n.mTDSum += float32(math.Abs(float64(rawTD)))
+	n.mQSum += q1[argmaxQ(q1)]
+	n.mTDN++
 	// [DQN: ERROR CLIPPING] обмежуємо TD-помилку до [-1,1].
-	tdErr := clamp(target-q1[a], -1, 1)
+	tdErr := clamp(rawTD, -1, 1)
 
 	// Вихідний шар: похибку має лише нейрон дії a (лінійний вихід → похідна 1).
 	// Прихований шар: проштовхуємо похибку назад через W2[a].
