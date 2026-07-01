@@ -38,6 +38,11 @@ type Game struct {
 
 	attackCooldown int // кадрів до наступного удару
 	attackTimer    int // кадрів до кінця анімації кола
+
+	// [RAYCASTER] Вид від першої особи (Wolfenstein-стиль). Симуляція лишається
+	// 2D — змінюється ЛИШЕ камера/рендер. Перемикач: клавіша F.
+	firstPerson bool    // false = вид зверху; true = від першої особи
+	camAngle    float32 // напрямок камери (рад), слідує за напрямком руху гравця
 }
 
 // [GO: SENTINEL ERROR]
@@ -81,6 +86,11 @@ func (g *Game) Update() error {
 	// P — вручну переключити патерн (для експериментів з ритмом)
 	if inpututil.IsKeyJustPressed(ebiten.KeyP) {
 		startBeat(g.difficulty)
+	}
+
+	// F — перемикач виду: зверху ↔ від першої особи (raycaster)
+	if inpututil.IsKeyJustPressed(ebiten.KeyF) {
+		g.firstPerson = !g.firstPerson
 	}
 
 	if g.gameOver {

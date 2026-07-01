@@ -16,7 +16,7 @@ const (
 	screenWidth  = 1680
 	screenHeight = 960
 	pixelSize    = 20
-	enemyCount   = 300
+	enemyCount   = 100
 
 	// Глобальна фізика — однакова для всіх типів ворогів.
 	// Поведінка (швидкість, агресія, burst) — в EnemyConfig у pixel.go.
@@ -39,6 +39,7 @@ const (
 	playerAccel     = 0.45 // прискорення при натисканні клавіші
 	playerFriction  = 0.90 // тертя щокадру
 	playerBaseSpeed = 5.0  // макс швидкість гравця на рівні 1
+	playerTurnSpeed = 0.03 // [RAYCASTER] швидкість повороту камери (рад/кадр) у виді 1-ї особи
 
 	labelFontSize    = 6.0  // розмір шрифту мітки на пікселі
 	gameOverFontSize = 20.0 // розмір шрифту екрану GAME OVER

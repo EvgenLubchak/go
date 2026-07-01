@@ -82,65 +82,74 @@ func drawBrainSensors(screen *ebiten.Image, e Pixel, cx, cy float32) {
 
 // Draw малює поточний стан на екрані.
 func (g *Game) Draw(screen *ebiten.Image) {
-	screen.Fill(color.RGBA{15, 15, 25, 255}) // темно-синій фон замість чистого чорного
+	if g.firstPerson {
+		// [RAYCASTER] Вид від першої особи замість топ-дауну (клавіша F).
+		g.drawFirstPerson(screen)
+	} else {
+		screen.Fill(color.RGBA{15, 15, 25, 255}) // темно-синій фон замість чистого чорного
 
-	// Малюємо тайли рівня.
-	// Стіни — темно-сірі, підлога — не малюється (фон і є підлогою).
-	for row := 0; row < boidMapH; row++ {
-		for col := 0; col < boidMapW; col++ {
-			if tileMap[row][col] {
-				x := float32(col * pixelSize)
-				y := float32(row * pixelSize)
-				vector.FillRect(screen, x, y, pixelSize, pixelSize, color.RGBA{55, 55, 75, 255}, false)
-				// Тонкий контур стіни для об'єму
-				vector.StrokeRect(screen, x, y, pixelSize, pixelSize, 1, color.RGBA{80, 80, 110, 255}, false)
-			}
-		}
-	}
-
-	// [СТИГМЕРГІЯ] Теплова карта феромонів фрустрації (під ворогами).
-	// Чим яскравіше-червоніше — тим сильніший слід «тут застрягали».
-	if showFrustration && pheromonesEnabled {
+		// Малюємо тайли рівня.
+		// Стіни — темно-сірі, підлога — не малюється (фон і є підлогою).
 		for row := 0; row < boidMapH; row++ {
 			for col := 0; col < boidMapW; col++ {
-				f := g.frustration[row][col]
-				if f <= 0.05 {
-					continue
+				if tileMap[row][col] {
+					x := float32(col * pixelSize)
+					y := float32(row * pixelSize)
+					vector.FillRect(screen, x, y, pixelSize, pixelSize, color.RGBA{55, 55, 75, 255}, false)
+					// Тонкий контур стіни для об'єму
+					vector.StrokeRect(screen, x, y, pixelSize, pixelSize, 1, color.RGBA{80, 80, 110, 255}, false)
 				}
-				a := f * 12
-				if a > 140 {
-					a = 140
-				}
-				x := float32(col * pixelSize)
-				y := float32(row * pixelSize)
-				vector.FillRect(screen, x, y, pixelSize, pixelSize, color.RGBA{255, 80, 0, uint8(a)}, false)
 			}
 		}
-	}
 
-	for _, e := range g.enemies {
-		// Радіус огляду — дуже прозоре кільце навколо ворога
-		cx := e.X + pixelSize/2
-		cy := e.Y + pixelSize/2
-		if showDetectionCircle {
-			vector.StrokeCircle(screen, cx, cy, e.Cfg.DetectionRange, 1, color.RGBA{255, 255, 255, 5}, false)
-		}
-		if showWhiskers && e.Brain != nil {
-			drawBrainSensors(screen, e, cx, cy)
-		}
-		drawPixel(screen, e)
-	}
-	drawPixel(screen, g.player)
+		// [МЕЖА РІВНЯ] Бурштинова рамка по краю поля — орієнтир для wrap-переходу
+		// (крізь ці межі гравець «протікає» на інший бік).
+		vector.StrokeRect(screen, 1, 1, screenWidth-2, screenHeight-2, 2, color.RGBA{170, 110, 40, 200}, false)
 
-	// Кільце атаки — StrokeCircle (контур) замість DrawFilledCircle (заповнене).
-	// Виглядає чистіше як індикатор зони удару і не засліплює.
-	// alpha = 180..0 — плавно зникає разом з attackTimer.
-	if g.attackTimer > 0 {
-		cx := g.player.X + pixelSize/2
-		cy := g.player.Y + pixelSize/2
-		alpha := uint8(180 * g.attackTimer / attackDuration)
-		vector.StrokeCircle(screen, cx, cy, attackRadius, 2, color.RGBA{255, 255, 80, alpha}, true)
-	}
+		// [СТИГМЕРГІЯ] Теплова карта феромонів фрустрації (під ворогами).
+		// Чим яскравіше-червоніше — тим сильніший слід «тут застрягали».
+		if showFrustration && pheromonesEnabled {
+			for row := 0; row < boidMapH; row++ {
+				for col := 0; col < boidMapW; col++ {
+					f := g.frustration[row][col]
+					if f <= 0.05 {
+						continue
+					}
+					a := f * 12
+					if a > 140 {
+						a = 140
+					}
+					x := float32(col * pixelSize)
+					y := float32(row * pixelSize)
+					vector.FillRect(screen, x, y, pixelSize, pixelSize, color.RGBA{255, 80, 0, uint8(a)}, false)
+				}
+			}
+		}
+
+		for _, e := range g.enemies {
+			// Радіус огляду — дуже прозоре кільце навколо ворога
+			cx := e.X + pixelSize/2
+			cy := e.Y + pixelSize/2
+			if showDetectionCircle {
+				vector.StrokeCircle(screen, cx, cy, e.Cfg.DetectionRange, 1, color.RGBA{255, 255, 255, 5}, false)
+			}
+			if showWhiskers && e.Brain != nil {
+				drawBrainSensors(screen, e, cx, cy)
+			}
+			drawPixel(screen, e)
+		}
+		drawPixel(screen, g.player)
+
+		// Кільце атаки — StrokeCircle (контур) замість DrawFilledCircle (заповнене).
+		// Виглядає чистіше як індикатор зони удару і не засліплює.
+		// alpha = 180..0 — плавно зникає разом з attackTimer.
+		if g.attackTimer > 0 {
+			cx := g.player.X + pixelSize/2
+			cy := g.player.Y + pixelSize/2
+			alpha := uint8(180 * g.attackTimer / attackDuration)
+			vector.StrokeCircle(screen, cx, cy, attackRadius, 2, color.RGBA{255, 255, 80, alpha}, true)
+		}
+	} // кінець топ-даун-гілки
 
 	// HUD
 	level := g.tick/levelUpEvery + 1

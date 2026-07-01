@@ -8,9 +8,12 @@
 | `game.go` | `Game` struct, `Update()` game loop, `restart()` |
 | `pixel.go` | `Pixel` struct, `EnemyConfig`, 3 enemy type configs, `newEnemies()` |
 | `player.go` | Player input handling, velocity/friction physics |
-| `boids.go` | Boid AI: `updateBoidMap`, `calcAcceleration`, `updateEnemies` |
+| `boids.go` | Boid AI: `updateBoidMap`, `calcAcceleration`, `updateEnemies`, стигмергія (феромони) |
+| `brain.go` | Q-learning мозок: `Net`/`Brain`, forward, `Step`, `tdUpdate`, whiskers, save/load. Див. [ai-brain.md](ai-brain.md) |
+| `level.go` | Тайлова мапа рівня, спавни, `isWallAt`/`isWallRect` |
 | `combat.go` | AABB collision, SPACE attack, HP damage, dead enemy removal |
-| `render.go` | All drawing: pixels, HP bars, HUD, game over screen |
+| `render.go` | Малювання виду ЗВЕРХУ: pixels, HP bars, HUD, game over |
+| `render3d.go` | Raycaster: вид від 1-ї особи (стіни + спрайти). Див. [raycaster.md](raycaster.md) |
 | `sound.go` | Procedural 8-bit audio, drum patterns, BPM scaling |
 
 ---

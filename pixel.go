@@ -105,7 +105,7 @@ var (
 		AlignmentRate:   0.0, // не флокується — думає сам
 		CohesionRate:    0.0,
 		SeparationRate:  0.01,
-		MaxSpeed:        0.9, // середня швидкість
+		MaxSpeed:        0.8, // середня швидкість
 		AggressionForce: 0.0, // НЕ використовується — замість цього Brain
 		BurstChance:     0.0,
 		BurstForce:      0.0,
@@ -165,7 +165,7 @@ func aggressionColor(a float32) color.RGBA {
 // i % len(configs) циклічно перебирає типи: 0,1,2,0,1,2,...
 func newEnemies(count int) []Pixel {
 	//configs := []EnemyConfig{ConfigBoid, ConfigPredator, ConfigSpeeder, ConfigHP, ConfigGroup}
-	configs := []EnemyConfig{ConfigGroup}
+	configs := []EnemyConfig{ConfigLearner}
 	enemies := make([]Pixel, count)
 
 	// [SHARED BRAIN] У режимі sharedBrain усі учні ділять ОДНУ мережу (вулик-розум).
