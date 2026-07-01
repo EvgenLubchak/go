@@ -105,7 +105,7 @@ var (
 		AlignmentRate:   0.0, // не флокується — думає сам
 		CohesionRate:    0.0,
 		SeparationRate:  0.01,
-		MaxSpeed:        0.5, // середня швидкість
+		MaxSpeed:        0.9, // середня швидкість
 		AggressionForce: 0.0, // НЕ використовується — замість цього Brain
 		BurstChance:     0.0,
 		BurstForce:      0.0,
@@ -113,7 +113,7 @@ var (
 		PounceMulti:     0.0,
 		MaxHP:           8,                            // живучий — більше часу на навчання
 		Color:           color.RGBA{0, 255, 100, 255}, // зелений — учень
-		Label:           "AI",
+		Label:           "",
 		IsLearner:       true, // ← саме це вмикає мозок, а не мітка
 	}
 
@@ -165,8 +165,20 @@ func aggressionColor(a float32) color.RGBA {
 // i % len(configs) циклічно перебирає типи: 0,1,2,0,1,2,...
 func newEnemies(count int) []Pixel {
 	//configs := []EnemyConfig{ConfigBoid, ConfigPredator, ConfigSpeeder, ConfigHP, ConfigGroup}
-	configs := []EnemyConfig{ConfigLearner}
+	configs := []EnemyConfig{ConfigGroup}
 	enemies := make([]Pixel, count)
+
+	// [SHARED BRAIN] У режимі sharedBrain усі учні ділять ОДНУ мережу (вулик-розум).
+	// Створюємо її раз тут; нижче кожен Brain лише вказує на неї.
+	var sharedNet *Net
+	sharedLoaded := false
+	if sharedBrain {
+		if sharedNet = LoadNet(); sharedNet != nil {
+			sharedLoaded = true
+		} else {
+			sharedNet = NewNet()
+		}
+	}
 
 	for i := range enemies {
 		cfg := configs[i%len(configs)]
@@ -192,16 +204,26 @@ func newEnemies(count int) []Pixel {
 		}
 
 		// [GO: POINTER = nil для звичайних ворогів]
-		// Brain створюємо тільки для Learner (cfg.IsLearner) — інші типи
-		// користуються правилами з EnemyConfig. Тригер — прапорець, НЕ мітка,
-		// тож Label можна задати будь-який (хоч порожній).
-		// Learner: спочатку пробуємо завантажити збережені ваги (LoadBrain);
-		// якщо файлу немає — створюємо новий мозок з рандомними вагами.
+		// Brain створюємо тільки для Learner (cfg.IsLearner). Тригер — прапорець,
+		// НЕ мітка. У режимі sharedBrain усі вказують на спільну мережу; інакше —
+		// кожен має власну (завантажену з файлу або нову).
 		var brain *Brain
 		if cfg.IsLearner {
-			brain = LoadBrain()
-			if brain == nil {
-				brain = NewBrain()
+			if sharedBrain {
+				brain = NewBrainWith(sharedNet)
+				if sharedLoaded {
+					brain.age = qEpsilonDecay // завантажена = навчена → ε-floor
+				}
+			} else {
+				net := LoadNet()
+				loaded := net != nil
+				if net == nil {
+					net = NewNet()
+				}
+				brain = NewBrainWith(net)
+				if loaded {
+					brain.age = qEpsilonDecay // завантажений = навчений → ε-floor
+				}
 			}
 		}
 

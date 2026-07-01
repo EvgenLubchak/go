@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"sync"
 )
 
 // ==========================================================================
@@ -26,6 +27,11 @@ import (
 //   state(13) ─► hidden(16, tanh) ─► Q-values(8, лінійні)
 //   13 входів = 5 базових (dx,dy,dist,pVelX,pVelY) + 8 whiskers (сенсори стін)
 //   8 виходів = Q-значення для 8 напрямків руху. Дія = напрямок з найбільшим Q.
+//
+// [SHARED BRAIN] Поділ на Net + Brain:
+//   Net   — сама мережа (ваги + target + буфер досвіду). Може бути СПІЛЬНОЮ.
+//   Brain — «голова» одного ворога: указник на Net + ОСОБИСТА пам'ять агента.
+//   Режим sharedBrain (main.go): усі учні ділять один Net → «вулик-розум».
 // ==========================================================================
 
 const (
@@ -90,57 +96,6 @@ var dirs8 = [brainActions][2]float32{
 	{0, 1}, {-sqrt2inv, sqrt2inv}, {-1, 0}, {-sqrt2inv, -sqrt2inv},
 }
 
-// Brain — Q-мережа одного ворога-учня + його пам'ять для RL.
-//
-// [GO: ВАГИ ДВОХ ШАРІВ]
-// W1[j][i] — вхід i → прихований нейрон j;  W2[k][j] — прихований j → Q-вихід k.
-type Brain struct {
-	W1 [brainHidden][brainInputs]float32 // input → hidden
-	B1 [brainHidden]float32
-	W2 [brainActions][brainHidden]float32 // hidden → Q-values
-	B2 [brainActions]float32
-
-	// [DQN: TARGET NETWORK]
-	// Заморожена копія ваг. Беллман-ціль рахуємо ПО НІЙ, а не по живій мережі.
-	// Так ціль не «тікає» з кожним кроком (жива і target розв'язані) — навчання
-	// не женеться за власним хвостом. Раз на qTargetSync кроків копіюємо живі ваги.
-	tW1         [brainHidden][brainInputs]float32
-	tB1         [brainHidden]float32
-	tW2         [brainActions][brainHidden]float32
-	tB2         [brainActions]float32
-	syncCounter int
-
-	// [RL: ПАМ'ЯТЬ МІЖ КАДРАМИ]
-	// Щоб навчатись на переході (state, action, reward, nextState), треба
-	// пам'ятати, що було минулого кадру. Reward за дію стає відомий лише
-	// НАСТУПНОГО кадру (коли побачимо результат руху).
-	prevState  [brainInputs]float32
-	prevAction int
-	prevDist   float32
-	hasPrev    bool
-
-	// [3] вік мозку (к-сть викликів Step) — для автоспаду ε.
-	age int
-
-	// [2] anti-stuck: лічильник упертого биття в стіну і залишок кадрів «фрустрації».
-	stuckCounter int
-	frustration  int
-	markStuck    bool // [СТИГМЕРГІЯ] щойно «офіційно» застряг → лишити слід у клітинці
-
-	// [DQN: EXPERIENCE REPLAY]
-	// Кільцевий буфер минулих переходів. Замість навчання на свіжому (і сильно
-	// корельованому з попереднім) переході — щокадру беремо ВИПАДКОВУ вибірку
-	// зі старих. Це розриває кореляцію сусідніх кадрів і прибирає
-	// «catastrophic forgetting» (коли мережа забуває старе, переучуючись на нове).
-	replay     []transition
-	replayHead int
-	replayFull bool
-
-	// Для візуалізації (читає Draw, пише calcAcceleration — різні фази, без гонки).
-	lastWhiskers [brainWhiskers]float32
-	lastAction   int
-}
-
 // transition — один крок досвіду: (стан, дія, нагорода, наступний стан).
 // Це «одиниця пам'яті» для experience replay.
 type transition struct {
@@ -150,53 +105,115 @@ type transition struct {
 	s2 [brainInputs]float32
 }
 
+// Net — НЕЙРОМЕРЕЖА Q-агента: ваги + target-копія + буфер досвіду.
+//
+// Кілька Brain можуть указувати на ОДИН Net (режим sharedBrain=true) → «вулик-
+// розум»: усі ділять одну вивчену політику й спільний досвід.
+//
+// [GO: ВАГИ ДВОХ ШАРІВ] W1[j][i] — вхід i → прихований j; W2[k][j] — j → вихід k.
+type Net struct {
+	W1 [brainHidden][brainInputs]float32
+	B1 [brainHidden]float32
+	W2 [brainActions][brainHidden]float32
+	B2 [brainActions]float32
+
+	// [DQN: TARGET NETWORK] заморожена копія для Беллман-цілі (щоб не «тікала»).
+	tW1         [brainHidden][brainInputs]float32
+	tB1         [brainHidden]float32
+	tW2         [brainActions][brainHidden]float32
+	tB2         [brainActions]float32
+	syncCounter int
+
+	// [DQN: EXPERIENCE REPLAY] кільцевий буфер переходів.
+	replay     []transition
+	replayHead int
+	replayFull bool
+
+	// [GO: MUTEX] захищає СПІЛЬНИЙ буфер від одночасного запису з різних горутин
+	// (remember у паралельній фазі calcAcceleration). Ваги ж безпечні без локу
+	// через РОЗДІЛЕННЯ ФАЗ: forward читається паралельно, train пише однопотоково
+	// (g.trainBrains) — фази не перетинаються.
+	mu sync.Mutex
+}
+
+// Brain — «голова» одного ворога-учня: указник на мережу + ОСОБИСТА пам'ять.
+// Мережа може бути спільною; пам'ять (стан у часі, лічильники) — завжди своя,
+// тож агенти діють індивідуально, але вчаться в (можливо) спільну мережу.
+type Brain struct {
+	net *Net
+
+	// [RL: ПАМ'ЯТЬ МІЖ КАДРАМИ] — у кожного агента своя.
+	// Reward за дію відомий лише НАСТУПНОГО кадру (коли побачимо результат руху).
+	prevState  [brainInputs]float32
+	prevAction int
+	prevDist   float32
+	hasPrev    bool
+
+	age int // [3] вік (к-сть Step) — для автоспаду ε
+
+	// [2] anti-stuck: лічильник застрягання, залишок кадрів «фрустрації», прапорець сліду.
+	stuckCounter int
+	frustration  int
+	markStuck    bool
+
+	// Для візуалізації (читає Draw, пише calcAcceleration — різні фази, без гонки).
+	lastWhiskers [brainWhiskers]float32
+	lastAction   int
+}
+
 // tanh — активація прихованого шару. Похідна: tanh'(z) = 1 - tanh(z)².
 func tanh(x float32) float32 {
 	return float32(math.Tanh(float64(x)))
 }
 
-// NewBrain створює Q-мережу з Xavier-ініціалізацією (масштаб ~1/√fan_in),
+// NewNet створює мережу з Xavier-ініціалізацією (масштаб ~1/√fan_in),
 // щоб tanh не входив у насичення і градієнт не зникав.
-func NewBrain() *Brain {
-	b := &Brain{}
+func NewNet() *Net {
+	n := &Net{}
 	s1 := float32(math.Sqrt(1.0 / brainInputs))
-	for j := range b.W1 {
-		for i := range b.W1[j] {
-			b.W1[j][i] = (rand.Float32()*2 - 1) * s1
+	for j := range n.W1 {
+		for i := range n.W1[j] {
+			n.W1[j][i] = (rand.Float32()*2 - 1) * s1
 		}
 	}
 	s2 := float32(math.Sqrt(1.0 / brainHidden))
-	for k := range b.W2 {
-		for j := range b.W2[k] {
-			b.W2[k][j] = (rand.Float32()*2 - 1) * s2
+	for k := range n.W2 {
+		for j := range n.W2[k] {
+			n.W2[k][j] = (rand.Float32()*2 - 1) * s2
 		}
 	}
-	b.syncTarget() // target стартує копією живих ваг
-	return b
+	n.syncTarget() // target стартує копією живих ваг
+	return n
 }
+
+// NewBrain — голова агента з ВЛАСНОЮ новою мережею (незалежний режим).
+func NewBrain() *Brain { return &Brain{net: NewNet()} }
+
+// NewBrainWith — голова агента, що ДІЛИТЬ передану мережу (режим sharedBrain).
+func NewBrainWith(net *Net) *Brain { return &Brain{net: net} }
 
 // syncTarget копіює живі ваги в target-мережу.
 // [GO: масиви — значимі типи] присвоєння масиву копіює його повністю.
-func (b *Brain) syncTarget() {
-	b.tW1, b.tB1, b.tW2, b.tB2 = b.W1, b.B1, b.W2, b.B2
+func (n *Net) syncTarget() {
+	n.tW1, n.tB1, n.tW2, n.tB2 = n.W1, n.B1, n.W2, n.B2
 }
 
 // forwardQTarget — як forwardQ, але по ЗАМОРОЖЕНИХ (target) вагах.
 // Використовується лише для обрахунку Беллман-цілі.
-func (b *Brain) forwardQTarget(state [brainInputs]float32) [brainActions]float32 {
+func (n *Net) forwardQTarget(state [brainInputs]float32) [brainActions]float32 {
 	var hidden [brainHidden]float32
 	for j := 0; j < brainHidden; j++ {
-		z := b.tB1[j]
+		z := n.tB1[j]
 		for i := 0; i < brainInputs; i++ {
-			z += state[i] * b.tW1[j][i]
+			z += state[i] * n.tW1[j][i]
 		}
 		hidden[j] = tanh(z)
 	}
 	var q [brainActions]float32
 	for k := 0; k < brainActions; k++ {
-		z := b.tB2[k]
+		z := n.tB2[k]
 		for j := 0; j < brainHidden; j++ {
-			z += hidden[j] * b.tW2[k][j]
+			z += hidden[j] * n.tW2[k][j]
 		}
 		q[k] = z
 	}
@@ -209,20 +226,20 @@ func (b *Brain) forwardQTarget(state [brainInputs]float32) [brainActions]float32
 // Q ≈ очікувана сумарна майбутня нагорода, якщо зробити a, а далі діяти жадібно.
 //
 // Прихований шар з tanh (нелінійність), вихід ЛІНІЙНИЙ — бо Q-значення можуть
-// бути будь-якими числами (не обмежені -1..+1, як був вихід у v2).
-// Функція ЧИСТА (нічого не змінює) → безпечно кликати кілька разів за кадр.
-func (b *Brain) forwardQ(state [brainInputs]float32) (q [brainActions]float32, hidden [brainHidden]float32) {
+// бути будь-якими числами. Функція ЧИСТА (лише читає ваги) → безпечна для
+// паралельного виклику, поки ніхто не ПИШЕ ваги (а пишемо ми лише в trainBrains).
+func (n *Net) forwardQ(state [brainInputs]float32) (q [brainActions]float32, hidden [brainHidden]float32) {
 	for j := 0; j < brainHidden; j++ {
-		z := b.B1[j]
+		z := n.B1[j]
 		for i := 0; i < brainInputs; i++ {
-			z += state[i] * b.W1[j][i]
+			z += state[i] * n.W1[j][i]
 		}
 		hidden[j] = tanh(z)
 	}
 	for k := 0; k < brainActions; k++ {
-		z := b.B2[k]
+		z := n.B2[k]
 		for j := 0; j < brainHidden; j++ {
-			z += hidden[j] * b.W2[k][j]
+			z += hidden[j] * n.W2[k][j]
 		}
 		q[k] = z // лінійний вихід
 	}
@@ -271,20 +288,6 @@ func escapeAction(state [brainInputs]float32) int {
 	return best
 }
 
-// selectAction — ε-GREEDY вибір дії.
-//
-// [RL: EXPLORATION vs EXPLOITATION]
-// З імовірністю ε — випадкова дія (досліджуємо світ, шукаємо нові стратегії).
-// Інакше — найкраща за Q (використовуємо вивчене). Без exploration агент
-// застрягне на першій-ліпшій стратегії й не знайде кращої.
-func (b *Brain) selectAction(state [brainInputs]float32) int {
-	if rand.Float32() < b.epsilon() {
-		return rand.Intn(brainActions)
-	}
-	q, _ := b.forwardQ(state)
-	return argmaxQ(q)
-}
-
 // epsilon — поточна ε з лінійним автоспадом max→min за qEpsilonDecay кроків,
 // але не нижче floor (qEpsilonMin). Свіжий мозок (age=0) досліджує найбільше,
 // натренований (age велике / завантажений) — майже чистий мисливець.
@@ -299,47 +302,69 @@ func (b *Brain) epsilon() float32 {
 	return qEpsilonMax + (qEpsilonMin-qEpsilonMax)*t
 }
 
+// selectAction — ε-GREEDY вибір дії (читає ваги мережі).
+//
+// [RL: EXPLORATION vs EXPLOITATION]
+// З імовірністю ε — випадкова дія (досліджуємо світ). Інакше — найкраща за Q.
+func (b *Brain) selectAction(state [brainInputs]float32) int {
+	if rand.Float32() < b.epsilon() {
+		return rand.Intn(brainActions)
+	}
+	q, _ := b.net.forwardQ(state)
+	return argmaxQ(q)
+}
+
 // remember додає перехід у кільцевий буфер досвіду.
-func (b *Brain) remember(t transition) {
-	if b.replay == nil {
-		b.replay = make([]transition, qReplaySize)
+//
+// [GO: MUTEX] Під замком, бо буфер може бути СПІЛЬНИМ і в нього пишуть РІЗНІ
+// горутини воркер-пулу (з паралельної фази). Секція крихітна → контенції майже
+// нема. (У незалежному режимі замок завжди вільний → майже безкоштовний.)
+func (n *Net) remember(t transition) {
+	n.mu.Lock()
+	if n.replay == nil {
+		n.replay = make([]transition, qReplaySize)
 	}
-	b.replay[b.replayHead] = t
-	b.replayHead = (b.replayHead + 1) % qReplaySize
-	if b.replayHead == 0 {
-		b.replayFull = true
+	n.replay[n.replayHead] = t
+	n.replayHead = (n.replayHead + 1) % qReplaySize
+	if n.replayHead == 0 {
+		n.replayFull = true
 	}
+	n.mu.Unlock()
 }
 
 // replayLen — скільки переходів реально лежить у буфері.
-func (b *Brain) replayLen() int {
-	if b.replayFull {
+func (n *Net) replayLen() int {
+	if n.replayFull {
 		return qReplaySize
 	}
-	return b.replayHead
+	return n.replayHead
 }
 
-// trainBatch — навчання на випадковій вибірці з буфера (серце DQN).
-func (b *Brain) trainBatch() {
-	n := b.replayLen()
-	if n < qMinReplay {
+// train — k оновлень на випадкових вибірках із буфера (серце DQN).
+//
+// Викликається ОДИН раз за кадр ОДНОПОТОКОВО (g.trainBrains, поза паралельною
+// фазою) → запис ваг безпечний без локу. Зі спільним мозком уся колективна
+// вибірка тренує ОДНУ мережу нормальним темпом (а не N×qBatch разів за кадр).
+func (n *Net) train(k int) {
+	m := n.replayLen()
+	if m < qMinReplay {
 		return
 	}
-	for i := 0; i < qBatch; i++ {
-		t := b.replay[rand.Intn(n)]
-		b.tdUpdate(t.s, t.a, t.r, t.s2)
+	for i := 0; i < k; i++ {
+		t := n.replay[rand.Intn(m)]
+		n.tdUpdate(t.s, t.a, t.r, t.s2)
 	}
 }
 
-// Step — один крок агента: оцінити минулу дію, обрати нову.
-//
-// Викликається щокадру. Reward за ПОПЕРЕДНЮ дію тепер відомий (бачимо результат
-// руху: dist змінилась, можливо врізались у стіну) → кладемо перехід у буфер
-// і вчимось на випадковій вибірці зі ВСЬОГО накопиченого досвіду.
+// Step — один крок агента: оцінити минулу дію, обрати нову. Викликається щокадру
+// в паралельній фазі (calcAcceleration). НЕ тренує мережу — лише кладе досвід у
+// буфер; навчання відбувається раз/кадр однопотоково у g.trainBrains() (бо
+// мережа може бути спільною: тренувати її N×qBatch/кадр було б і неправильно,
+// і небезпечно для гонок).
 func (b *Brain) Step(state [brainInputs]float32, dist float32, hitWall bool) int {
 	b.age++ // [3] для автоспаду ε
 
-	// 1) Нагорода за попередню дію → перехід у буфер → навчання на вибірці.
+	// 1) Нагорода за попередню дію → перехід у (можливо спільний) буфер.
 	if b.hasPrev {
 		// [RL: REWARD SHAPING]
 		// Щільна нагорода веде агента: наблизився → +, віддалився → −.
@@ -347,20 +372,15 @@ func (b *Brain) Step(state [brainInputs]float32, dist float32, hitWall bool) int
 		if hitWall {
 			reward += rewardWallHit // [1a] по факту удару
 		}
-		// [1b] плавний штраф за рух У БІК близької стіни: беремо whisker того
-		// напрямку, в який пішли минулого кадру (prevState[5+prevAction]). Дає
-		// градієнт «тримай дистанцію» ще ДО зіткнення → обхід стає плавним.
-		// Прогрес до гравця (+0.5) перебиває цей штраф у проходах, тож щілини
-		// агент усе одно використовує — уникає лише глухих стін.
+		// [1b] плавний штраф за рух У БІК близької стіни: whisker напрямку, в який
+		// пішли минулого кадру. Градієнт «тримай дистанцію» ще ДО зіткнення.
 		reward += rewardNearWall * b.prevState[5+b.prevAction]
 
-		b.remember(transition{s: b.prevState, a: b.prevAction, r: reward, s2: state})
-		b.trainBatch()
+		b.net.remember(transition{s: b.prevState, a: b.prevAction, r: reward, s2: state})
 	}
 
 	// 2) [2] Anti-stuck. КЛЮЧОВЕ: якщо агент наближається до гравця — він НЕ
 	//    застряг (хай навіть тернеться об стіну, productively ковзаючи вздовж неї).
-	//    Лічильник росте лише коли НЕМАЄ прогресу І є контакт/близькість стіни.
 	madeProgress := b.hasPrev && dist < b.prevDist-stuckProgressEps
 	switch {
 	case madeProgress:
@@ -402,72 +422,60 @@ func (b *Brain) Step(state [brainInputs]float32, dist float32, hitWall bool) int
 // tdUpdate — навчання Q-LEARNING через TD (temporal-difference) помилку.
 //
 // [RL: РІВНЯННЯ БЕЛЛМАНА]
-// Цінність дії = миттєва нагорода + найкраще, що можна отримати далі:
 //
 //	target = reward + γ · max_a' Q(nextState, a')
-//
-// Це розв'язує "credit assignment" (хто винен за відкладену нагороду):
-// цінність ПРОСОЧУЄТЬСЯ назад у часі — кадр за кадром, через γ.
-//
-// TD-помилка = наскільки наша оцінка Q(s,a) розходиться з target:
-//
 //	tdError = target - Q(s, a)
 //
-// Далі — звичайний backprop цієї помилки. ВАЖЛИВО: помилку має ЛИШЕ дія, яку
-// реально зробили (тільки про неї ми отримали reward); інші виходи не чіпаємо.
-//
-// "Semi-gradient": target вважаємо КОНСТАНТОЮ (не пускаємо градієнт у Q(s')) —
-// інакше навчання женеться за власним хвостом і розходиться.
-func (b *Brain) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainInputs]float32) {
+// Далі — backprop цієї помилки. ВАЖЛИВО: помилку має ЛИШЕ дія, яку реально
+// зробили. "Semi-gradient": target вважаємо КОНСТАНТОЮ (по target-мережі).
+// Пише ваги → викликається лише з train() (однопотокова фаза).
+func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainInputs]float32) {
 	// Ціль за Беллманом по TARGET-мережі (max Q наступного стану — як константа).
-	q2 := b.forwardQTarget(s2)
+	q2 := n.forwardQTarget(s2)
 	maxNext := q2[argmaxQ(q2)]
 	target := clamp(reward+qGamma*maxNext, -qClip, qClip)
 
 	// Поточна оцінка + активації прихованого шару (для backprop) — по ЖИВІЙ мережі.
-	q1, hidden := b.forwardQ(s)
-	// [DQN: ERROR CLIPPING] обмежуємо TD-помилку до [-1,1] → жодних велетенських
-	// стрибків ваг від рідкісних великих похибок (Huber-подібна стабілізація).
+	q1, hidden := n.forwardQ(s)
+	// [DQN: ERROR CLIPPING] обмежуємо TD-помилку до [-1,1].
 	tdErr := clamp(target-q1[a], -1, 1)
 
 	// Вихідний шар: похибку має лише нейрон дії a (лінійний вихід → похідна 1).
-	//   W2[a][j] += lr · tdErr · hidden[j]
-	// Прихований шар: проштовхуємо похибку назад через W2[a] (тільки цей рядок
-	// бере участь, бо лише вихід a має ненульову похибку).
+	// Прихований шар: проштовхуємо похибку назад через W2[a].
 	for j := 0; j < brainHidden; j++ {
 		// deltaHidden рахуємо ДО оновлення W2[a][j] (по старій вазі).
-		deltaHidden := tdErr * b.W2[a][j] * (1 - hidden[j]*hidden[j])
-		b.W2[a][j] += qLearnRate * tdErr * hidden[j]
+		deltaHidden := tdErr * n.W2[a][j] * (1 - hidden[j]*hidden[j])
+		n.W2[a][j] += qLearnRate * tdErr * hidden[j]
 		for i := 0; i < brainInputs; i++ {
-			b.W1[j][i] += qLearnRate * deltaHidden * s[i]
+			n.W1[j][i] += qLearnRate * deltaHidden * s[i]
 		}
-		b.B1[j] += qLearnRate * deltaHidden
+		n.B1[j] += qLearnRate * deltaHidden
 	}
-	b.B2[a] += qLearnRate * tdErr
+	n.B2[a] += qLearnRate * tdErr
 
-	b.clipWeights()
+	n.clipWeights()
 
 	// [DQN] Періодично «заморожуємо» свіжі ваги в target-мережу.
-	b.syncCounter++
-	if b.syncCounter >= qTargetSync {
-		b.syncTarget()
-		b.syncCounter = 0
+	n.syncCounter++
+	if n.syncCounter >= qTargetSync {
+		n.syncTarget()
+		n.syncCounter = 0
 	}
 }
 
 // clipWeights обрізає всі ваги до [-brainMaxWeight, +brainMaxWeight].
-func (b *Brain) clipWeights() {
-	for j := range b.W1 {
-		for i := range b.W1[j] {
-			b.W1[j][i] = clamp(b.W1[j][i], -brainMaxWeight, brainMaxWeight)
+func (n *Net) clipWeights() {
+	for j := range n.W1 {
+		for i := range n.W1[j] {
+			n.W1[j][i] = clamp(n.W1[j][i], -brainMaxWeight, brainMaxWeight)
 		}
-		b.B1[j] = clamp(b.B1[j], -brainMaxWeight, brainMaxWeight)
+		n.B1[j] = clamp(n.B1[j], -brainMaxWeight, brainMaxWeight)
 	}
-	for k := range b.W2 {
-		for j := range b.W2[k] {
-			b.W2[k][j] = clamp(b.W2[k][j], -brainMaxWeight, brainMaxWeight)
+	for k := range n.W2 {
+		for j := range n.W2[k] {
+			n.W2[k][j] = clamp(n.W2[k][j], -brainMaxWeight, brainMaxWeight)
 		}
-		b.B2[k] = clamp(b.B2[k], -brainMaxWeight, brainMaxWeight)
+		n.B2[k] = clamp(n.B2[k], -brainMaxWeight, brainMaxWeight)
 	}
 }
 
@@ -486,7 +494,6 @@ func clamp(v, lo, hi float32) float32 {
 // [AI: RAYCAST]
 // Крокуємо вздовж напрямку, поки не натрапимо на стіну (або не вийдемо за range).
 // Повертаємо БЛИЗЬКІСТЬ: 1 = стіна впритул, 0 = чисто на всю довжину.
-// Так мережа отримує "зір" на перешкоди ще до зіткнення.
 func wallWhisker(cx, cy, dx, dy float32) float32 {
 	for d := float32(whiskerStep); d <= whiskerRange; d += whiskerStep {
 		px := cx + dx*d
@@ -550,11 +557,14 @@ type BrainData struct {
 	B2 [brainActions]float32              `json:"b2"`
 }
 
-// SaveBrain зберігає ваги у JSON (читабельний MarshalIndent).
-func SaveBrain(b *Brain) error {
+// SaveBrain зберігає ваги мережі агента у JSON.
+func SaveBrain(b *Brain) error { return SaveNet(b.net) }
+
+// SaveNet зберігає ваги мережі у JSON (читабельний MarshalIndent).
+func SaveNet(n *Net) error {
 	data := BrainData{
 		Inputs: brainInputs, Hidden: brainHidden, Actions: brainActions,
-		W1: b.W1, B1: b.B1, W2: b.W2, B2: b.B2,
+		W1: n.W1, B1: n.B1, W2: n.W2, B2: n.B2,
 	}
 	bytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
@@ -563,10 +573,10 @@ func SaveBrain(b *Brain) error {
 	return os.WriteFile(brainFile, bytes, 0644)
 }
 
-// LoadBrain завантажує ваги. Повертає nil (→ caller створить NewBrain), якщо
-// файлу немає, він пошкоджений, або РОЗМІРИ мережі не збігаються (зміна
-// архітектури між версіями). Перевірка dims рятує від часткового завантаження.
-func LoadBrain() *Brain {
+// LoadNet завантажує мережу з файлу. Повертає nil (→ caller створить NewNet),
+// якщо файлу немає, він пошкоджений, або РОЗМІРИ мережі не збігаються (зміна
+// архітектури). Перевірка dims рятує від часткового завантаження.
+func LoadNet() *Net {
 	bytes, err := os.ReadFile(brainFile)
 	if err != nil {
 		return nil
@@ -578,8 +588,7 @@ func LoadBrain() *Brain {
 	if data.Inputs != brainInputs || data.Hidden != brainHidden || data.Actions != brainActions {
 		return nil // несумісна архітектура → почнемо з нуля
 	}
-	b := &Brain{W1: data.W1, B1: data.B1, W2: data.W2, B2: data.B2}
-	b.syncTarget()
-	b.age = qEpsilonDecay // завантажений = вже навчений → старт на ε-floor (режим мисливця)
-	return b
+	n := &Net{W1: data.W1, B1: data.B1, W2: data.W2, B2: data.B2}
+	n.syncTarget()
+	return n
 }

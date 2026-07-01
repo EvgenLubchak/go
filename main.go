@@ -15,8 +15,8 @@ import (
 const (
 	screenWidth  = 1680
 	screenHeight = 960
-	pixelSize    = 24
-	enemyCount   = 30
+	pixelSize    = 20
+	enemyCount   = 300
 
 	// Глобальна фізика — однакова для всіх типів ворогів.
 	// Поведінка (швидкість, агресія, burst) — в EnemyConfig у pixel.go.
@@ -25,10 +25,10 @@ const (
 	showDetectionCircle = false // показувати радіус огляду ворогів (true/false)
 
 	// [СТИГМЕРГІЯ] Феромони фрустрації — рій лишає сліди в глухих місцях і обходить їх.
-	frustrationDeposit = 3     // слід за ОДНЕ застрягання (тепер рідко → більший внесок)
+	frustrationDeposit = 1     // слід за ОДНЕ застрягання (тепер рідко → більший внесок)
 	frustrationDecay   = 0.970 // затухання сліду щокадру (місце поступово «забувається»)
 	frustrationRepel   = 0.05  // сила відштовхування від слідів
-	frustrationRadius  = 4     // радіус сканування слідів навколо агента (клітинки)
+	frustrationRadius  = 3     // радіус сканування слідів навколо агента (клітинки)
 
 	attackRadius      = 120 // радіус удару в пікселях
 	attackDamage      = 1   // пошкодження за один удар
@@ -65,10 +65,11 @@ var (
 	fontFaceSource      *etext.GoTextFaceSource
 	soundEnabled        = false // false — вимкнути фоновий ритм
 	difficultyGrowth    = false // false — складність не росте (для тренування AI)
-	showWhiskers        = true  // показувати сенсори стін і обрану дію Learner-а
-	showFrustration     = true  // показувати теплову карту феромонів фрустрації
-	pheromonesEnabled   = false // вмикає феромони фрустрації (стигмергію); false = чистий Q-learning без слідів
+	showWhiskers        = false // показувати сенсори стін і обрану дію Learner-а
+	showFrustration     = false // показувати теплову карту феромонів фрустрації
+	pheromonesEnabled   = true  // вмикає феромони фрустрації (стигмергію); false = чистий Q-learning без слідів
 	epsilonDecayEnabled = false // ε: false = постійна (qEpsilonConst); true = автоспад max→min
+	sharedBrain         = true  // true = всі учні ділять ОДНУ мережу (вулик-розум); false = кожен свою
 )
 
 func init() {

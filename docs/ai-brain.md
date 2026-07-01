@@ -211,35 +211,58 @@ tdError = target − Q(state, action)              ← наскільки пом
 ## Цикл кадру (інтеграція)
 
 ```
-Update() → calcAcceleration()  (Brain != nil):
-    1. state := GatherInputs(e, player)         // + whiskers
-    2. action := Brain.Step(state, dist, HitWall)
-         ├─ reward за минулу дію (наблизився? врізався? близько стіни?)
-         ├─ remember(перехід) у буфер
-         ├─ trainBatch(): qBatch випадкових переходів → tdUpdate
-         ├─ оновити stuckCounter (anti-stuck)
-         └─ обрати дію: фрустрація(escapeAction) / ε-greedy
-    3. Acc += dirs8[action] · brainForce
-         → updateEnemies(): рух, відбивання, виставити HitWall
+Update():
+  calcAcceleration()   ПАРАЛЕЛЬНО (на кожного учня з Brain != nil):
+      1. state := GatherInputs(e, player)              // + whiskers
+      2. action := Brain.Step(state, dist, HitWall)
+           ├─ reward за минулу дію → net.remember(перехід)   // у буфер (під мютексом)
+           ├─ оновити stuckCounter (anti-stuck)
+           └─ обрати дію: фрустрація(escapeAction) / ε-greedy
+      3. Acc += dirs8[action]·brainForce  (+ феромонне відштовхування)
+  trainBrains()        ОДНОПОТОКОВО: кожну унікальну мережу — net.train(qBatch)
+  updateEnemies()      рух, відбивання, HitWall, deposit/decay феромонів
 ```
 
-### Паралелізм: горутини й безпека пам'яті
+> Важливо: `Step` більше **НЕ тренує** — лише кладе досвід у буфер. Навчання
+> винесене в окрему ОДНОПОТОКОВУ фазу `trainBrains()` (раз/кадр на мережу).
+
+---
+
+## Спільний мозок (вулик-розум)
+
+Архітектуру розділено на дві сутності:
+- **`Net`** — сама мережа: ваги + target + буфер досвіду + `sync.Mutex`. Може бути СПІЛЬНОЮ.
+- **`Brain`** — «голова» одного ворога: указник на `Net` + ОСОБИСТА пам'ять (стан у
+  часі, лічильники застрягання, `age`). Агенти діють індивідуально, а вчаться в
+  (можливо) спільну мережу.
+
+Прапорець **`sharedBrain`** (main.go):
+- `false` — кожен учень має власний `Net` (рій РІЗНИХ особин: повільніше, різноманітно);
+- `true` — усі ділять ОДИН `Net` (**вулик-розум**): N агентів наповнюють спільний
+  буфер → колективний досвід → навчання **в рази швидше**; усі узгоджені (рухаються
+  «ключами», як хижі птахи). Платня — зникає індивідуальність (усі думають однаково
+  → можуть скупчуватись; це й лікують феромони — анти-стадність).
+
+Навчання спільної мережі — **раз/кадр** (qBatch оновлень на ВЕСЬ рій, а не N×qBatch):
+агенти лише наповнюють буфер, тренує `g.trainBrains()` централізовано.
+
+### Паралелізм і безпека пам'яті (горутини)
 
 `calcAcceleration` рахується **паралельно** воркер-пулом: `runtime.NumCPU()` горутин
-(`sync.WaitGroup` + `wg.Wait()`), кожна обробляє свій шматок ворогів `[start:end)`.
-Це тримає 50–500 ворогів × (boids + мозок + whiskers + феромони) у 120 FPS.
+(`sync.WaitGroup` + `wg.Wait()`), кожна — свій шматок ворогів `[start:end)`.
 
-Безпека пам'яті — **без жодного мютекса**, через розділення на фази:
+| Дані | Читання | Запис | Захист |
+|---|---|---|---|
+| `boidMap`, `frustration` | паралельно | однопотоково (інша фаза) | розділення фаз |
+| `Net` ваги | паралельно (forward) | однопотоково (`trainBrains`) | розділення фаз |
+| `Net.replay` (СПІЛЬНИЙ буфер) | — | **паралельно** (`remember` з багатьох горутин) | **`sync.Mutex`** |
+| `Brain`-пам'ять, `enemies[i].Acc` | — | одна горутина на агента | власність |
 
-| Дані | Читання (паралельно) | Запис (однопотоково) |
-|---|---|---|
-| `boidMap` | calcAcceleration | updateBoidMap |
-| `frustration` | calcAcceleration (`frustrationForce`) | updateEnemies (deposit + `decayFrustration`) |
-| `enemies[i].Acc`, `Brain` | — | кожен елемент пише ОДНА горутина (свій chunk) |
-
-Читання й запис рознесені в часі бар'єром `wg.Wait()`, а одночасні читання в Go
-безпечні (гонка лише при одночасному записі). Тому `mu sync.Mutex` у `Game` досі не
-потрібен. Принцип: **«всі читають → потім один пише» замість локів.**
+Ключ: майже все безпечне через **розділення фаз** («всі читають → потім один пише»).
+Єдине місце зі справжнім одночасним записом — **спільний буфер досвіду** (у нього
+пишуть багато горутин у паралельній фазі) → саме його стереже `Net.mu`. Секція під
+замком крихітна (один append) → контенції майже нема. Ваги лишаються лок-фрі: forward
+читає в паралельній фазі, `train` пише в однопотоковій.
 
 ---
 
@@ -319,23 +342,25 @@ frustrationRadius  = 3     // радіус сканування (клітинк�
 
 | Файл | Що містить |
 |---|---|
-| `brain.go` | `Brain`, `forwardQ`, `Step`, `tdUpdate`, `escapeAction`, whiskers, Save/Load |
-| `brain_test.go` | TD-оновлення наближає Q до цілі; агент вчиться переслідувати |
+| `brain.go` | `Net` (мережа+буфер+`mu`) і `Brain` (пам'ять агента); `forwardQ`, `Step`, `train`, `tdUpdate`, `escapeAction`, whiskers, Save/Load |
+| `brain_test.go` | TD-оновлення; збіжність переслідування; `TestSharedBrainNoRace` (перевірка мютекса під `-race`) |
 | `boids.go` | Інтеграція: `Step`; `HitWall` при відбитті; `frustrationForce`/`decayFrustration` + deposit |
-| `game.go` | Сітка `frustration` у `Game`; очищення в `restart` |
-| `pixel.go` | `ConfigLearner` (`IsLearner`), поле `HitWall`, `NewBrain`/`LoadBrain` |
+| `game.go` | `trainBrains` (навчання раз/кадр); сітка `frustration`; очищення в `restart` |
+| `pixel.go` | `ConfigLearner` (`IsLearner`), поле `HitWall`; створення `Net` (спільної/власної) у `newEnemies` |
 | `render.go` | `drawBrainSensors` (вуса+стрілка) + теплокарта феромонів |
-| `main.go` | Прапорці: `showWhiskers`, `showFrustration`, `pheromonesEnabled`, `epsilonDecayEnabled`; константи феромонів |
+| `main.go` | Прапорці: `showWhiskers`, `showFrustration`, `pheromonesEnabled`, `epsilonDecayEnabled`, `sharedBrain`; константи феромонів |
 | `brain_weights.json` | Збережені ваги (формат містить розміри для перевірки сумісності) |
 
 ---
 
 ## Збереження ваг
 
-Ваги зберігаються при ESC / game over і вантажаться при старті. `LoadBrain`
-перевіряє записані розміри мережі (`inputs/hidden/actions`) — несумісна
+Ваги зберігаються при ESC / game over і вантажаться при старті (`SaveNet`/`LoadNet`).
+`LoadNet` перевіряє записані розміри мережі (`inputs/hidden/actions`) — несумісна
 архітектура → старт з нуля, без часткового завантаження. Target-мережа, буфер
-досвіду й `age`/`stuckCounter` НЕ зберігаються (відновлюються наживо).
+досвіду й `age`/`stuckCounter` НЕ зберігаються (відновлюються наживо). У режимі
+`sharedBrain` зберігається/вантажиться одна спільна мережа; інакше — кожен учень
+вантажить ту саму мережу й далі розходиться.
 
 > Зміна `brainHidden`/`brainInputs`/`brainActions` → видали `brain_weights.json`
 > (або він просто проігнорується як несумісний).
@@ -352,12 +377,14 @@ frustrationRadius  = 3     // радіус сканування (клітинк�
 | `stuckLimit` / `frustrationFrames` | Швидше/довше виходить із пасток |
 | `whiskerRange` | Далі «бачить» стіни → раніше починає обходити |
 | `qGamma` | Вище → довша «дальнозоркість», але менш стабільно |
+| `sharedBrain` (main.go) | true = вулик (швидко вчиться, узгоджені «ключі»); false = незалежні особини |
+| `pheromonesEnabled` (main.go) | стигмергія поверх будь-якого режиму: анти-стадність + пам'ять місця |
 
 ---
 
 ## Що далі
 
 Жива мапа планів — у **[ai-roadmap.md](ai-roadmap.md)**. Найближче:
-- **Спільний мозок** (1 мережа + 1 буфер на всіх) — швидше й стабільніше навчання.
-- **Flow-field** — щоб агенти знаходили гравця в будь-якому куті лабіринту.
+- **Канал/актор** замість мютекса — той самий вулик ідіоматичним Go (CSP).
+- **Flow-field** — другий вид ворога, що знає мапу (pathfinding) і знаходить будь-де.
 - Терміни — у [ai-glossary.md](ai-glossary.md).

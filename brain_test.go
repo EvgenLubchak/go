@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"math/rand"
+	"sync"
 	"testing"
 )
 
@@ -21,12 +22,12 @@ func TestQLearningTDUpdate(t *testing.T) {
 	const a = 3
 	const reward = 1.0
 
-	q2, _ := b.forwardQ(s2)
+	q2, _ := b.net.forwardQ(s2)
 	target := clamp(reward+qGamma*q2[argmaxQ(q2)], -qClip, qClip)
 
-	qBefore, _ := b.forwardQ(s)
-	b.tdUpdate(s, a, reward, s2)
-	qAfter, _ := b.forwardQ(s)
+	qBefore, _ := b.net.forwardQ(s)
+	b.net.tdUpdate(s, a, reward, s2)
+	qAfter, _ := b.net.forwardQ(s)
 
 	distBefore := float32(math.Abs(float64(target - qBefore[a])))
 	distAfter := float32(math.Abs(float64(target - qAfter[a]))) // має зменшитись
@@ -64,6 +65,7 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 		for step := 0; step < 150; step++ {
 			state := GatherInputs(enemy, player)
 			action := b.Step(state, dist(), false)
+			b.net.train(qBatch) // Step лише збирає досвід; тренуємо явно (як g.trainBrains)
 			enemy.VelX += dirs8[action][0] * brainForce
 			enemy.VelY += dirs8[action][1] * brainForce
 			spd := float32(math.Sqrt(float64(enemy.VelX*enemy.VelX + enemy.VelY*enemy.VelY)))
@@ -83,7 +85,7 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 	for _, off := range offsets {
 		player.X, player.Y = enemy.X+off[0], enemy.Y+off[1]
 		state := GatherInputs(enemy, player)
-		q, _ := b.forwardQ(state)
+		q, _ := b.net.forwardQ(state)
 		a := argmaxQ(q)
 		n := float32(math.Sqrt(float64(off[0]*off[0] + off[1]*off[1])))
 		sumDot += dirs8[a][0]*off[0]/n + dirs8[a][1]*off[1]/n
@@ -92,5 +94,36 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 	t.Logf("середня узгодженість дії з напрямком до гравця: %.3f", avgDot)
 	if avgDot < 0.3 {
 		t.Errorf("агент не навчився переслідувати: avgDot=%.3f (очікували > 0.3)", avgDot)
+	}
+}
+
+// TestSharedBrainNoRace імітує гру в режимі sharedBrain: багато горутин (як
+// воркер-пул у calcAcceleration) одночасно викликають Step на агентах, що ДІЛЯТЬ
+// одну мережу (forward-читання + remember під мютексом), потім ОДНОПОТОКОВО train.
+// Має бути чисто під детектором гонок: go test -race -run TestSharedBrainNoRace
+func TestSharedBrainNoRace(t *testing.T) {
+	net := NewNet()
+	const agents = 16
+	brains := make([]*Brain, agents)
+	for i := range brains {
+		brains[i] = NewBrainWith(net) // усі ділять ОДНУ мережу
+	}
+
+	for frame := 0; frame < 200; frame++ {
+		// Паралельна фаза: кожен агент у власній горутині (як воркер-пул).
+		var wg sync.WaitGroup
+		for i := range brains {
+			wg.Add(1)
+			go func(b *Brain, seed int) {
+				defer wg.Done()
+				var state [brainInputs]float32
+				state[0] = float32(seed%7) * 0.1
+				state[5+seed%brainWhiskers] = 0.6
+				b.Step(state, float32(50+seed), seed%3 == 0)
+			}(brains[i], i)
+		}
+		wg.Wait()
+		// Однопотокова фаза: тренуємо спільну мережу раз/кадр.
+		net.train(qBatch)
 	}
 }

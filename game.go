@@ -109,10 +109,30 @@ func (g *Game) Update() error {
 	g.playerAttack()
 	g.updateBoidMap()
 	g.calcAcceleration()
+	g.trainBrains() // [SHARED BRAIN] навчання мереж раз/кадр, ОДНОПОТОКОВО
 	g.updateEnemies()
 	g.removeDeadEnemies()
 	g.checkCollisions()
 	return nil
+}
+
+// trainBrains — навчання мереж учнів РАЗ за кадр, ОДНОПОТОКОВО (після паралельної
+// фази calcAcceleration). Кожну УНІКАЛЬНУ мережу тренуємо один раз: у режимі
+// sharedBrain це одна спільна мережа, інакше — по одній на кожного учня.
+//
+// [GO: БЕЗПЕКА БЕЗ ЛОКУ] Запис ваг тут безпечний без мютекса, бо горутини
+// воркер-пулу вже завершились (wg.Wait у calcAcceleration) — це та сама схема
+// «всі читають паралельно → один пише однопотоково», що й для boidMap/феромонів.
+func (g *Game) trainBrains() {
+	seen := map[*Net]bool{}
+	for i := range g.enemies {
+		b := g.enemies[i].Brain
+		if b == nil || b.net == nil || seen[b.net] {
+			continue
+		}
+		seen[b.net] = true
+		b.net.train(qBatch)
+	}
 }
 
 // saveBrains зберігає ваги першого Learner-ворога у файл.
