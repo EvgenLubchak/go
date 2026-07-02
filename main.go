@@ -16,7 +16,7 @@ const (
 	screenWidth  = 1680
 	screenHeight = 960
 	pixelSize    = 20
-	enemyCount   = 100
+	enemyCount   = 12
 
 	// Глобальна фізика — однакова для всіх типів ворогів.
 	// Поведінка (швидкість, агресія, burst) — в EnemyConfig у pixel.go.
@@ -68,10 +68,11 @@ var (
 	difficultyGrowth    = false // false — складність не росте (для тренування AI)
 	showWhiskers        = false // показувати сенсори стін і обрану дію Learner-а
 	showMetrics         = true  // показувати панель метрик навчання (крива reward/TD) — клавіша G
-	showFrustration     = false // показувати теплову карту феромонів фрустрації
-	pheromonesEnabled   = true  // вмикає феромони фрустрації (стигмергію); false = чистий Q-learning без слідів
+	showFrustration     = true  // показувати теплову карту феромонів фрустрації
+	pheromonesEnabled   = false // вмикає феромони фрустрації (стигмергію); false = чистий Q-learning без слідів
 	epsilonDecayEnabled = false // ε: false = постійна (qEpsilonConst); true = автоспад max→min
 	sharedBrain         = true  // true = всі учні ділять ОДНУ мережу (вулик-розум); false = кожен свою
+	localSight          = true  // [POMDP] true = агент бачить гравця лише поблизу+по прямій; false = всевидющий
 )
 
 func init() {

@@ -41,6 +41,10 @@ func TestQLearningTDUpdate(t *testing.T) {
 // після тренування жадібна дія в середньому вказує в бік гравця (без стін).
 // Запуск: go test -run TestQLearningChasesNoWalls -v
 func TestQLearningChasesNoWalls(t *testing.T) {
+	saved := localSight
+	localSight = false // тест переслідування — з ПОВНОЮ спостережуваністю
+	defer func() { localSight = saved }()
+
 	b := NewBrain()
 	// Ворог у відкритій зоні без стін (whiskers ≈ 0).
 	enemy := &Pixel{X: 1100, Y: 500, Cfg: ConfigLearner, Brain: b}
@@ -85,7 +89,7 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 	for _, off := range offsets {
 		player.X, player.Y = enemy.X+off[0], enemy.Y+off[1]
 		state := GatherInputs(enemy, player)
-		q, _ := b.net.forwardQ(state)
+		q, _ := b.net.forwardQ(stackSteady(state)) // [ПАМ'ЯТЬ] проба усталеним стеком
 		a := argmaxQ(q)
 		n := float32(math.Sqrt(float64(off[0]*off[0] + off[1]*off[1])))
 		sumDot += dirs8[a][0]*off[0]/n + dirs8[a][1]*off[1]/n
@@ -116,7 +120,7 @@ func TestSharedBrainNoRace(t *testing.T) {
 			wg.Add(1)
 			go func(b *Brain, seed int) {
 				defer wg.Done()
-				var state [brainInputs]float32
+				var state [baseInputs]float32 // один кадр (Step склеїть у стек)
 				state[0] = float32(seed%7) * 0.1
 				state[5+seed%brainWhiskers] = 0.6
 				b.Step(state, float32(50+seed), seed%3 == 0)

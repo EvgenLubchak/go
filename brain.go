@@ -24,9 +24,13 @@ import (
 // що в стіни врізатись погано, і навчиться їх обходити.
 //
 // АРХІТЕКТУРА (Q-мережа):
-//   state(13) ─► hidden(16, tanh) ─► Q-values(8, лінійні)
-//   13 входів = 5 базових (dx,dy,dist,pVelX,pVelY) + 8 whiskers (сенсори стін)
+//   state = стек останніх stackFrames кадрів по baseInputs → hidden(16) → Q(8)
+//   baseInputs(14) = 5 базових (dx,dy,dist,pVelX,pVelY) + 8 whiskers + 1 «гравця видно»
 //   8 виходів = Q-значення для 8 напрямків руху. Дія = напрямок з найбільшим Q.
+//
+// [ПАМ'ЯТЬ] frame-stacking: мережа бачить не лише «зараз», а й недавнє минуле
+// (семпли кожні stackSkip кадрів) → може ПАМ'ЯТАТИ, куди зник гравець. Це крок від
+// реактивного (амнезія щокадру) агента до роботи з частковою спостережуваністю (POMDP).
 //
 // [SHARED BRAIN] Поділ на Net + Brain:
 //   Net   — сама мережа (ваги + target + буфер досвіду). Може бути СПІЛЬНОЮ.
@@ -35,10 +39,14 @@ import (
 // ==========================================================================
 
 const (
-	brainInputs   = 13 // 5 базових + 8 whiskers
-	brainHidden   = 16 // нейрони прихованого шару
-	brainActions  = 8  // 8 напрямків руху (= кількість виходів Q)
-	brainWhiskers = 8  // промені-сенсори стін
+	baseInputs  = 14 // ОДИН кадр стану: 5 базових + 8 whiskers + 1 «гравця видно»
+	stackFrames = 4  // [ПАМ'ЯТЬ] скільки кадрів склеюємо на вхід (1 = без пам'яті)
+	stackSkip   = 20 // кадрів між семплами історії → вікно пам'яті ≈ (stackFrames-1)*stackSkip
+
+	brainInputs   = baseInputs * stackFrames // повний вхід мережі (стек кадрів)
+	brainHidden   = 16                       // нейрони прихованого шару
+	brainActions  = 8                        // 8 напрямків руху (= кількість виходів Q)
+	brainWhiskers = 8                        // промені-сенсори стін
 
 	qLearnRate = 0.005 // швидкість навчання (RL шумніший за supervised → помірно)
 	qGamma     = 0.95  // discount: наскільки цінувати майбутні нагороди (0..1)
@@ -64,6 +72,8 @@ const (
 
 	whiskerRange = 110.0 // далекість «вусів» у px (~5 тайлів)
 	whiskerStep  = 4.0   // крок променя при пошуку стіни
+
+	sightRange = 260.0 // [POMDP] радіус видимості гравця (px) у режимі localSight
 
 	// Масштаб reward підібраний так, щоб «хороший» кадр давав сигнал ~0.5,
 	// а удар об стіну — помітний штраф. Замалий reward = TD-сигнал тоне в шумі.
@@ -150,10 +160,15 @@ type Brain struct {
 
 	// [RL: ПАМ'ЯТЬ МІЖ КАДРАМИ] — у кожного агента своя.
 	// Reward за дію відомий лише НАСТУПНОГО кадру (коли побачимо результат руху).
-	prevState  [brainInputs]float32
+	prevState  [brainInputs]float32 // попередній СТЕКНУТИЙ стан (для переходу)
 	prevAction int
 	prevDist   float32
 	hasPrev    bool
+
+	// [ПАМ'ЯТЬ] Історія кадрів для frame-stacking: семпли кожні stackSkip кадрів.
+	// Повний вхід = [поточний кадр | frames[0] | frames[1] | ...].
+	frames    [stackFrames - 1][baseInputs]float32
+	frameTick int
 
 	age int // [3] вік (к-сть Step) — для автоспаду ε
 
@@ -368,8 +383,13 @@ func (n *Net) train(k int) {
 // буфер; навчання відбувається раз/кадр однопотоково у g.trainBrains() (бо
 // мережа може бути спільною: тренувати її N×qBatch/кадр було б і неправильно,
 // і небезпечно для гонок).
-func (b *Brain) Step(state [brainInputs]float32, dist float32, hitWall bool) int {
+func (b *Brain) Step(cur [baseInputs]float32, dist float32, hitWall bool) int {
 	b.age++ // [3] для автоспаду ε
+
+	// [ПАМ'ЯТЬ] Склеюємо поточний кадр + історію → повний вхід мережі.
+	// Поточний кадр — ПЕРШИЙ у стеку, тож whiskers лишаються на індексах 5..12
+	// (тому maxWhisker/escapeAction/proximity-reward працюють без змін).
+	stacked := b.buildStacked(cur)
 
 	// 1) Нагорода за попередню дію → перехід у (можливо спільний) буфер.
 	if b.hasPrev {
@@ -384,7 +404,7 @@ func (b *Brain) Step(state [brainInputs]float32, dist float32, hitWall bool) int
 		reward += rewardNearWall * b.prevState[5+b.prevAction]
 
 		b.lastReward = reward // [МЕТРИКИ] для середньої нагороди по рою
-		b.net.remember(transition{s: b.prevState, a: b.prevAction, r: reward, s2: state})
+		b.net.remember(transition{s: b.prevState, a: b.prevAction, r: reward, s2: stacked})
 	}
 
 	// 2) [2] Anti-stuck. КЛЮЧОВЕ: якщо агент наближається до гравця — він НЕ
@@ -397,7 +417,7 @@ func (b *Brain) Step(state [brainInputs]float32, dist float32, hitWall bool) int
 		}
 	case hitWall:
 		b.stuckCounter += stuckHitInc
-	case maxWhisker(state) >= stuckNearWall:
+	case maxWhisker(stacked) >= stuckNearWall:
 		b.stuckCounter += stuckNoProgInc
 	case b.stuckCounter > 0:
 		b.stuckCounter -= stuckDecay
@@ -409,22 +429,55 @@ func (b *Brain) Step(state [brainInputs]float32, dist float32, hitWall bool) int
 	switch {
 	case b.frustration > 0:
 		b.frustration--
-		action = escapeAction(state)
+		action = escapeAction(stacked)
 	case b.stuckCounter >= stuckLimit:
 		b.frustration = frustrationFrames
 		b.stuckCounter = 0
 		b.markStuck = true // [СТИГМЕРГІЯ] офіційно застряг тут → лишити слід
-		action = escapeAction(state)
+		action = escapeAction(stacked)
 	default:
-		action = b.selectAction(state)
+		action = b.selectAction(stacked)
 	}
 
-	b.prevState = state
+	b.prevState = stacked
 	b.prevAction = action
 	b.prevDist = dist
 	b.hasPrev = true
 	b.lastAction = action
+
+	// [ПАМ'ЯТЬ] Раз на stackSkip кадрів записуємо поточний кадр в історію (зсув).
+	b.frameTick++
+	if b.frameTick >= stackSkip {
+		b.frameTick = 0
+		for i := stackFrames - 2; i > 0; i-- {
+			b.frames[i] = b.frames[i-1]
+		}
+		if stackFrames > 1 {
+			b.frames[0] = cur
+		}
+	}
 	return action
+}
+
+// buildStacked склеює поточний (свіжий) кадр + історичні семпли в повний вхід
+// мережі: [cur | frames[0] | frames[1] | ...]. Не мутує стан.
+func (b *Brain) buildStacked(cur [baseInputs]float32) [brainInputs]float32 {
+	var s [brainInputs]float32
+	copy(s[0:baseInputs], cur[:])
+	for f := 0; f < stackFrames-1; f++ {
+		copy(s[(f+1)*baseInputs:(f+2)*baseInputs], b.frames[f][:])
+	}
+	return s
+}
+
+// stackSteady будує стек, повторюючи ОДИН кадр (усталене сприйняття) — зручно
+// для проб/тестів, коли історія не важлива.
+func stackSteady(cur [baseInputs]float32) [brainInputs]float32 {
+	var s [brainInputs]float32
+	for f := 0; f < stackFrames; f++ {
+		copy(s[f*baseInputs:(f+1)*baseInputs], cur[:])
+	}
+	return s
 }
 
 // tdUpdate — навчання Q-LEARNING через TD (temporal-difference) помилку.
@@ -518,17 +571,47 @@ func wallWhisker(cx, cy, dx, dy float32) float32 {
 	return 0
 }
 
+// hasLineOfSight — чи є пряма видимість між точками (немає стіни на прямій).
+// Крокуємо від (x1,y1) до (x2,y2) по пів-клітинки; якщо натрапили на стіну до
+// цілі — видимості нема. [POMDP] так гравець «ховається» за стінами.
+func hasLineOfSight(x1, y1, x2, y2 float32) bool {
+	dx := x2 - x1
+	dy := y2 - y1
+	dist := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+	steps := int(dist / (pixelSize / 2))
+	if steps < 1 {
+		return true
+	}
+	sx := dx / float32(steps)
+	sy := dy / float32(steps)
+	x, y := x1, y1
+	for i := 0; i < steps; i++ {
+		x += sx
+		y += sy
+		if isWallAt(int(x)/pixelSize, int(y)/pixelSize) {
+			return false
+		}
+	}
+	return true
+}
+
 // GatherInputs збирає стан (state) для Q-мережі.
 //
-//	[0] dx/screenWidth     напрямок до гравця X
-//	[1] dy/screenHeight    напрямок до гравця Y
-//	[2] dist/screenWidth   відстань до гравця
-//	[3] pVelX/5            швидкість гравця X
-//	[4] pVelY/5            швидкість гравця Y
-//	[5..12] whiskers       близькість стіни у 8 напрямках  ◄── зір на перешкоди
+//	[0] dx/screenWidth     напрямок до гравця X   ◄─┐
+//	[1] dy/screenHeight    напрямок до гравця Y     │ обнуляються,
+//	[2] dist/screenWidth   відстань до гравця       │ коли гравця НЕ видно
+//	[3] pVelX/5            швидкість гравця X        │ (POMDP)
+//	[4] pVelY/5            швидкість гравця Y     ◄─┘
+//	[5..12] whiskers       близькість стіни у 8 напрямках  ◄── зір на перешкоди (завжди)
+//	[13] visible           1 = гравця видно, 0 = ні
+//
+// [POMDP] Якщо localSight — гравець «видимий» лише в межах sightRange і по прямій
+// видимості (промінь не перекритий стіною). Поза цим позиційні входи = 0 і
+// visible = 0 → агент не знає, де гравець. Саме тут згодом порятує пам'ять.
 //
 // Побічно зберігає whiskers у Brain для візуалізації.
-func GatherInputs(enemy, player *Pixel) [brainInputs]float32 {
+// Повертає ОДИН кадр (baseInputs); склеювання в стек робить Brain.Step.
+func GatherInputs(enemy, player *Pixel) [baseInputs]float32 {
 	dx := player.X - enemy.X
 	dy := player.Y - enemy.Y
 	dist := float32(math.Sqrt(float64(dx*dx + dy*dy)))
@@ -536,15 +619,26 @@ func GatherInputs(enemy, player *Pixel) [brainInputs]float32 {
 		dist = 1
 	}
 
-	var in [brainInputs]float32
-	in[0] = dx / screenWidth
-	in[1] = dy / screenHeight
-	in[2] = dist / screenWidth
-	in[3] = player.VelX / 5.0
-	in[4] = player.VelY / 5.0
-
 	cx := enemy.X + pixelSize/2
 	cy := enemy.Y + pixelSize/2
+
+	visible := true
+	if localSight {
+		visible = dist <= sightRange &&
+			hasLineOfSight(cx, cy, player.X+pixelSize/2, player.Y+pixelSize/2)
+	}
+
+	var in [baseInputs]float32
+	if visible {
+		in[0] = dx / screenWidth
+		in[1] = dy / screenHeight
+		in[2] = dist / screenWidth
+		in[3] = player.VelX / 5.0
+		in[4] = player.VelY / 5.0
+		in[13] = 1
+	}
+	// (якщо не видно — [0..4] і [13] лишаються 0)
+
 	for i := 0; i < brainWhiskers; i++ {
 		w := wallWhisker(cx, cy, dirs8[i][0], dirs8[i][1])
 		in[5+i] = w
