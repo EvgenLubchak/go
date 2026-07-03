@@ -24,7 +24,7 @@ import (
 // що в стіни врізатись погано, і навчиться їх обходити.
 //
 // АРХІТЕКТУРА (Q-мережа):
-//   state = стек останніх stackFrames кадрів по baseInputs → hidden(16) → Q(8)
+//   state = стек кадрів (baseInputs×stackFrames) → hidden1(32) → hidden2(16) → Q(8)
 //   baseInputs(14) = 5 базових (dx,dy,dist,pVelX,pVelY) + 8 whiskers + 1 «гравця видно»
 //   8 виходів = Q-значення для 8 напрямків руху. Дія = напрямок з найбільшим Q.
 //
@@ -43,10 +43,15 @@ const (
 	stackFrames = 4  // [ПАМ'ЯТЬ] скільки кадрів склеюємо на вхід (1 = без пам'яті)
 	stackSkip   = 20 // кадрів між семплами історії → вікно пам'яті ≈ (stackFrames-1)*stackSkip
 
-	brainInputs   = baseInputs * stackFrames // повний вхід мережі (стек кадрів)
-	brainHidden   = 16                       // нейрони прихованого шару
-	brainActions  = 8                        // 8 напрямків руху (= кількість виходів Q)
-	brainWhiskers = 8                        // промені-сенсори стін
+	brainInputs = baseInputs * stackFrames // повний вхід мережі (стек кадрів)
+
+	// [ГЛИБИНА] Два прихованих шари — «зігнути, потім зігнути ще раз» (оріґамі).
+	// Глибина ефективніше вичленяє складні залежності, ніж один ширший шар.
+	brainHidden1 = 32 // 1-й прихований шар (згин простору входів)
+	brainHidden2 = 16 // 2-й прихований шар (згин поверх згину)
+
+	brainActions  = 8 // 8 напрямків руху (= кількість виходів Q)
+	brainWhiskers = 8 // промені-сенсори стін
 
 	qLearnRate = 0.005 // швидкість навчання (RL шумніший за supervised → помірно)
 	qGamma     = 0.95  // discount: наскільки цінувати майбутні нагороди (0..1)
@@ -120,18 +125,23 @@ type transition struct {
 // Кілька Brain можуть указувати на ОДИН Net (режим sharedBrain=true) → «вулик-
 // розум»: усі ділять одну вивчену політику й спільний досвід.
 //
-// [GO: ВАГИ ДВОХ ШАРІВ] W1[j][i] — вхід i → прихований j; W2[k][j] — j → вихід k.
+// [GO: ВАГИ ТРЬОХ ШАРІВ]
+// W1: вхід → hidden1;  W2: hidden1 → hidden2;  W3: hidden2 → вихід(Q).
 type Net struct {
-	W1 [brainHidden][brainInputs]float32
-	B1 [brainHidden]float32
-	W2 [brainActions][brainHidden]float32
-	B2 [brainActions]float32
+	W1 [brainHidden1][brainInputs]float32
+	B1 [brainHidden1]float32
+	W2 [brainHidden2][brainHidden1]float32
+	B2 [brainHidden2]float32
+	W3 [brainActions][brainHidden2]float32
+	B3 [brainActions]float32
 
 	// [DQN: TARGET NETWORK] заморожена копія для Беллман-цілі (щоб не «тікала»).
-	tW1         [brainHidden][brainInputs]float32
-	tB1         [brainHidden]float32
-	tW2         [brainActions][brainHidden]float32
-	tB2         [brainActions]float32
+	tW1         [brainHidden1][brainInputs]float32
+	tB1         [brainHidden1]float32
+	tW2         [brainHidden2][brainHidden1]float32
+	tB2         [brainHidden2]float32
+	tW3         [brainActions][brainHidden2]float32
+	tB3         [brainActions]float32
 	syncCounter int
 
 	// [DQN: EXPERIENCE REPLAY] кільцевий буфер переходів.
@@ -198,10 +208,16 @@ func NewNet() *Net {
 			n.W1[j][i] = (rand.Float32()*2 - 1) * s1
 		}
 	}
-	s2 := float32(math.Sqrt(1.0 / brainHidden))
+	s2 := float32(math.Sqrt(1.0 / brainHidden1))
 	for k := range n.W2 {
 		for j := range n.W2[k] {
 			n.W2[k][j] = (rand.Float32()*2 - 1) * s2
+		}
+	}
+	s3 := float32(math.Sqrt(1.0 / brainHidden2))
+	for a := range n.W3 {
+		for k := range n.W3[a] {
+			n.W3[a][k] = (rand.Float32()*2 - 1) * s3
 		}
 	}
 	n.syncTarget() // target стартує копією живих ваг
@@ -217,53 +233,68 @@ func NewBrainWith(net *Net) *Brain { return &Brain{net: net} }
 // syncTarget копіює живі ваги в target-мережу.
 // [GO: масиви — значимі типи] присвоєння масиву копіює його повністю.
 func (n *Net) syncTarget() {
-	n.tW1, n.tB1, n.tW2, n.tB2 = n.W1, n.B1, n.W2, n.B2
+	n.tW1, n.tB1 = n.W1, n.B1
+	n.tW2, n.tB2 = n.W2, n.B2
+	n.tW3, n.tB3 = n.W3, n.B3
 }
 
 // forwardQTarget — як forwardQ, але по ЗАМОРОЖЕНИХ (target) вагах.
 // Використовується лише для обрахунку Беллман-цілі.
 func (n *Net) forwardQTarget(state [brainInputs]float32) [brainActions]float32 {
-	var hidden [brainHidden]float32
-	for j := 0; j < brainHidden; j++ {
+	var h1 [brainHidden1]float32
+	for j := 0; j < brainHidden1; j++ {
 		z := n.tB1[j]
 		for i := 0; i < brainInputs; i++ {
 			z += state[i] * n.tW1[j][i]
 		}
-		hidden[j] = tanh(z)
+		h1[j] = tanh(z)
+	}
+	var h2 [brainHidden2]float32
+	for k := 0; k < brainHidden2; k++ {
+		z := n.tB2[k]
+		for j := 0; j < brainHidden1; j++ {
+			z += h1[j] * n.tW2[k][j]
+		}
+		h2[k] = tanh(z)
 	}
 	var q [brainActions]float32
-	for k := 0; k < brainActions; k++ {
-		z := n.tB2[k]
-		for j := 0; j < brainHidden; j++ {
-			z += hidden[j] * n.tW2[k][j]
+	for a := 0; a < brainActions; a++ {
+		z := n.tB3[a]
+		for k := 0; k < brainHidden2; k++ {
+			z += h2[k] * n.tW3[a][k]
 		}
-		q[k] = z
+		q[a] = z
 	}
 	return q
 }
 
-// forwardQ — прямий прохід: state → Q-значення всіх 8 дій.
+// forwardQ — прямий прохід: state → hidden1 → hidden2 → Q-значення всіх 8 дій.
 //
 // [RL: Q(s, a) = "наскільки хороша дія a у стані s"]
-// Q ≈ очікувана сумарна майбутня нагорода, якщо зробити a, а далі діяти жадібно.
-//
-// Прихований шар з tanh (нелінійність), вихід ЛІНІЙНИЙ — бо Q-значення можуть
-// бути будь-якими числами. Функція ЧИСТА (лише читає ваги) → безпечна для
-// паралельного виклику, поки ніхто не ПИШЕ ваги (а пишемо ми лише в trainBrains).
-func (n *Net) forwardQ(state [brainInputs]float32) (q [brainActions]float32, hidden [brainHidden]float32) {
-	for j := 0; j < brainHidden; j++ {
+// Два приховані шари з tanh (два «згини» простору), вихід ЛІНІЙНИЙ. Повертає
+// також активації h1, h2 — вони потрібні для backprop. Функція ЧИСТА (лише читає
+// ваги) → безпечна для паралельного виклику, поки ніхто не ПИШЕ ваги.
+func (n *Net) forwardQ(state [brainInputs]float32) (q [brainActions]float32, h1 [brainHidden1]float32, h2 [brainHidden2]float32) {
+	for j := 0; j < brainHidden1; j++ {
 		z := n.B1[j]
 		for i := 0; i < brainInputs; i++ {
 			z += state[i] * n.W1[j][i]
 		}
-		hidden[j] = tanh(z)
+		h1[j] = tanh(z)
 	}
-	for k := 0; k < brainActions; k++ {
+	for k := 0; k < brainHidden2; k++ {
 		z := n.B2[k]
-		for j := 0; j < brainHidden; j++ {
-			z += hidden[j] * n.W2[k][j]
+		for j := 0; j < brainHidden1; j++ {
+			z += h1[j] * n.W2[k][j]
 		}
-		q[k] = z // лінійний вихід
+		h2[k] = tanh(z)
+	}
+	for a := 0; a < brainActions; a++ {
+		z := n.B3[a]
+		for k := 0; k < brainHidden2; k++ {
+			z += h2[k] * n.W3[a][k]
+		}
+		q[a] = z // лінійний вихід
 	}
 	return
 }
@@ -332,7 +363,7 @@ func (b *Brain) selectAction(state [brainInputs]float32) int {
 	if rand.Float32() < b.epsilon() {
 		return rand.Intn(brainActions)
 	}
-	q, _ := b.net.forwardQ(state)
+	q, _, _ := b.net.forwardQ(state)
 	return argmaxQ(q)
 }
 
@@ -497,7 +528,7 @@ func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainI
 	target := clamp(reward+qGamma*maxNext, -qClip, qClip)
 
 	// Поточна оцінка + активації прихованого шару (для backprop) — по ЖИВІЙ мережі.
-	q1, hidden := n.forwardQ(s)
+	q1, h1, h2 := n.forwardQ(s)
 	rawTD := target - q1[a]
 	// [МЕТРИКИ] сира величина «здивування» + рівень Q (канарки навчання/розбіжності).
 	n.mTDSum += float32(math.Abs(float64(rawTD)))
@@ -506,18 +537,40 @@ func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainI
 	// [DQN: ERROR CLIPPING] обмежуємо TD-помилку до [-1,1].
 	tdErr := clamp(rawTD, -1, 1)
 
-	// Вихідний шар: похибку має лише нейрон дії a (лінійний вихід → похідна 1).
-	// Прихований шар: проштовхуємо похибку назад через W2[a].
-	for j := 0; j < brainHidden; j++ {
-		// deltaHidden рахуємо ДО оновлення W2[a][j] (по старій вазі).
-		deltaHidden := tdErr * n.W2[a][j] * (1 - hidden[j]*hidden[j])
-		n.W2[a][j] += qLearnRate * tdErr * hidden[j]
-		for i := 0; i < brainInputs; i++ {
-			n.W1[j][i] += qLearnRate * deltaHidden * s[i]
-		}
-		n.B1[j] += qLearnRate * deltaHidden
+	// [BACKPROP крізь 3 шари] Похибку має лише вихід дії a (лінійний → похідна 1).
+	// Спершу рахуємо ВСІ дельти (по СТАРИХ вагах), потім оновлюємо ваги.
+	// hidden2: delta2[k] = tdErr · W3[a][k] · tanh'(h2[k])
+	var delta2 [brainHidden2]float32
+	for k := 0; k < brainHidden2; k++ {
+		delta2[k] = tdErr * n.W3[a][k] * (1 - h2[k]*h2[k])
 	}
-	n.B2[a] += qLearnRate * tdErr
+	// hidden1: delta1[j] = (Σ_k delta2[k]·W2[k][j]) · tanh'(h1[j])
+	var delta1 [brainHidden1]float32
+	for j := 0; j < brainHidden1; j++ {
+		var sum float32
+		for k := 0; k < brainHidden2; k++ {
+			sum += delta2[k] * n.W2[k][j]
+		}
+		delta1[j] = sum * (1 - h1[j]*h1[j])
+	}
+
+	// Оновлення ваг (від виходу до входу).
+	for k := 0; k < brainHidden2; k++ { // вихід: лише рядок дії a
+		n.W3[a][k] += qLearnRate * tdErr * h2[k]
+	}
+	n.B3[a] += qLearnRate * tdErr
+	for k := 0; k < brainHidden2; k++ { // hidden2
+		for j := 0; j < brainHidden1; j++ {
+			n.W2[k][j] += qLearnRate * delta2[k] * h1[j]
+		}
+		n.B2[k] += qLearnRate * delta2[k]
+	}
+	for j := 0; j < brainHidden1; j++ { // hidden1
+		for i := 0; i < brainInputs; i++ {
+			n.W1[j][i] += qLearnRate * delta1[j] * s[i]
+		}
+		n.B1[j] += qLearnRate * delta1[j]
+	}
 
 	n.clipWeights()
 
@@ -542,6 +595,12 @@ func (n *Net) clipWeights() {
 			n.W2[k][j] = clamp(n.W2[k][j], -brainMaxWeight, brainMaxWeight)
 		}
 		n.B2[k] = clamp(n.B2[k], -brainMaxWeight, brainMaxWeight)
+	}
+	for a := range n.W3 {
+		for k := range n.W3[a] {
+			n.W3[a][k] = clamp(n.W3[a][k], -brainMaxWeight, brainMaxWeight)
+		}
+		n.B3[a] = clamp(n.B3[a], -brainMaxWeight, brainMaxWeight)
 	}
 }
 
@@ -655,13 +714,16 @@ const brainFile = "brain_weights.json"
 // BrainData — серіалізація ваг у JSON + розміри мережі для перевірки сумісності.
 type BrainData struct {
 	Inputs  int `json:"inputs"`
-	Hidden  int `json:"hidden"`
+	Hidden1 int `json:"hidden1"`
+	Hidden2 int `json:"hidden2"`
 	Actions int `json:"actions"`
 
-	W1 [brainHidden][brainInputs]float32  `json:"w1"`
-	B1 [brainHidden]float32               `json:"b1"`
-	W2 [brainActions][brainHidden]float32 `json:"w2"`
-	B2 [brainActions]float32              `json:"b2"`
+	W1 [brainHidden1][brainInputs]float32  `json:"w1"`
+	B1 [brainHidden1]float32               `json:"b1"`
+	W2 [brainHidden2][brainHidden1]float32 `json:"w2"`
+	B2 [brainHidden2]float32               `json:"b2"`
+	W3 [brainActions][brainHidden2]float32 `json:"w3"`
+	B3 [brainActions]float32               `json:"b3"`
 }
 
 // SaveBrain зберігає ваги мережі агента у JSON.
@@ -670,8 +732,8 @@ func SaveBrain(b *Brain) error { return SaveNet(b.net) }
 // SaveNet зберігає ваги мережі у JSON (читабельний MarshalIndent).
 func SaveNet(n *Net) error {
 	data := BrainData{
-		Inputs: brainInputs, Hidden: brainHidden, Actions: brainActions,
-		W1: n.W1, B1: n.B1, W2: n.W2, B2: n.B2,
+		Inputs: brainInputs, Hidden1: brainHidden1, Hidden2: brainHidden2, Actions: brainActions,
+		W1: n.W1, B1: n.B1, W2: n.W2, B2: n.B2, W3: n.W3, B3: n.B3,
 	}
 	bytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
@@ -692,10 +754,11 @@ func LoadNet() *Net {
 	if err := json.Unmarshal(bytes, &data); err != nil {
 		return nil
 	}
-	if data.Inputs != brainInputs || data.Hidden != brainHidden || data.Actions != brainActions {
+	if data.Inputs != brainInputs || data.Hidden1 != brainHidden1 ||
+		data.Hidden2 != brainHidden2 || data.Actions != brainActions {
 		return nil // несумісна архітектура → почнемо з нуля
 	}
-	n := &Net{W1: data.W1, B1: data.B1, W2: data.W2, B2: data.B2}
+	n := &Net{W1: data.W1, B1: data.B1, W2: data.W2, B2: data.B2, W3: data.W3, B3: data.B3}
 	n.syncTarget()
 	return n
 }

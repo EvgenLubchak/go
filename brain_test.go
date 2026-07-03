@@ -22,12 +22,12 @@ func TestQLearningTDUpdate(t *testing.T) {
 	const a = 3
 	const reward = 1.0
 
-	q2, _ := b.net.forwardQ(s2)
+	q2, _, _ := b.net.forwardQ(s2)
 	target := clamp(reward+qGamma*q2[argmaxQ(q2)], -qClip, qClip)
 
-	qBefore, _ := b.net.forwardQ(s)
+	qBefore, _, _ := b.net.forwardQ(s)
 	b.net.tdUpdate(s, a, reward, s2)
-	qAfter, _ := b.net.forwardQ(s)
+	qAfter, _, _ := b.net.forwardQ(s)
 
 	distBefore := float32(math.Abs(float64(target - qBefore[a])))
 	distAfter := float32(math.Abs(float64(target - qAfter[a]))) // має зменшитись
@@ -89,7 +89,7 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 	for _, off := range offsets {
 		player.X, player.Y = enemy.X+off[0], enemy.Y+off[1]
 		state := GatherInputs(enemy, player)
-		q, _ := b.net.forwardQ(stackSteady(state)) // [ПАМ'ЯТЬ] проба усталеним стеком
+		q, _, _ := b.net.forwardQ(stackSteady(state)) // [ПАМ'ЯТЬ] проба усталеним стеком
 		a := argmaxQ(q)
 		n := float32(math.Sqrt(float64(off[0]*off[0] + off[1]*off[1])))
 		sumDot += dirs8[a][0]*off[0]/n + dirs8[a][1]*off[1]/n
