@@ -19,9 +19,13 @@ func collides(ax, ay, bx, by float32) bool {
 func (g *Game) checkCollisions() {
 	for _, e := range g.enemies {
 		if collides(g.player.X, g.player.Y, e.X, e.Y) {
-			g.gameOver = true
-			// Зберігаємо мозок Learner-ів при game over
-			g.saveBrains()
+			if aiPlayer {
+				// [SELF-PLAY] Не game over — переносимо жертву й тренуємось далі.
+				g.respawnPlayer()
+			} else {
+				g.gameOver = true
+				g.saveBrains() // зберігаємо мозок хижаків
+			}
 			return
 		}
 	}

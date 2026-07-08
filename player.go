@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"math/rand"
 
 	"github.com/hajimehoshi/ebiten/v2"
 )
@@ -53,9 +54,39 @@ func (g *Game) handleFirstPersonInput() {
 	}
 }
 
+// updatePrey — [SELF-PLAY] гравцем керує мозок-жертва (замість клавіатури).
+// Спостерігає загрозу, обирає дію (тікати), прискорюється в той бік. Далі
+// updatePlayer застосує фізику (тертя, стіни, обмеження швидкості).
+func (g *Game) updatePrey() {
+	state, dist := GatherPreyInputs(&g.player, g.enemies)
+	action := g.player.Brain.Step(state, dist, g.player.HitWall)
+	g.player.VelX += dirs8[action][0] * playerAccel
+	g.player.VelY += dirs8[action][1] * playerAccel
+}
+
+// respawnPlayer — [SELF-PLAY] після спіймання переносимо гравця у випадкове
+// відкрите місце й продовжуємо тренування (без game over). Скидаємо hasPrev,
+// щоб мозок-жертва не вчився на «телепорті».
+func (g *Game) respawnPlayer() {
+	for tries := 0; tries < 50; tries++ {
+		x := float32(rand.Intn(screenWidth - pixelSize))
+		y := float32(rand.Intn(screenHeight - pixelSize))
+		if !isInteriorWallRect(x, y) {
+			g.player.X, g.player.Y = x, y
+			break
+		}
+	}
+	g.player.VelX, g.player.VelY = 0, 0
+	if g.player.Brain != nil {
+		g.player.Brain.hasPrev = false
+	}
+}
+
 // updatePlayer застосовує тертя, обмежує швидкість і рухає гравця.
 // Макс швидкість росте через sqrt(difficulty) — повільніше ніж вороги.
 func (g *Game) updatePlayer() {
+	g.player.HitWall = false // [SELF-PLAY] сигнал удару об стіну для мозку-жертви
+
 	// Тертя — при відпусканні клавіші гравець поступово зупиняється (інерція)
 	g.player.VelX *= playerFriction
 	g.player.VelY *= playerFriction
@@ -77,24 +108,36 @@ func (g *Game) updatePlayer() {
 		g.player.X = newX
 	} else {
 		g.player.VelX = 0
+		g.player.HitWall = true
 	}
 	if !isInteriorWallRect(g.player.X, newY) {
 		g.player.Y = newY
 	} else {
 		g.player.VelY = 0
+		g.player.HitWall = true
 	}
 
-	// Wrap-around: вилітаєш за край — з'являєшся з іншого боку.
-	if g.player.X > screenWidth {
+	// Межа екрану — суцільна стіна (без телепорту): зупиняємось на краю й
+	// сигналимо HitWall, так само як від внутрішніх стін. Вороги від межі
+	// відбиваються — тепер гравець теж не «протікає» наскрізь.
+	if g.player.X < 0 {
 		g.player.X = 0
+		g.player.VelX = 0
+		g.player.HitWall = true
 	}
-	if g.player.X < -pixelSize {
-		g.player.X = screenWidth
+	if g.player.X > screenWidth-pixelSize {
+		g.player.X = screenWidth - pixelSize
+		g.player.VelX = 0
+		g.player.HitWall = true
 	}
-	if g.player.Y > screenHeight {
+	if g.player.Y < 0 {
 		g.player.Y = 0
+		g.player.VelY = 0
+		g.player.HitWall = true
 	}
-	if g.player.Y < -pixelSize {
-		g.player.Y = screenHeight
+	if g.player.Y > screenHeight-pixelSize {
+		g.player.Y = screenHeight - pixelSize
+		g.player.VelY = 0
+		g.player.HitWall = true
 	}
 }

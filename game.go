@@ -121,12 +121,19 @@ func (g *Game) Update() error {
 		g.attackTimer--
 	}
 
-	g.handlePlayerInput()
+	if aiPlayer && g.player.Brain != nil {
+		g.updatePrey() // [SELF-PLAY] гравцем керує мозок-жертва
+	} else {
+		g.handlePlayerInput()
+	}
 	g.updatePlayer()
 	g.playerAttack()
 	g.updateBoidMap()
 	g.calcAcceleration()
-	g.trainBrains()      // [SHARED BRAIN] навчання мереж раз/кадр, ОДНОПОТОКОВО
+	g.trainBrains() // [SHARED BRAIN] навчання мереж хижаків раз/кадр, ОДНОПОТОКОВО
+	if aiPlayer && g.player.Brain != nil {
+		g.player.Brain.net.train(qBatch) // [SELF-PLAY] тренуємо мозок-жертву
+	}
 	g.metrics.collect(g) // [МЕТРИКИ] збір показників навчання (однопотоково)
 	g.updateEnemies()
 	g.removeDeadEnemies()

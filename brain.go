@@ -187,6 +187,10 @@ type Brain struct {
 	frustration  int
 	markStuck    bool
 
+	// [SELF-PLAY] flee=true → ЖЕРТВА: reward інвертується (далі від ворога = краще).
+	// false → ХИЖАК (ближче до гравця = краще), як у ворогів.
+	flee bool
+
 	// Для візуалізації (читає Draw, пише calcAcceleration — різні фази, без гонки).
 	lastWhiskers [brainWhiskers]float32
 	lastAction   int
@@ -425,8 +429,12 @@ func (b *Brain) Step(cur [baseInputs]float32, dist float32, hitWall bool) int {
 	// 1) Нагорода за попередню дію → перехід у (можливо спільний) буфер.
 	if b.hasPrev {
 		// [RL: REWARD SHAPING]
-		// Щільна нагорода веде агента: наблизився → +, віддалився → −.
-		reward := (b.prevDist - dist) * rewardCloserScale
+		// Хижак: наблизився → +. [SELF-PLAY] Жертва (flee): інвертуємо — далі → +.
+		sign := float32(1)
+		if b.flee {
+			sign = -1
+		}
+		reward := sign * (b.prevDist - dist) * rewardCloserScale
 		if hitWall {
 			reward += rewardWallHit // [1a] по факту удару
 		}
@@ -706,6 +714,55 @@ func GatherInputs(enemy, player *Pixel) [baseInputs]float32 {
 		}
 	}
 	return in
+}
+
+// GatherPreyInputs — стан для мозку-ЖЕРТВИ (гравця у self-play). Дзеркало
+// GatherInputs: замість «куди гравець» — «звідки загроза» (напрямок до НАЙБЛИЖЧОГО
+// ворога). Мережа вчиться рухатись ГЕТЬ (бо reward інвертований, flee=true).
+// Повертає кадр (baseInputs) і відстань до найближчого ворога (для reward).
+func GatherPreyInputs(player *Pixel, enemies []Pixel) ([baseInputs]float32, float32) {
+	cx := player.X + pixelSize/2
+	cy := player.Y + pixelSize/2
+
+	// Найближчий ворог = головна загроза.
+	nearest := -1
+	var best float32 = 1e30
+	for i := range enemies {
+		dx := enemies[i].X - player.X
+		dy := enemies[i].Y - player.Y
+		d := dx*dx + dy*dy
+		if d < best {
+			best = d
+			nearest = i
+		}
+	}
+
+	var in [baseInputs]float32
+	dist := float32(1)
+	if nearest >= 0 {
+		e := &enemies[nearest]
+		dx := e.X - player.X
+		dy := e.Y - player.Y
+		dist = float32(math.Sqrt(float64(dx*dx + dy*dy)))
+		if dist == 0 {
+			dist = 1
+		}
+		in[0] = dx / screenWidth
+		in[1] = dy / screenHeight
+		in[2] = dist / screenWidth
+		in[3] = e.VelX / 5.0
+		in[4] = e.VelY / 5.0
+		in[13] = 1
+	}
+
+	for i := 0; i < brainWhiskers; i++ {
+		w := wallWhisker(cx, cy, dirs8[i][0], dirs8[i][1])
+		in[5+i] = w
+		if player.Brain != nil {
+			player.Brain.lastWhiskers[i] = w
+		}
+	}
+	return in, dist
 }
 
 // brainFile — шлях до файлу де зберігаються вивчені ваги між сесіями.

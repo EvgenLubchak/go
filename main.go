@@ -73,6 +73,7 @@ var (
 	epsilonDecayEnabled = false // ε: false = постійна (qEpsilonConst); true = автоспад max→min
 	sharedBrain         = true  // true = всі учні ділять ОДНУ мережу (вулик-розум); false = кожен свою
 	localSight          = true  // [POMDP] true = агент бачить гравця лише поблизу+по прямій; false = всевидющий
+	aiPlayer            = false // [SELF-PLAY] true = гравцем керує мозок-жертва (вчиться тікати); false = людина
 )
 
 func init() {
@@ -93,6 +94,13 @@ func main() {
 			Label: "Y}{IJIEC",
 		},
 		enemies: newEnemies(enemyCount),
+	}
+
+	// [SELF-PLAY] Даємо гравцю власний мозок-жертву (flee=true → reward за ВТЕЧУ).
+	// Окрема ефемерна мережа: не зберігається (зберігаємо лише хижаків через saveBrains).
+	if aiPlayer {
+		game.player.Brain = NewBrain()
+		game.player.Brain.flee = true
 	}
 
 	startBeat(1.0) // запускаємо аудіо перед стартом гри
