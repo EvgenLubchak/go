@@ -131,3 +131,55 @@ func TestSharedBrainNoRace(t *testing.T) {
 		net.train(qBatch)
 	}
 }
+
+// TestGRULearnsSequence перевіряє напрям градієнтів BPTT: після навчання на
+// відрізку з ПОЗИТИВНИМ reward оцінка Q обраних дій має ЗРОСТИ (рух до цілі),
+// а не тікати. Якщо знак градієнта переплутано — Q падав би, і тест упав.
+// Запуск: go test -run TestGRULearnsSequence -v
+func TestGRULearnsSequence(t *testing.T) {
+	old := useGRU
+	useGRU = true
+	defer func() { useGRU = old }()
+
+	n := NewNet()
+
+	// Фіксований відрізок із чітким сигналом: reward=+1 щокроку для дії 2.
+	var seq sequence
+	for i := 0; i < seqLen; i++ {
+		for m := 0; m < baseInputs; m++ {
+			seq.x[i][m] = float32(math.Sin(float64(i*7+m))) * 0.5
+		}
+		seq.a[i] = 2
+		seq.r[i] = 1.0
+	}
+	for m := 0; m < baseInputs; m++ {
+		seq.xEnd[m] = 0.1
+	}
+
+	// Сума Q(обраної дії) по відрізку (жива мережа, від нульового стану).
+	qSum := func() float32 {
+		var h [gruHidden]float32
+		var s float32
+		for i := 0; i < seqLen; i++ {
+			q, hn := n.forwardGRU(seq.x[i], h)
+			h = hn
+			s += q[seq.a[i]]
+		}
+		return s
+	}
+
+	before := qSum()
+	// < qTargetSync (1000), щоб target не синхронізувався в межах тесту.
+	for i := 0; i < 500; i++ {
+		n.tdUpdateSeq(seq)
+	}
+	after := qSum()
+
+	if math.IsNaN(float64(after)) || math.IsInf(float64(after), 0) {
+		t.Fatalf("Q став NaN/Inf після BPTT: %v", after)
+	}
+	if after <= before {
+		t.Fatalf("GRU не вчиться: Q обраної дії не зросло (before=%.4f after=%.4f)", before, after)
+	}
+	t.Logf("Q(дію) до=%.4f після=%.4f — зросло, BPTT працює", before, after)
+}

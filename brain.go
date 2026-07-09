@@ -64,6 +64,9 @@ const (
 	// «розгорнути» памʼять, треба seqLen поспіль кадрів ОДНОГО агента.
 	seqLen        = 8   // кадрів у відрізку
 	seqReplaySize = 512 // місткість буфера відрізків (≈ seqLen×512 кадрів)
+	seqBatch      = 8   // відрізків на кадр у навчанні (кожен = seqLen кроків BPTT)
+	seqMinReplay  = 32  // не вчимось, поки буфер не набрав стільки відрізків
+	gruGradClip   = 1.0 // [RNN] кліп градієнта по часу — проти вибуху при BPTT
 
 	qLearnRate = 0.005 // швидкість навчання (RL шумніший за supervised → помірно)
 	qGamma     = 0.95  // discount: наскільки цінувати майбутні нагороди (0..1)
@@ -207,6 +210,19 @@ type Net struct {
 	Bh [gruHidden]float32
 	Wq [brainActions][gruHidden]float32
 	Bq [brainActions]float32
+
+	// [RNN] Target-копії GRU-ваг — заморожені для Беллман-цілі (як tW1… для стеку).
+	tWz [gruHidden][baseInputs]float32
+	tUz [gruHidden][gruHidden]float32
+	tBz [gruHidden]float32
+	tWr [gruHidden][baseInputs]float32
+	tUr [gruHidden][gruHidden]float32
+	tBr [gruHidden]float32
+	tWh [gruHidden][baseInputs]float32
+	tUh [gruHidden][gruHidden]float32
+	tBh [gruHidden]float32
+	tWq [brainActions][gruHidden]float32
+	tBq [brainActions]float32
 }
 
 // Brain — «голова» одного ворога-учня: указник на мережу + ОСОБИСТА пам'ять.
@@ -339,6 +355,11 @@ func (n *Net) syncTarget() {
 	n.tW1, n.tB1 = n.W1, n.B1
 	n.tW2, n.tB2 = n.W2, n.B2
 	n.tW3, n.tB3 = n.W3, n.B3
+	// [RNN] і GRU-ваги
+	n.tWz, n.tUz, n.tBz = n.Wz, n.Uz, n.Bz
+	n.tWr, n.tUr, n.tBr = n.Wr, n.Ur, n.Br
+	n.tWh, n.tUh, n.tBh = n.Wh, n.Uh, n.Bh
+	n.tWq, n.tBq = n.Wq, n.Bq
 }
 
 // forwardQTarget — як forwardQ, але по ЗАМОРОЖЕНИХ (target) вагах.
@@ -448,6 +469,44 @@ func (n *Net) forwardGRU(x [baseInputs]float32, hPrev [gruHidden]float32) (q [br
 		s := n.Bq[a]
 		for k := 0; k < gruHidden; k++ {
 			s += n.Wq[a][k] * hNew[k]
+		}
+		q[a] = s
+	}
+	return
+}
+
+// forwardGRUTarget — як forwardGRU, але по ЗАМОРОЖЕНИХ (target) GRU-вагах.
+// Для обрахунку Беллман-цілі при BPTT (крок 3).
+func (n *Net) forwardGRUTarget(x [baseInputs]float32, hPrev [gruHidden]float32) (q [brainActions]float32, hNew [gruHidden]float32) {
+	var z, r [gruHidden]float32
+	for i := 0; i < gruHidden; i++ {
+		zi, ri := n.tBz[i], n.tBr[i]
+		for j := 0; j < baseInputs; j++ {
+			zi += n.tWz[i][j] * x[j]
+			ri += n.tWr[i][j] * x[j]
+		}
+		for j := 0; j < gruHidden; j++ {
+			zi += n.tUz[i][j] * hPrev[j]
+			ri += n.tUr[i][j] * hPrev[j]
+		}
+		z[i] = sigmoid(zi)
+		r[i] = sigmoid(ri)
+	}
+	for i := 0; i < gruHidden; i++ {
+		ci := n.tBh[i]
+		for j := 0; j < baseInputs; j++ {
+			ci += n.tWh[i][j] * x[j]
+		}
+		for j := 0; j < gruHidden; j++ {
+			ci += n.tUh[i][j] * (r[j] * hPrev[j])
+		}
+		cand := tanh(ci)
+		hNew[i] = (1-z[i])*hPrev[i] + z[i]*cand
+	}
+	for a := 0; a < brainActions; a++ {
+		s := n.tBq[a]
+		for k := 0; k < gruHidden; k++ {
+			s += n.tWq[a][k] * hNew[k]
 		}
 		q[a] = s
 	}
@@ -587,6 +646,10 @@ func (n *Net) seqReplayLen() int {
 // фазою) → запис ваг безпечний без локу. Зі спільним мозком уся колективна
 // вибірка тренує ОДНУ мережу нормальним темпом (а не N×qBatch разів за кадр).
 func (n *Net) train(k int) {
+	if useGRU {
+		n.trainSeq(seqBatch) // [RNN] рекурентний шлях — навчання на відрізках (BPTT)
+		return
+	}
 	m := n.replayLen()
 	if m < qMinReplay {
 		return
@@ -594,6 +657,17 @@ func (n *Net) train(k int) {
 	for i := 0; i < k; i++ {
 		t := n.replay[rand.Intn(m)]
 		n.tdUpdate(t.s, t.a, t.r, t.s2)
+	}
+}
+
+// trainSeq — [RNN] k оновлень на випадкових ВІДРІЗКАХ із буфера послідовностей.
+func (n *Net) trainSeq(k int) {
+	m := n.seqReplayLen()
+	if m < seqMinReplay {
+		return
+	}
+	for i := 0; i < k; i++ {
+		n.tdUpdateSeq(n.seqReplay[rand.Intn(m)])
 	}
 }
 
@@ -877,6 +951,193 @@ func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainI
 	}
 }
 
+// tdUpdateSeq — [RNN] навчання на одному ВІДРІЗКУ через BPTT (backprop through time).
+//
+// Три фази:
+//  1. FORWARD (жива мережа): проганяємо GRU по кадрах від нульового стану,
+//     кешуючи ворота z,r, кандидати cand і стан h на кожному кроці.
+//  2. TARGET: окремо проганяємо ЗАМОРОЖЕНУ мережу → Беллман-ціль для кожного кроку
+//     (target = r + γ·max_a Q_tgt(наступний стан)); TD-помилка = ціль − Q(дію).
+//  3. BACKWARD: гортаємо градієнти НАЗАД у часі. Помилка на h кожного кроку =
+//     (з виходу цього кроку) + (з рекурентного звʼязку наступного кроку). Ваги НЕ
+//     міняємо під час проходу (semi-gradient) — накопичуємо й застосовуємо в кінці.
+//
+// [Спрощення 1-ї версії] replay стартує з h=0 (не з реального стану на момент
+// збору) — «stored-state problem». Працює, хоч і неідеально; burn-in — на потім.
+func (n *Net) tdUpdateSeq(seq sequence) {
+	// --- Фаза 1: forward живої мережі з кешем ---
+	var hArr [seqLen + 1][gruHidden]float32 // hArr[t] = h_{t-1}; hArr[0]=0
+	var zc, rc, cc [seqLen][gruHidden]float32
+	for t := 0; t < seqLen; t++ {
+		hp := hArr[t]
+		x := seq.x[t]
+		var z, r [gruHidden]float32
+		for i := 0; i < gruHidden; i++ {
+			zi, ri := n.Bz[i], n.Br[i]
+			for j := 0; j < baseInputs; j++ {
+				zi += n.Wz[i][j] * x[j]
+				ri += n.Wr[i][j] * x[j]
+			}
+			for j := 0; j < gruHidden; j++ {
+				zi += n.Uz[i][j] * hp[j]
+				ri += n.Ur[i][j] * hp[j]
+			}
+			z[i], r[i] = sigmoid(zi), sigmoid(ri)
+		}
+		for i := 0; i < gruHidden; i++ {
+			ci := n.Bh[i]
+			for j := 0; j < baseInputs; j++ {
+				ci += n.Wh[i][j] * x[j]
+			}
+			for j := 0; j < gruHidden; j++ {
+				ci += n.Uh[i][j] * (r[j] * hp[j])
+			}
+			cand := tanh(ci)
+			cc[t][i] = cand
+			hArr[t+1][i] = (1-z[i])*hp[i] + z[i]*cand
+		}
+		zc[t], rc[t] = z, r
+	}
+
+	// --- Фаза 2: target-ціль для кожного кроку ---
+	// Проганяємо target-мережу; qTgt[s] = Q_tgt у стані s. Для кроку t bootstrap
+	// бере наступний стан: s=t+1 (в межах відрізка) або xEnd (останній крок).
+	var hT [gruHidden]float32
+	var qTgt [seqLen][brainActions]float32
+	for t := 0; t < seqLen; t++ {
+		qTgt[t], hT = n.forwardGRUTarget(seq.x[t], hT)
+	}
+	qEnd, _ := n.forwardGRUTarget(seq.xEnd, hT)
+
+	// TD-помилка на кожному кроці (semi-gradient: ціль — константа).
+	var td [seqLen]float32
+	for t := 0; t < seqLen; t++ {
+		var qNext [brainActions]float32
+		if t < seqLen-1 {
+			qNext = qTgt[t+1]
+		} else {
+			qNext = qEnd
+		}
+		target := clamp(seq.r[t]+qGamma*qNext[argmaxQ(qNext)], -qClip, qClip)
+
+		// Q(дію) живої мережі зі стану h_t (= hArr[t+1]).
+		a := seq.a[t]
+		qa := n.Bq[a]
+		for k := 0; k < gruHidden; k++ {
+			qa += n.Wq[a][k] * hArr[t+1][k]
+		}
+		rawTD := target - qa
+		n.mTDSum += float32(math.Abs(float64(rawTD)))
+		n.mQSum += qa
+		n.mTDN++
+		td[t] = clamp(rawTD, -1, 1)
+	}
+
+	// --- Фаза 3: BPTT (градієнти в акумулятори, застосовуємо в кінці) ---
+	var dWz, dWr, dWh [gruHidden][baseInputs]float32
+	var dUz, dUr, dUh [gruHidden][gruHidden]float32
+	var dBz, dBr, dBh [gruHidden]float32
+	var dWq [brainActions][gruHidden]float32
+	var dBq [brainActions]float32
+
+	var dhNext [gruHidden]float32 // градієнт, що тече з майбутнього кроку в h_t
+	for t := seqLen - 1; t >= 0; t-- {
+		hp := hArr[t]
+		ht := hArr[t+1]
+		x := seq.x[t]
+		a := seq.a[t]
+		z, r, cand := zc[t], rc[t], cc[t]
+
+		// Помилка на h_t = з виходу (лише дія a) + з рекурентного звʼязку.
+		var g [gruHidden]float32
+		for k := 0; k < gruHidden; k++ {
+			g[k] = td[t]*n.Wq[a][k] + dhNext[k]
+		}
+		for k := 0; k < gruHidden; k++ { // градієнт виходу
+			dWq[a][k] += td[t] * ht[k]
+		}
+		dBq[a] += td[t]
+
+		// Через клітину: спершу gzin і gcin (потрібні для reset-градієнта).
+		var gzin, gcin [gruHidden]float32
+		for i := 0; i < gruHidden; i++ {
+			gcin[i] = g[i] * z[i] * (1 - cand[i]*cand[i])          // через кандидат
+			gzin[i] = g[i] * (cand[i] - hp[i]) * z[i] * (1 - z[i]) // через update-ворота
+		}
+		// reset-ворота: r_j впливає на ВСІ кандидати → сума по i.
+		var grin [gruHidden]float32
+		for j := 0; j < gruHidden; j++ {
+			var gr float32
+			for i := 0; i < gruHidden; i++ {
+				gr += gcin[i] * n.Uh[i][j] * hp[j]
+			}
+			grin[j] = gr * r[j] * (1 - r[j])
+		}
+
+		// Накопичуємо градієнти ваг.
+		for i := 0; i < gruHidden; i++ {
+			for m := 0; m < baseInputs; m++ {
+				dWz[i][m] += gzin[i] * x[m]
+				dWr[i][m] += grin[i] * x[m]
+				dWh[i][m] += gcin[i] * x[m]
+			}
+			for j := 0; j < gruHidden; j++ {
+				dUz[i][j] += gzin[i] * hp[j]
+				dUr[i][j] += grin[i] * hp[j]
+				dUh[i][j] += gcin[i] * (r[j] * hp[j])
+			}
+			dBz[i] += gzin[i]
+			dBr[i] += grin[i]
+			dBh[i] += gcin[i]
+		}
+
+		// Градієнт у h_{t-1} (для наступної ітерації назад): 4 шляхи.
+		var dhPrev [gruHidden]float32
+		for j := 0; j < gruHidden; j++ {
+			s := g[j] * (1 - z[j]) // прямий шлях (1-z)⊙hp
+			for i := 0; i < gruHidden; i++ {
+				s += gzin[i] * n.Uz[i][j]
+				s += grin[i] * n.Ur[i][j]
+				s += gcin[i] * n.Uh[i][j] * r[j]
+			}
+			dhPrev[j] = clamp(s, -gruGradClip, gruGradClip) // кліп проти вибуху в часі
+		}
+		dhNext = dhPrev
+	}
+
+	// --- Застосування (крок ГРАДІЄНТНОГО ПІДЙОМУ на +tdErr, як у стек-tdUpdate) ---
+	cg := func(v float32) float32 { return clamp(v, -gruGradClip, gruGradClip) }
+	for i := 0; i < gruHidden; i++ {
+		for m := 0; m < baseInputs; m++ {
+			n.Wz[i][m] += qLearnRate * cg(dWz[i][m])
+			n.Wr[i][m] += qLearnRate * cg(dWr[i][m])
+			n.Wh[i][m] += qLearnRate * cg(dWh[i][m])
+		}
+		for j := 0; j < gruHidden; j++ {
+			n.Uz[i][j] += qLearnRate * cg(dUz[i][j])
+			n.Ur[i][j] += qLearnRate * cg(dUr[i][j])
+			n.Uh[i][j] += qLearnRate * cg(dUh[i][j])
+		}
+		n.Bz[i] += qLearnRate * cg(dBz[i])
+		n.Br[i] += qLearnRate * cg(dBr[i])
+		n.Bh[i] += qLearnRate * cg(dBh[i])
+	}
+	for a := 0; a < brainActions; a++ {
+		for k := 0; k < gruHidden; k++ {
+			n.Wq[a][k] += qLearnRate * cg(dWq[a][k])
+		}
+		n.Bq[a] += qLearnRate * cg(dBq[a])
+	}
+
+	n.clipGRU()
+
+	n.syncCounter++
+	if n.syncCounter >= qTargetSync {
+		n.syncTarget()
+		n.syncCounter = 0
+	}
+}
+
 // clipWeights обрізає всі ваги до [-brainMaxWeight, +brainMaxWeight].
 func (n *Net) clipWeights() {
 	for j := range n.W1 {
@@ -896,6 +1157,26 @@ func (n *Net) clipWeights() {
 			n.W3[a][k] = clamp(n.W3[a][k], -brainMaxWeight, brainMaxWeight)
 		}
 		n.B3[a] = clamp(n.B3[a], -brainMaxWeight, brainMaxWeight)
+	}
+}
+
+// clipGRU обрізає ваги рекурентної клітини до [-brainMaxWeight, +brainMaxWeight].
+func (n *Net) clipGRU() {
+	c := func(v float32) float32 { return clamp(v, -brainMaxWeight, brainMaxWeight) }
+	for i := 0; i < gruHidden; i++ {
+		for m := 0; m < baseInputs; m++ {
+			n.Wz[i][m], n.Wr[i][m], n.Wh[i][m] = c(n.Wz[i][m]), c(n.Wr[i][m]), c(n.Wh[i][m])
+		}
+		for j := 0; j < gruHidden; j++ {
+			n.Uz[i][j], n.Ur[i][j], n.Uh[i][j] = c(n.Uz[i][j]), c(n.Ur[i][j]), c(n.Uh[i][j])
+		}
+		n.Bz[i], n.Br[i], n.Bh[i] = c(n.Bz[i]), c(n.Br[i]), c(n.Bh[i])
+	}
+	for a := 0; a < brainActions; a++ {
+		for k := 0; k < gruHidden; k++ {
+			n.Wq[a][k] = c(n.Wq[a][k])
+		}
+		n.Bq[a] = c(n.Bq[a])
 	}
 }
 
