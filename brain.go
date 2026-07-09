@@ -68,7 +68,9 @@ const (
 	seqReplaySize = 512                // місткість буфера відрізків
 	seqBatch      = 8                  // відрізків на кадр у навчанні
 	seqMinReplay  = 32                 // не вчимось, поки буфер не набрав стільки відрізків
-	gruGradClip   = 1.0                // [RNN] кліп градієнта по часу — проти вибуху при BPTT
+	gruLearnRate  = 0.002              // [RNN] ОКРЕМА (нижча за стек) швидкість: рекурентне
+	//                                    навчання вередливіше → менший крок = менше дрейфу Q
+	gruGradClip = 0.5 // [RNN] кліп градієнта по часу — тугіший = спокійніший BPTT
 
 	qLearnRate = 0.005 // швидкість навчання (RL шумніший за supervised → помірно)
 	qGamma     = 0.95  // discount: наскільки цінувати майбутні нагороди (0..1)
@@ -1115,27 +1117,28 @@ func (n *Net) tdUpdateSeq(seq sequence) {
 	}
 
 	// --- Застосування (крок ГРАДІЄНТНОГО ПІДЙОМУ на +tdErr, як у стек-tdUpdate) ---
+	// gruLearnRate < qLearnRate: рекурентні кроки тримаємо спокійнішими (стабільність).
 	cg := func(v float32) float32 { return clamp(v, -gruGradClip, gruGradClip) }
 	for i := 0; i < gruHidden; i++ {
 		for m := 0; m < baseInputs; m++ {
-			n.Wz[i][m] += qLearnRate * cg(dWz[i][m])
-			n.Wr[i][m] += qLearnRate * cg(dWr[i][m])
-			n.Wh[i][m] += qLearnRate * cg(dWh[i][m])
+			n.Wz[i][m] += gruLearnRate * cg(dWz[i][m])
+			n.Wr[i][m] += gruLearnRate * cg(dWr[i][m])
+			n.Wh[i][m] += gruLearnRate * cg(dWh[i][m])
 		}
 		for j := 0; j < gruHidden; j++ {
-			n.Uz[i][j] += qLearnRate * cg(dUz[i][j])
-			n.Ur[i][j] += qLearnRate * cg(dUr[i][j])
-			n.Uh[i][j] += qLearnRate * cg(dUh[i][j])
+			n.Uz[i][j] += gruLearnRate * cg(dUz[i][j])
+			n.Ur[i][j] += gruLearnRate * cg(dUr[i][j])
+			n.Uh[i][j] += gruLearnRate * cg(dUh[i][j])
 		}
-		n.Bz[i] += qLearnRate * cg(dBz[i])
-		n.Br[i] += qLearnRate * cg(dBr[i])
-		n.Bh[i] += qLearnRate * cg(dBh[i])
+		n.Bz[i] += gruLearnRate * cg(dBz[i])
+		n.Br[i] += gruLearnRate * cg(dBr[i])
+		n.Bh[i] += gruLearnRate * cg(dBh[i])
 	}
 	for a := 0; a < brainActions; a++ {
 		for k := 0; k < gruHidden; k++ {
-			n.Wq[a][k] += qLearnRate * cg(dWq[a][k])
+			n.Wq[a][k] += gruLearnRate * cg(dWq[a][k])
 		}
-		n.Bq[a] += qLearnRate * cg(dBq[a])
+		n.Bq[a] += gruLearnRate * cg(dBq[a])
 	}
 
 	n.clipGRU()
