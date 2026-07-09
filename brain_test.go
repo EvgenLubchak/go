@@ -47,6 +47,10 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 	localSight = false // тест переслідування — з ПОВНОЮ спостережуваністю
 	defer func() { localSight = saved }()
 
+	savedGRU := useGRU
+	useGRU = false // цей тест перевіряє СТЕК-шлях (Step/train/forwardQ)
+	defer func() { useGRU = savedGRU }()
+
 	b := NewBrain()
 	// Ворог у відкритій зоні без стін (whiskers ≈ 0).
 	enemy := &Pixel{X: 1100, Y: 500, Cfg: ConfigLearner, Brain: b}
@@ -145,9 +149,9 @@ func TestGRULearnsSequence(t *testing.T) {
 
 	n := NewNet()
 
-	// Фіксований відрізок із чітким сигналом: reward=+1 щокроку для дії 2.
+	// Фіксований відрізок (burn-in + навчальні) із чітким сигналом: reward=+1 для дії 2.
 	var seq sequence
-	for i := 0; i < seqLen; i++ {
+	for i := 0; i < seqTotal; i++ {
 		for m := 0; m < baseInputs; m++ {
 			seq.x[i][m] = float32(math.Sin(float64(i*7+m))) * 0.5
 		}
@@ -158,14 +162,16 @@ func TestGRULearnsSequence(t *testing.T) {
 		seq.xEnd[m] = 0.1
 	}
 
-	// Сума Q(обраної дії) по відрізку (жива мережа, від нульового стану).
+	// Сума Q(обраної дії) на НАВЧАЛЬНОМУ вікні (жива мережа, з прогрівом burn-in).
 	qSum := func() float32 {
 		var h [gruHidden]float32
 		var s float32
-		for i := 0; i < seqLen; i++ {
+		for i := 0; i < seqTotal; i++ {
 			q, hn := n.forwardGRU(seq.x[i], h)
 			h = hn
-			s += q[seq.a[i]]
+			if i >= seqBurnIn {
+				s += q[seq.a[i]]
+			}
 		}
 		return s
 	}

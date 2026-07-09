@@ -62,11 +62,13 @@ const (
 	// [RNN крок 2] Довжина відрізка траєкторії для навчання крізь час (BPTT).
 	// Рекурентна мережа вчиться на ПОСЛІДОВНОСТЯХ, а не окремих кадрах: щоб
 	// «розгорнути» памʼять, треба seqLen поспіль кадрів ОДНОГО агента.
-	seqLen        = 8   // кадрів у відрізку
-	seqReplaySize = 512 // місткість буфера відрізків (≈ seqLen×512 кадрів)
-	seqBatch      = 8   // відрізків на кадр у навчанні (кожен = seqLen кроків BPTT)
-	seqMinReplay  = 32  // не вчимось, поки буфер не набрав стільки відрізків
-	gruGradClip   = 1.0 // [RNN] кліп градієнта по часу — проти вибуху при BPTT
+	seqLen        = 8                  // кадрів у НАВЧАЛЬНОМУ вікні (на них рахуємо loss/BPTT)
+	seqBurnIn     = 4                  // кадрів ПРОГРІВУ перед вікном (лише forward, щоб h став реальним)
+	seqTotal      = seqBurnIn + seqLen // усього кадрів у відрізку (12)
+	seqReplaySize = 512                // місткість буфера відрізків
+	seqBatch      = 8                  // відрізків на кадр у навчанні
+	seqMinReplay  = 32                 // не вчимось, поки буфер не набрав стільки відрізків
+	gruGradClip   = 1.0                // [RNN] кліп градієнта по часу — проти вибуху при BPTT
 
 	qLearnRate = 0.005 // швидкість навчання (RL шумніший за supervised → помірно)
 	qGamma     = 0.95  // discount: наскільки цінувати майбутні нагороди (0..1)
@@ -135,14 +137,15 @@ type transition struct {
 	s2 [brainInputs]float32
 }
 
-// sequence — [RNN] відрізок траєкторії ОДНОГО агента: seqLen поспіль кадрів
-// (вхід x, дія a, нагорода r) + xEnd (кадр ПІСЛЯ останнього кроку, для bootstrap
-// Беллман-цілі). Це «одиниця пам'яті» рекурентного навчання: BPTT (крок 3)
-// прожене GRU по цих кадрах від нульового стану й порахує TD на кожному.
+// sequence — [RNN] відрізок траєкторії ОДНОГО агента: seqTotal поспіль кадрів
+// (вхід x, дія a, нагорода r) + xEnd (кадр ПІСЛЯ останнього, для bootstrap).
+// Перші seqBurnIn кадрів — ПРОГРІВ (forward-only, щоб h став реальним), решта
+// seqLen — навчальні (loss + BPTT). Це «одиниця пам'яті» рекурентного навчання.
+// (a/r для burn-in кадрів зберігаємо, але в навчанні не вживаємо.)
 type sequence struct {
-	x    [seqLen][baseInputs]float32
-	a    [seqLen]int
-	r    [seqLen]float32
+	x    [seqTotal][baseInputs]float32
+	a    [seqTotal]int
+	r    [seqTotal]float32
 	xEnd [baseInputs]float32
 }
 
@@ -251,9 +254,9 @@ type Brain struct {
 	// [RNN крок 2] Накопичувач поточного відрізка траєкторії. Коли набереться
 	// seqLen завершених кроків — відрізок їде в Net.seqReplay, лічильник у 0.
 	gruPrevX [baseInputs]float32 // попередній вхідний кадр (для запису кроку)
-	seqX     [seqLen][baseInputs]float32
-	seqA     [seqLen]int
-	seqR     [seqLen]float32
+	seqX     [seqTotal][baseInputs]float32
+	seqA     [seqTotal]int
+	seqR     [seqTotal]float32
 	seqN     int
 
 	age int // [3] вік (к-сть Step) — для автоспаду ε
@@ -814,8 +817,8 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, dist float32, hitWall bool) int
 		b.seqA[b.seqN] = b.prevAction
 		b.seqR[b.seqN] = reward
 		b.seqN++
-		if b.seqN == seqLen {
-			// Відрізок повний → у спільний буфер (xEnd = поточний кадр для bootstrap).
+		if b.seqN == seqTotal {
+			// Відрізок повний (burn-in + навчальні) → у спільний буфер.
 			b.net.rememberSeq(sequence{x: b.seqX, a: b.seqA, r: b.seqR, xEnd: cur})
 			b.seqN = 0
 		}
@@ -962,13 +965,16 @@ func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainI
 //     (з виходу цього кроку) + (з рекурентного звʼязку наступного кроку). Ваги НЕ
 //     міняємо під час проходу (semi-gradient) — накопичуємо й застосовуємо в кінці.
 //
-// [Спрощення 1-ї версії] replay стартує з h=0 (не з реального стану на момент
-// збору) — «stored-state problem». Працює, хоч і неідеально; burn-in — на потім.
+// [BURN-IN проти stored-state problem] replay стартує з h=0, але перші seqBurnIn
+// кадрів — лише ПРОГРІВ: forward без loss/градієнтів, щоб h накопичив реальний
+// контекст ПОТОЧНИМИ вагами. Loss і BPTT — лише на навчальному вікні
+// [seqBurnIn..seqTotal). Так стан на момент обрахунку помилки близький до того,
+// що агент реально має під час дії (а не до «щойно народженого» h=0).
 func (n *Net) tdUpdateSeq(seq sequence) {
-	// --- Фаза 1: forward живої мережі з кешем ---
-	var hArr [seqLen + 1][gruHidden]float32 // hArr[t] = h_{t-1}; hArr[0]=0
-	var zc, rc, cc [seqLen][gruHidden]float32
-	for t := 0; t < seqLen; t++ {
+	// --- Фаза 1: forward живої мережі з кешем (по ВСЬОМУ відрізку, вкл. burn-in) ---
+	var hArr [seqTotal + 1][gruHidden]float32 // hArr[t] = h_{t-1}; hArr[0]=0
+	var zc, rc, cc [seqTotal][gruHidden]float32
+	for t := 0; t < seqTotal; t++ {
 		hp := hArr[t]
 		x := seq.x[t]
 		var z, r [gruHidden]float32
@@ -999,21 +1005,22 @@ func (n *Net) tdUpdateSeq(seq sequence) {
 		zc[t], rc[t] = z, r
 	}
 
-	// --- Фаза 2: target-ціль для кожного кроку ---
-	// Проганяємо target-мережу; qTgt[s] = Q_tgt у стані s. Для кроку t bootstrap
-	// бере наступний стан: s=t+1 (в межах відрізка) або xEnd (останній крок).
+	// --- Фаза 2: target-ціль ---
+	// Target-мережу теж проганяємо по ВСЬОМУ відрізку (щоб її h був прогрітий).
+	// qTgt[s] = Q_tgt у стані s. Bootstrap кроку t бере наступний стан: t+1 (в межах)
+	// або xEnd (останній). TD рахуємо ЛИШЕ на навчальному вікні [seqBurnIn..seqTotal).
 	var hT [gruHidden]float32
-	var qTgt [seqLen][brainActions]float32
-	for t := 0; t < seqLen; t++ {
+	var qTgt [seqTotal][brainActions]float32
+	for t := 0; t < seqTotal; t++ {
 		qTgt[t], hT = n.forwardGRUTarget(seq.x[t], hT)
 	}
 	qEnd, _ := n.forwardGRUTarget(seq.xEnd, hT)
 
-	// TD-помилка на кожному кроці (semi-gradient: ціль — константа).
-	var td [seqLen]float32
-	for t := 0; t < seqLen; t++ {
+	// TD-помилка на кроках навчального вікна (semi-gradient: ціль — константа).
+	var td [seqTotal]float32
+	for t := seqBurnIn; t < seqTotal; t++ {
 		var qNext [brainActions]float32
-		if t < seqLen-1 {
+		if t < seqTotal-1 {
 			qNext = qTgt[t+1]
 		} else {
 			qNext = qEnd
@@ -1040,8 +1047,10 @@ func (n *Net) tdUpdateSeq(seq sequence) {
 	var dWq [brainActions][gruHidden]float32
 	var dBq [brainActions]float32
 
+	// Гортаємо назад ЛИШЕ по навчальному вікні до seqBurnIn (у burn-in кадри
+	// градієнт не пускаємо — вони суто для прогріву h). dhNext на межі відкидаємо.
 	var dhNext [gruHidden]float32 // градієнт, що тече з майбутнього кроку в h_t
-	for t := seqLen - 1; t >= 0; t-- {
+	for t := seqTotal - 1; t >= seqBurnIn; t-- {
 		hp := hArr[t]
 		ht := hArr[t+1]
 		x := seq.x[t]
