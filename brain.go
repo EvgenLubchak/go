@@ -1349,29 +1349,58 @@ type BrainData struct {
 	B2 [brainHidden2]float32               `json:"b2"`
 	W3 [brainActions][brainHidden2]float32 `json:"w3"`
 	B3 [brainActions]float32               `json:"b3"`
+
+	// [RNN] Ваги GRU. Старі файли їх не містять (HasGRU=false) → GRU стартує з нуля
+	// через initGRU. GruHidden звіряємо окремо (розмір h) при завантаженні.
+	HasGRU    bool                             `json:"has_gru"`
+	GruHidden int                              `json:"gru_hidden"`
+	Wz        [gruHidden][baseInputs]float32   `json:"wz"`
+	Uz        [gruHidden][gruHidden]float32    `json:"uz"`
+	Bz        [gruHidden]float32               `json:"bz"`
+	Wr        [gruHidden][baseInputs]float32   `json:"wr"`
+	Ur        [gruHidden][gruHidden]float32    `json:"ur"`
+	Br        [gruHidden]float32               `json:"br"`
+	Wh        [gruHidden][baseInputs]float32   `json:"wh"`
+	Uh        [gruHidden][gruHidden]float32    `json:"uh"`
+	Bh        [gruHidden]float32               `json:"bh"`
+	Wq        [brainActions][gruHidden]float32 `json:"wq"`
+	Bq        [brainActions]float32            `json:"bq"`
 }
 
 // SaveBrain зберігає ваги мережі агента у JSON.
 func SaveBrain(b *Brain) error { return SaveNet(b.net) }
 
-// SaveNet зберігає ваги мережі у JSON (читабельний MarshalIndent).
-func SaveNet(n *Net) error {
+// SaveNet зберігає ваги мережі у файл за замовчуванням (brainFile).
+func SaveNet(n *Net) error { return saveNetTo(n, brainFile) }
+
+// saveNetTo серіалізує мережу (стек + GRU ваги) у JSON за вказаним шляхом.
+func saveNetTo(n *Net, path string) error {
 	data := BrainData{
 		Inputs: brainInputs, Hidden1: brainHidden1, Hidden2: brainHidden2, Actions: brainActions,
 		W1: n.W1, B1: n.B1, W2: n.W2, B2: n.B2, W3: n.W3, B3: n.B3,
+		// [RNN] і рекурентні ваги — щоб gru-рій не вчився з нуля щоразу.
+		HasGRU: true, GruHidden: gruHidden,
+		Wz: n.Wz, Uz: n.Uz, Bz: n.Bz,
+		Wr: n.Wr, Ur: n.Ur, Br: n.Br,
+		Wh: n.Wh, Uh: n.Uh, Bh: n.Bh,
+		Wq: n.Wq, Bq: n.Bq,
 	}
 	bytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(brainFile, bytes, 0644)
+	return os.WriteFile(path, bytes, 0644)
 }
 
-// LoadNet завантажує мережу з файлу. Повертає nil (→ caller створить NewNet),
-// якщо файлу немає, він пошкоджений, або РОЗМІРИ мережі не збігаються (зміна
-// архітектури). Перевірка dims рятує від часткового завантаження.
-func LoadNet() *Net {
-	bytes, err := os.ReadFile(brainFile)
+// LoadNet завантажує мережу з файлу за замовчуванням (brainFile).
+func LoadNet() *Net { return loadNetFrom(brainFile) }
+
+// loadNetFrom завантажує мережу з файлу. Повертає nil (→ caller створить NewNet),
+// якщо файлу немає, він пошкоджений, або РОЗМІРИ стек-мережі не збігаються.
+// GRU-ваги вантажимо, ЛИШЕ якщо файл їх містить і розмір h збігається; інакше —
+// initGRU (стара збірка чи інший gruHidden → рекурентна памʼять з нуля, стек цілий).
+func loadNetFrom(path string) *Net {
+	bytes, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
@@ -1384,7 +1413,14 @@ func LoadNet() *Net {
 		return nil // несумісна архітектура → почнемо з нуля
 	}
 	n := &Net{W1: data.W1, B1: data.B1, W2: data.W2, B2: data.B2, W3: data.W3, B3: data.B3}
-	n.initGRU() // [RNN] файл не містить ваг GRU → ініціалізуємо, щоб не були мертві
+	if data.HasGRU && data.GruHidden == gruHidden {
+		n.Wz, n.Uz, n.Bz = data.Wz, data.Uz, data.Bz
+		n.Wr, n.Ur, n.Br = data.Wr, data.Ur, data.Br
+		n.Wh, n.Uh, n.Bh = data.Wh, data.Uh, data.Bh
+		n.Wq, n.Bq = data.Wq, data.Bq
+	} else {
+		n.initGRU() // немає ваг GRU у файлі / інший розмір → рекурентна памʼять з нуля
+	}
 	n.syncTarget()
 	return n
 }

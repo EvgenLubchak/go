@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"math"
 	"math/rand"
+	"os"
 	"sync"
 	"testing"
 )
@@ -182,4 +184,61 @@ func TestGRULearnsSequence(t *testing.T) {
 		t.Fatalf("GRU не вчиться: Q обраної дії не зросло (before=%.4f after=%.4f)", before, after)
 	}
 	t.Logf("Q(дію) до=%.4f після=%.4f — зросло, BPTT працює", before, after)
+}
+
+// TestSaveLoadGRURoundTrip перевіряє, що ваги GRU переживають save/load (round-trip),
+// а старий файл без ваг GRU не ламає завантаження (GRU ініціалізується з нуля).
+// Пишемо в тимчасовий файл, щоб не чіпати реальний brain_weights.json.
+func TestSaveLoadGRURoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	n := NewNet()
+	n.Wz[0][0] = 0.4242 // характерні значення
+	n.Wq[2][5] = -0.777
+	n.W1[1][1] = 0.333 // і стек-вага
+
+	path := dir + "/w.json"
+	if err := saveNetTo(n, path); err != nil {
+		t.Fatal(err)
+	}
+	m := loadNetFrom(path)
+	if m == nil {
+		t.Fatal("loadNetFrom повернув nil")
+	}
+	if m.Wz[0][0] != n.Wz[0][0] || m.Wq[2][5] != n.Wq[2][5] {
+		t.Fatalf("GRU-ваги не round-trip: Wz=%v Wq=%v", m.Wz[0][0], m.Wq[2][5])
+	}
+	if m.W1[1][1] != n.W1[1][1] {
+		t.Fatalf("стек-ваги не round-trip: %v", m.W1[1][1])
+	}
+	if m.tWz[0][0] != n.Wz[0][0] { // target має бути синхронізована на завантажене
+		t.Fatalf("target GRU не синхронізовано: %v", m.tWz[0][0])
+	}
+
+	// Старий файл (HasGRU=false) → GRU ініціалізується (не нульовий), стек цілий.
+	old := BrainData{
+		Inputs: brainInputs, Hidden1: brainHidden1, Hidden2: brainHidden2, Actions: brainActions,
+		W1: n.W1,
+	}
+	b, _ := json.MarshalIndent(old, "", "  ")
+	oldPath := dir + "/old.json"
+	if err := os.WriteFile(oldPath, b, 0644); err != nil {
+		t.Fatal(err)
+	}
+	m2 := loadNetFrom(oldPath)
+	if m2 == nil {
+		t.Fatal("старий файл: loadNetFrom повернув nil")
+	}
+	var nonZero bool
+	for i := 0; i < gruHidden && !nonZero; i++ {
+		for j := 0; j < baseInputs; j++ {
+			if m2.Wz[i][j] != 0 {
+				nonZero = true
+				break
+			}
+		}
+	}
+	if !nonZero {
+		t.Fatal("старий файл: GRU-ваги лишились нульовими (initGRU не спрацював)")
+	}
 }
