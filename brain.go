@@ -59,6 +59,12 @@ const (
 	// стек-вагами (обираємо шлях у рантаймі) → перемкнути назад = нуль ризику.
 	gruHidden = 32
 
+	// [RNN крок 2] Довжина відрізка траєкторії для навчання крізь час (BPTT).
+	// Рекурентна мережа вчиться на ПОСЛІДОВНОСТЯХ, а не окремих кадрах: щоб
+	// «розгорнути» памʼять, треба seqLen поспіль кадрів ОДНОГО агента.
+	seqLen        = 8   // кадрів у відрізку
+	seqReplaySize = 512 // місткість буфера відрізків (≈ seqLen×512 кадрів)
+
 	qLearnRate = 0.005 // швидкість навчання (RL шумніший за supervised → помірно)
 	qGamma     = 0.95  // discount: наскільки цінувати майбутні нагороди (0..1)
 	qClip      = 10.0  // стеля TD-цілі (захист від розбіжності)
@@ -118,12 +124,23 @@ var dirs8 = [brainActions][2]float32{
 }
 
 // transition — один крок досвіду: (стан, дія, нагорода, наступний стан).
-// Це «одиниця пам'яті» для experience replay.
+// Це «одиниця пам'яті» для experience replay (frame-stacking шлях).
 type transition struct {
 	s  [brainInputs]float32
 	a  int
 	r  float32
 	s2 [brainInputs]float32
+}
+
+// sequence — [RNN] відрізок траєкторії ОДНОГО агента: seqLen поспіль кадрів
+// (вхід x, дія a, нагорода r) + xEnd (кадр ПІСЛЯ останнього кроку, для bootstrap
+// Беллман-цілі). Це «одиниця пам'яті» рекурентного навчання: BPTT (крок 3)
+// прожене GRU по цих кадрах від нульового стану й порахує TD на кожному.
+type sequence struct {
+	x    [seqLen][baseInputs]float32
+	a    [seqLen]int
+	r    [seqLen]float32
+	xEnd [baseInputs]float32
 }
 
 // Net — НЕЙРОМЕРЕЖА Q-агента: ваги + target-копія + буфер досвіду.
@@ -150,10 +167,16 @@ type Net struct {
 	tB3         [brainActions]float32
 	syncCounter int
 
-	// [DQN: EXPERIENCE REPLAY] кільцевий буфер переходів.
+	// [DQN: EXPERIENCE REPLAY] кільцевий буфер переходів (frame-stacking шлях).
 	replay     []transition
 	replayHead int
 	replayFull bool
+
+	// [RNN] Кільцевий буфер ВІДРІЗКІВ для рекурентного навчання (GRU шлях).
+	// Той самий mu стереже обидва буфери (пишуть з паралельної фази).
+	seqReplay []sequence
+	seqHead   int
+	seqFull   bool
 
 	// [GO: MUTEX] захищає СПІЛЬНИЙ буфер від одночасного запису з різних горутин
 	// (remember у паралельній фазі calcAcceleration). Ваги ж безпечні без локу
@@ -208,6 +231,14 @@ type Brain struct {
 	// Несеться між кадрами, скидається на новий епізод/respawn. Памʼять — своя в
 	// кожного агента (як frames); ваги GRU — спільні в Net (вулик лишається).
 	h [gruHidden]float32
+
+	// [RNN крок 2] Накопичувач поточного відрізка траєкторії. Коли набереться
+	// seqLen завершених кроків — відрізок їде в Net.seqReplay, лічильник у 0.
+	gruPrevX [baseInputs]float32 // попередній вхідний кадр (для запису кроку)
+	seqX     [seqLen][baseInputs]float32
+	seqA     [seqLen]int
+	seqR     [seqLen]float32
+	seqN     int
 
 	age int // [3] вік (к-сть Step) — для автоспаду ε
 
@@ -527,6 +558,29 @@ func (n *Net) replayLen() int {
 	return n.replayHead
 }
 
+// rememberSeq — [RNN] додає відрізок траєкторії в буфер послідовностей.
+// Під тим самим mu, що й remember (буфер може бути спільним, пишуть різні горутини).
+func (n *Net) rememberSeq(seq sequence) {
+	n.mu.Lock()
+	if n.seqReplay == nil {
+		n.seqReplay = make([]sequence, seqReplaySize)
+	}
+	n.seqReplay[n.seqHead] = seq
+	n.seqHead = (n.seqHead + 1) % seqReplaySize
+	if n.seqHead == 0 {
+		n.seqFull = true
+	}
+	n.mu.Unlock()
+}
+
+// seqReplayLen — скільки відрізків реально лежить у буфері.
+func (n *Net) seqReplayLen() int {
+	if n.seqFull {
+		return seqReplaySize
+	}
+	return n.seqHead
+}
+
 // train — k оновлень на випадкових вибірках із буфера (серце DQN).
 //
 // Викликається ОДИН раз за кадр ОДНОПОТОКОВО (g.trainBrains, поза паралельною
@@ -650,14 +704,48 @@ func (b *Brain) Step(cur [baseInputs]float32, dist float32, hitWall bool) int {
 	return action
 }
 
-// stepGRU — [RNN] крок агента з рекурентною памʼяттю. КРОК 1: лише forward +
-// вибір дії + anti-stuck. Навчання (reward у буфер, BPTT) НЕ підключене — тому
-// поки ваги GRU не тренуються, і рій діятиме випадково-реактивно. Мета кроку 1 —
-// довести, що конвеєр працює: h переноситься між кадрами, нема падінь і гонок.
+// stepGRU — [RNN] крок агента з рекурентною памʼяттю. КРОК 2: forward + вибір дії
+// + anti-stuck + reward + накопичення ВІДРІЗКА у буфер послідовностей. Навчання
+// (BPTT) ще НЕ підключене (крок 3) — ваги GRU поки не міняються, рій діє випадково;
+// але дані для навчання вже течуть у seqReplay, а метрики reward/blind оживають.
 func (b *Brain) stepGRU(cur [baseInputs]float32, dist float32, hitWall bool) int {
 	// Рекурентний forward: несемо власний стан b.h крізь кадри.
 	q, hNew := b.net.forwardGRU(cur, b.h)
 	b.h = hNew
+
+	visible := cur[baseInputs-1] > 0.5
+
+	// Нагорода за ПОПЕРЕДНЮ дію (та сама схема, що й у стек-шляху) → крок у відрізок.
+	if b.hasPrev {
+		// [МЕТРИКИ ПАМʼЯТІ] blind-chase (як у стек-шляху).
+		if !b.prevVisible {
+			b.mBlindN++
+			if dist < b.prevDist {
+				b.mBlindClosed++
+			}
+		}
+		sign := float32(1)
+		if b.flee {
+			sign = -1
+		}
+		reward := sign * (b.prevDist - dist) * rewardCloserScale
+		if hitWall {
+			reward += rewardWallHit
+		}
+		reward += rewardNearWall * b.gruPrevX[5+b.prevAction]
+		b.lastReward = reward
+
+		// Записуємо завершений крок (x_{t-1}, a_{t-1}, r) у накопичувач відрізка.
+		b.seqX[b.seqN] = b.gruPrevX
+		b.seqA[b.seqN] = b.prevAction
+		b.seqR[b.seqN] = reward
+		b.seqN++
+		if b.seqN == seqLen {
+			// Відрізок повний → у спільний буфер (xEnd = поточний кадр для bootstrap).
+			b.net.rememberSeq(sequence{x: b.seqX, a: b.seqA, r: b.seqR, xEnd: cur})
+			b.seqN = 0
+		}
+	}
 
 	// Anti-stuck — та сама сітка безпеки, що й у стек-режимі (по вусах кадру).
 	madeProgress := b.hasPrev && dist < b.prevDist-stuckProgressEps
@@ -688,11 +776,12 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, dist float32, hitWall bool) int
 		action = b.selectFromQ(q)
 	}
 
+	b.gruPrevX = cur
+	b.prevAction = action
 	b.prevDist = dist
+	b.prevVisible = visible
 	b.hasPrev = true
 	b.lastAction = action
-	// [RNN крок 1] БЕЗ навчання: не кладемо перехід у буфер, reward не рахуємо —
-	// це підключимо в кроках 2–3 (sequence-replay + BPTT).
 	return action
 }
 

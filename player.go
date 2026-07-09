@@ -80,6 +80,7 @@ func (g *Game) respawnPlayer() {
 	if g.player.Brain != nil {
 		g.player.Brain.hasPrev = false
 		g.player.Brain.h = [gruHidden]float32{} // [RNN] скидаємо рекурентну памʼять
+		g.player.Brain.seqN = 0                 // [RNN] відкидаємо недособраний відрізок
 	}
 }
 
