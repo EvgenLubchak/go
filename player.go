@@ -79,6 +79,7 @@ func (g *Game) respawnPlayer() {
 	g.player.VelX, g.player.VelY = 0, 0
 	if g.player.Brain != nil {
 		g.player.Brain.hasPrev = false
+		g.player.Brain.h = [gruHidden]float32{} // [RNN] скидаємо рекурентну памʼять
 	}
 }
 

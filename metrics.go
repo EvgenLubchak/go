@@ -155,8 +155,12 @@ func (m *Metrics) draw(screen *ebiten.Image) {
 	yellow := color.RGBA{230, 215, 95, 255} // спіймання
 
 	// Рядок 0: ЯРЛИК КОНФІГУРАЦІЇ — щоб скріншоти A/B самі себе документували.
-	cfg := fmt.Sprintf("stk%d  local:%s  shared:%s  ai:%s",
-		stackFrames, onoff(localSight), onoff(sharedBrain), onoff(aiPlayer))
+	memMode := "stk"
+	if useGRU {
+		memMode = "gru"
+	}
+	cfg := fmt.Sprintf("mem:%s  stk%d  local:%s  shared:%s  ai:%s",
+		memMode, stackFrames, onoff(localSight), onoff(sharedBrain), onoff(aiPlayer))
 	drawTextL(screen, cfg, 8, px+10, py+12, cyan)
 
 	// Рядок 1: числа навчання.

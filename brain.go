@@ -53,6 +53,12 @@ const (
 	brainActions  = 8 // 8 напрямків руху (= кількість виходів Q)
 	brainWhiskers = 8 // промені-сенсори стін
 
+	// [RNN/GRU] Розмір рекурентного прихованого стану h (памʼять, яку мережа несе
+	// між кадрами). Вмикається прапорцем useGRU: тоді вхід — ОДИН кадр (baseInputs),
+	// а «минуле» живе в h, а не в стеку кадрів. Ваги GRU співіснують у Net поряд зі
+	// стек-вагами (обираємо шлях у рантаймі) → перемкнути назад = нуль ризику.
+	gruHidden = 32
+
 	qLearnRate = 0.005 // швидкість навчання (RL шумніший за supervised → помірно)
 	qGamma     = 0.95  // discount: наскільки цінувати майбутні нагороди (0..1)
 	qClip      = 10.0  // стеля TD-цілі (захист від розбіжності)
@@ -160,6 +166,24 @@ type Net struct {
 	mTDSum float32 // сума |TD-error| (сирого) — «здивування» мережі
 	mQSum  float32 // сума max Q(s) — канарка розбіжності (росте безмежно = біда)
 	mTDN   int     // кількість оновлень за період
+
+	// [RNN/GRU] Ваги рекурентної клітини (вживаються лише коли useGRU=true).
+	// GRU-клітина: вхід x(baseInputs) + попередній стан h(gruHidden) → новий h.
+	//   z — update gate (скільки нового пускати в памʼять)
+	//   r — reset gate (скільки старого забути перед оновленням)
+	//   h~ — candidate (кандидат нового стану)
+	// W* множать ВХІД, U* множать СТАН, B* — зсуви. Wq/Bq: стан h → Q(8) (лінійно).
+	Wz [gruHidden][baseInputs]float32
+	Uz [gruHidden][gruHidden]float32
+	Bz [gruHidden]float32
+	Wr [gruHidden][baseInputs]float32
+	Ur [gruHidden][gruHidden]float32
+	Br [gruHidden]float32
+	Wh [gruHidden][baseInputs]float32
+	Uh [gruHidden][gruHidden]float32
+	Bh [gruHidden]float32
+	Wq [brainActions][gruHidden]float32
+	Bq [brainActions]float32
 }
 
 // Brain — «голова» одного ворога-учня: указник на мережу + ОСОБИСТА пам'ять.
@@ -179,6 +203,11 @@ type Brain struct {
 	// Повний вхід = [поточний кадр | frames[0] | frames[1] | ...].
 	frames    [stackFrames - 1][baseInputs]float32
 	frameTick int
+
+	// [RNN/GRU] Рекурентний прихований стан цього агента (вживається при useGRU).
+	// Несеться між кадрами, скидається на новий епізод/respawn. Памʼять — своя в
+	// кожного агента (як frames); ваги GRU — спільні в Net (вулик лишається).
+	h [gruHidden]float32
 
 	age int // [3] вік (к-сть Step) — для автоспаду ε
 
@@ -211,6 +240,12 @@ func tanh(x float32) float32 {
 	return float32(math.Tanh(float64(x)))
 }
 
+// sigmoid — активація воріт GRU, стискає в (0,1) = «скільки пропустити».
+// Похідна: σ'(z) = σ(z)·(1−σ(z)) — знадобиться для BPTT (крок 3).
+func sigmoid(x float32) float32 {
+	return 1 / (1 + float32(math.Exp(float64(-x))))
+}
+
 // NewNet створює мережу з Xavier-ініціалізацією (масштаб ~1/√fan_in),
 // щоб tanh не входив у насичення і градієнт не зникав.
 func NewNet() *Net {
@@ -233,8 +268,32 @@ func NewNet() *Net {
 			n.W3[a][k] = (rand.Float32()*2 - 1) * s3
 		}
 	}
+	n.initGRU()    // [RNN] ініціалізуємо й рекурентні ваги (навіть якщо useGRU=false)
 	n.syncTarget() // target стартує копією живих ваг
 	return n
+}
+
+// initGRU — Xavier-ініціалізація ваг рекурентної клітини. Викликається і з NewNet,
+// і з LoadNet (файл ваг GRU поки не містить → щоб не лишались нульовими й мертвими).
+// Вхідні ваги масштабуємо ~1/√baseInputs, рекурентні й вихідні ~1/√gruHidden.
+func (n *Net) initGRU() {
+	sx := float32(math.Sqrt(1.0 / baseInputs))
+	sh := float32(math.Sqrt(1.0 / gruHidden))
+	rnd := func(scale float32) float32 { return (rand.Float32()*2 - 1) * scale }
+
+	for i := 0; i < gruHidden; i++ {
+		for j := 0; j < baseInputs; j++ {
+			n.Wz[i][j], n.Wr[i][j], n.Wh[i][j] = rnd(sx), rnd(sx), rnd(sx)
+		}
+		for j := 0; j < gruHidden; j++ {
+			n.Uz[i][j], n.Ur[i][j], n.Uh[i][j] = rnd(sh), rnd(sh), rnd(sh)
+		}
+	}
+	for a := 0; a < brainActions; a++ {
+		for k := 0; k < gruHidden; k++ {
+			n.Wq[a][k] = rnd(sh)
+		}
+	}
 }
 
 // NewBrain — голова агента з ВЛАСНОЮ новою мережею (незалежний режим).
@@ -312,6 +371,58 @@ func (n *Net) forwardQ(state [brainInputs]float32) (q [brainActions]float32, h1 
 	return
 }
 
+// forwardGRU — один крок рекурентної клітини: (вхід x, старий стан hPrev) →
+// (Q-значення, НОВИЙ стан hNew). Формули стандартного GRU:
+//
+//	z  = σ(Wz·x + Uz·h + Bz)          update gate  — скільки нового пускати
+//	r  = σ(Wr·x + Ur·h + Br)          reset  gate  — скільки старого забути
+//	h~ = tanh(Wh·x + Uh·(r⊙h) + Bh)   кандидат нового стану
+//	h' = (1−z)⊙h + z⊙h~               новий стан (інтерполяція старе↔кандидат)
+//	q  = Wq·h' + Bq                   Q-значення (лінійно)
+//
+// Функція ЧИСТА (лише читає ваги) → безпечна для паралельного виклику.
+func (n *Net) forwardGRU(x [baseInputs]float32, hPrev [gruHidden]float32) (q [brainActions]float32, hNew [gruHidden]float32) {
+	// Прохід 1: ворота z і r (обидва — повні вектори; кандидат нижче потребує
+	// ВЕСЬ r, бо reset діє поелементно на весь стан: (r⊙h)_j = r_j·h_j).
+	var z, r [gruHidden]float32
+	for i := 0; i < gruHidden; i++ {
+		zi, ri := n.Bz[i], n.Br[i]
+		for j := 0; j < baseInputs; j++ {
+			zi += n.Wz[i][j] * x[j]
+			ri += n.Wr[i][j] * x[j]
+		}
+		for j := 0; j < gruHidden; j++ {
+			zi += n.Uz[i][j] * hPrev[j]
+			ri += n.Ur[i][j] * hPrev[j]
+		}
+		z[i] = sigmoid(zi)
+		r[i] = sigmoid(ri)
+	}
+
+	// Прохід 2: кандидат h~ (з reset-gated станом r⊙h) і новий стан h'.
+	for i := 0; i < gruHidden; i++ {
+		ci := n.Bh[i]
+		for j := 0; j < baseInputs; j++ {
+			ci += n.Wh[i][j] * x[j]
+		}
+		for j := 0; j < gruHidden; j++ {
+			ci += n.Uh[i][j] * (r[j] * hPrev[j])
+		}
+		cand := tanh(ci)
+		hNew[i] = (1-z[i])*hPrev[i] + z[i]*cand
+	}
+
+	// Вихід: Q-значення зі стану (лінійно).
+	for a := 0; a < brainActions; a++ {
+		s := n.Bq[a]
+		for k := 0; k < gruHidden; k++ {
+			s += n.Wq[a][k] * hNew[k]
+		}
+		q[a] = s
+	}
+	return
+}
+
 // argmaxQ повертає індекс дії з найбільшим Q.
 func argmaxQ(q [brainActions]float32) int {
 	best := 0
@@ -324,11 +435,12 @@ func argmaxQ(q [brainActions]float32) int {
 }
 
 // maxWhisker — найбільша близькість стіни серед 8 променів (0 = чисто навкруги).
-func maxWhisker(state [brainInputs]float32) float32 {
-	m := state[5]
+// Читає вуса ПОТОЧНОГО кадру (індекси 5..12) — вони однакові і в стеку, і в GRU.
+func maxWhisker(f [baseInputs]float32) float32 {
+	m := f[5]
 	for i := 1; i < brainWhiskers; i++ {
-		if state[5+i] > m {
-			m = state[5+i]
+		if f[5+i] > m {
+			m = f[5+i]
 		}
 	}
 	return m
@@ -337,10 +449,10 @@ func maxWhisker(state [brainInputs]float32) float32 {
 // escapeAction — напрямок із НАЙМЕНШОЮ близькістю стіни (найвідкритіший), щоб
 // гарантовано вийти з пастки, а не смикатись на місці. Серед однаково відкритих
 // напрямків — рівноймовірно (reservoir), аби агенти не злипались в один бік.
-func escapeAction(state [brainInputs]float32) int {
-	best, bestW, ties := 0, state[5], 1
+func escapeAction(f [baseInputs]float32) int {
+	best, bestW, ties := 0, f[5], 1
 	for i := 1; i < brainWhiskers; i++ {
-		w := state[5+i]
+		w := f[5+i]
 		switch {
 		case w < bestW:
 			best, bestW, ties = i, w, 1
@@ -377,6 +489,15 @@ func (b *Brain) selectAction(state [brainInputs]float32) int {
 		return rand.Intn(brainActions)
 	}
 	q, _, _ := b.net.forwardQ(state)
+	return argmaxQ(q)
+}
+
+// selectFromQ — ε-greedy на ВЖЕ обрахованому q-векторі (шлях GRU: q дає forwardGRU,
+// повторно рахувати не треба). Та сама логіка, що й selectAction.
+func (b *Brain) selectFromQ(q [brainActions]float32) int {
+	if rand.Float32() < b.epsilon() {
+		return rand.Intn(brainActions)
+	}
 	return argmaxQ(q)
 }
 
@@ -430,6 +551,11 @@ func (n *Net) train(k int) {
 func (b *Brain) Step(cur [baseInputs]float32, dist float32, hitWall bool) int {
 	b.age++ // [3] для автоспаду ε
 
+	// [RNN] Рекурентний шлях — окремий, щоб не чіпати робочий frame-stacking.
+	if useGRU {
+		return b.stepGRU(cur, dist, hitWall)
+	}
+
 	// [ПАМ'ЯТЬ] Склеюємо поточний кадр + історію → повний вхід мережі.
 	// Поточний кадр — ПЕРШИЙ у стеку, тож whiskers лишаються на індексах 5..12
 	// (тому maxWhisker/escapeAction/proximity-reward працюють без змін).
@@ -478,7 +604,7 @@ func (b *Brain) Step(cur [baseInputs]float32, dist float32, hitWall bool) int {
 		}
 	case hitWall:
 		b.stuckCounter += stuckHitInc
-	case maxWhisker(stacked) >= stuckNearWall:
+	case maxWhisker(cur) >= stuckNearWall:
 		b.stuckCounter += stuckNoProgInc
 	case b.stuckCounter > 0:
 		b.stuckCounter -= stuckDecay
@@ -490,12 +616,12 @@ func (b *Brain) Step(cur [baseInputs]float32, dist float32, hitWall bool) int {
 	switch {
 	case b.frustration > 0:
 		b.frustration--
-		action = escapeAction(stacked)
+		action = escapeAction(cur)
 	case b.stuckCounter >= stuckLimit:
 		b.frustration = frustrationFrames
 		b.stuckCounter = 0
 		b.markStuck = true // [СТИГМЕРГІЯ] офіційно застряг тут → лишити слід
-		action = escapeAction(stacked)
+		action = escapeAction(cur)
 	default:
 		action = b.selectAction(stacked)
 	}
@@ -521,6 +647,52 @@ func (b *Brain) Step(cur [baseInputs]float32, dist float32, hitWall bool) int {
 			}
 		}
 	}
+	return action
+}
+
+// stepGRU — [RNN] крок агента з рекурентною памʼяттю. КРОК 1: лише forward +
+// вибір дії + anti-stuck. Навчання (reward у буфер, BPTT) НЕ підключене — тому
+// поки ваги GRU не тренуються, і рій діятиме випадково-реактивно. Мета кроку 1 —
+// довести, що конвеєр працює: h переноситься між кадрами, нема падінь і гонок.
+func (b *Brain) stepGRU(cur [baseInputs]float32, dist float32, hitWall bool) int {
+	// Рекурентний forward: несемо власний стан b.h крізь кадри.
+	q, hNew := b.net.forwardGRU(cur, b.h)
+	b.h = hNew
+
+	// Anti-stuck — та сама сітка безпеки, що й у стек-режимі (по вусах кадру).
+	madeProgress := b.hasPrev && dist < b.prevDist-stuckProgressEps
+	switch {
+	case madeProgress:
+		if b.stuckCounter > 0 {
+			b.stuckCounter -= stuckDecay
+		}
+	case hitWall:
+		b.stuckCounter += stuckHitInc
+	case maxWhisker(cur) >= stuckNearWall:
+		b.stuckCounter += stuckNoProgInc
+	case b.stuckCounter > 0:
+		b.stuckCounter -= stuckDecay
+	}
+
+	var action int
+	switch {
+	case b.frustration > 0:
+		b.frustration--
+		action = escapeAction(cur)
+	case b.stuckCounter >= stuckLimit:
+		b.frustration = frustrationFrames
+		b.stuckCounter = 0
+		b.markStuck = true
+		action = escapeAction(cur)
+	default:
+		action = b.selectFromQ(q)
+	}
+
+	b.prevDist = dist
+	b.hasPrev = true
+	b.lastAction = action
+	// [RNN крок 1] БЕЗ навчання: не кладемо перехід у буфер, reward не рахуємо —
+	// це підключимо в кроках 2–3 (sequence-replay + BPTT).
 	return action
 }
 
@@ -842,6 +1014,7 @@ func LoadNet() *Net {
 		return nil // несумісна архітектура → почнемо з нуля
 	}
 	n := &Net{W1: data.W1, B1: data.B1, W2: data.W2, B2: data.B2, W3: data.W3, B3: data.B3}
+	n.initGRU() // [RNN] файл не містить ваг GRU → ініціалізуємо, щоб не були мертві
 	n.syncTarget()
 	return n
 }
