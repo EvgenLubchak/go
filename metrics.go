@@ -61,6 +61,19 @@ type Metrics struct {
 
 	rewardCurve curve
 	tdCurve     curve
+
+	// [ПАМʼЯТЬ] Кумулятивні лічильники ВІД МОМЕНТУ СКИДАННЯ (клавіша M). Скидаємо
+	// вручну, коли рій уже навчився → міряємо саме навчену політику, а не історію.
+	blindN      int // «сліпих рішень» (агент не бачив гравця, коли обирав дію)
+	blindClosed int // ...із них скоротили дистанцію → ознака памʼяті
+	catches     int // спіймань гравця
+	window      int // кадрів від моменту скидання (для catch-rate у хв)
+}
+
+// resetCounters обнуляє кумулятивні лічильники заміру (клавіша M). Криві навчання
+// НЕ чіпаємо — вони показують динаміку, а лічильники — підсумок навченого рою.
+func (m *Metrics) resetCounters() {
+	m.blindN, m.blindClosed, m.catches, m.window = 0, 0, 0, 0
 }
 
 // collect — раз/кадр (у Update, ПІСЛЯ trainBrains) збирає показники з мозків рою.
@@ -80,6 +93,11 @@ func (m *Metrics) collect(g *Game) {
 		}
 		rSum += b.lastReward
 		rN++
+		// [ПАМʼЯТЬ] Забираємо «сліпі рішення» цього агента й скидаємо (однопотоково,
+		// паралельна фаза calcAcceleration уже завершена → без гонок).
+		m.blindN += b.mBlindN
+		m.blindClosed += b.mBlindClosed
+		b.mBlindN, b.mBlindClosed = 0, 0
 		if b.net != nil && !seen[b.net] {
 			seen[b.net] = true
 			tdSum += b.net.mTDSum
@@ -108,33 +126,66 @@ func (m *Metrics) collect(g *Game) {
 	}
 
 	m.tick++
+	m.window++ // [ПАМʼЯТЬ] кадрів від моменту скидання (для catch-rate)
 	if m.tick%metricEvery == 0 {
 		m.rewardCurve.push(m.reward)
 		m.tdCurve.push(m.tdErr)
 	}
 }
 
-// draw малює панель метрик (числа + дві криві) у лівому нижньому куті.
+// onoff — короткий підпис прапорця для ярлика конфігурації.
+func onoff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+// draw малює панель метрик (конфіг + числа + криві + памʼять/лов) у лівому куті.
 func (m *Metrics) draw(screen *ebiten.Image) {
-	const px, py, pw, ph = 12, screenHeight - 150, 340, 138
-	vector.FillRect(screen, px, py, pw, ph, color.RGBA{0, 0, 0, 160}, false)
+	const px, pw, ph = 12, 760, 180
+	const py = screenHeight - ph - 12
+	vector.FillRect(screen, px, py, pw, ph, color.RGBA{0, 0, 0, 170}, false)
 
 	green := color.RGBA{90, 220, 120, 255}
 	orange := color.RGBA{235, 150, 50, 255}
 	gray := color.RGBA{170, 170, 180, 255}
+	cyan := color.RGBA{95, 200, 220, 255}
+	mem := color.RGBA{205, 140, 235, 255}   // blind-pursuit — метрика памʼяті
+	yellow := color.RGBA{230, 215, 95, 255} // спіймання
 
-	// Числа згори панелі.
-	drawText(screen, fmt.Sprintf("reward %+.3f", m.reward), 9, px+58, py+12, green)
-	drawText(screen, fmt.Sprintf("TD %.3f", m.tdErr), 9, px+180, py+12, orange)
-	drawText(screen, fmt.Sprintf("maxQ %.2f", m.maxQ), 9, px+270, py+12, gray)
-	drawText(screen, fmt.Sprintf("eps %.3f", m.eps), 9, px+60, py+ph-10, gray)
-	drawText(screen, "reward", 8, px+180, py+ph-10, green)
-	drawText(screen, "TD-error", 8, px+270, py+ph-10, orange)
+	// Рядок 0: ЯРЛИК КОНФІГУРАЦІЇ — щоб скріншоти A/B самі себе документували.
+	cfg := fmt.Sprintf("stk%d  local:%s  shared:%s  ai:%s",
+		stackFrames, onoff(localSight), onoff(sharedBrain), onoff(aiPlayer))
+	drawTextL(screen, cfg, 8, px+10, py+12, cyan)
 
-	// Графік між числами (кожна крива в СВОЄМУ масштабі — різні діапазони).
-	gx, gy, gw, gh := float32(px+10), float32(py+24), float32(pw-20), float32(ph-46)
+	// Рядок 1: числа навчання.
+	drawTextL(screen, fmt.Sprintf("reward %+.3f", m.reward), 9, px+10, py+28, green)
+	drawTextL(screen, fmt.Sprintf("TD %.3f", m.tdErr), 9, px+150, py+28, orange)
+	drawTextL(screen, fmt.Sprintf("maxQ %.2f", m.maxQ), 9, px+250, py+28, gray)
+
+	// Крива навчання (кожна в СВОЄМУ масштабі — різні діапазони).
+	gx, gy, gw, gh := float32(px+10), float32(py+40), float32(pw-20), float32(60)
 	drawCurve(screen, &m.rewardCurve, gx, gy, gw, gh, green)
 	drawCurve(screen, &m.tdCurve, gx, gy, gw, gh, orange)
+
+	// Рядок 2: BLIND-PURSUIT — головна метрика памʼяті (частка «сліпих» кадрів,
+	// де агент усе одно скоротив дистанцію). База ~50% (навмання) → вище = памʼять.
+	bp := "—"
+	if m.blindN > 0 {
+		bp = fmt.Sprintf("%.0f%%", 100*float32(m.blindClosed)/float32(m.blindN))
+	}
+	drawTextL(screen, fmt.Sprintf("blind-chase %s  (n=%d)", bp, m.blindN), 9, px+10, py+ph-30, mem)
+
+	// Рядок 3: спіймання + темп (catch/min) та ε; праворуч — легенда кривих.
+	rate := float32(0)
+	if m.window > 0 {
+		rate = float32(m.catches) * (120 * 60) / float32(m.window) // TPS=120
+	}
+	drawTextL(screen, fmt.Sprintf("catch %d (%.1f/min)", m.catches, rate), 9, px+10, py+ph-14, yellow)
+	drawTextL(screen, fmt.Sprintf("eps %.3f", m.eps), 8, px+185, py+ph-14, gray)
+	drawTextL(screen, "reward", 8, px+250, py+ph-14, green)
+	drawTextL(screen, "TD", 8, px+320, py+ph-14, orange)
 }
 
 // drawCurve малює полілінію значень, автомасштабуючи до прямокутника (x,y,w,h).

@@ -16,7 +16,7 @@ const (
 	screenWidth  = 1680
 	screenHeight = 960
 	pixelSize    = 20
-	enemyCount   = 12
+	enemyCount   = 10
 
 	// Глобальна фізика — однакова для всіх типів ворогів.
 	// Поведінка (швидкість, агресія, burst) — в EnemyConfig у pixel.go.

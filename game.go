@@ -100,6 +100,12 @@ func (g *Game) Update() error {
 		showMetrics = !showMetrics
 	}
 
+	// M — скинути лічильники заміру (blind-chase / catch). Тиснемо, коли рій уже
+	// навчився → далі метрики відображають саме навчену політику, а не всю історію.
+	if inpututil.IsKeyJustPressed(ebiten.KeyM) {
+		g.metrics.resetCounters()
+	}
+
 	if g.gameOver {
 		if ebiten.IsKeyPressed(ebiten.KeyR) {
 			g.restart()

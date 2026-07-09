@@ -27,6 +27,23 @@ func drawText(screen *ebiten.Image, str string, size, cx, cy float64, clr color.
 	etext.Draw(screen, str, face, op)
 }
 
+// drawTextL — як drawText, але x = ЛІВИЙ край тексту (не центр). Для панелей/
+// таблиць із рядками різної довжини: текст не «розповзається» за межі й не
+// вилазить за край екрана незалежно від довжини рядка.
+func drawTextL(screen *ebiten.Image, str string, size, x, y float64, clr color.RGBA) {
+	face := &etext.GoTextFace{Source: fontFaceSource, Size: size}
+	_, h := etext.Measure(str, face, 0)
+	op := &etext.DrawOptions{}
+	op.GeoM.Translate(x, y-h/2)
+	op.ColorScale.Scale(
+		float32(clr.R)/255,
+		float32(clr.G)/255,
+		float32(clr.B)/255,
+		float32(clr.A)/255,
+	)
+	etext.Draw(screen, str, face, op)
+}
+
 // drawPixel малює квадрат з flash-ефектом, HP bar і міткою.
 func drawPixel(screen *ebiten.Image, p Pixel) {
 	// Flash: поки HitTimer > 0 — малюємо білим

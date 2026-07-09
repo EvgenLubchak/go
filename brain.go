@@ -41,7 +41,7 @@ import (
 const (
 	baseInputs  = 14 // ОДИН кадр стану: 5 базових + 8 whiskers + 1 «гравця видно»
 	stackFrames = 4  // [ПАМ'ЯТЬ] скільки кадрів склеюємо на вхід (1 = без пам'яті)
-	stackSkip   = 20 // кадрів між семплами історії → вікно пам'яті ≈ (stackFrames-1)*stackSkip
+	stackSkip   = 60 // кадрів між семплами історії → вікно пам'яті ≈ (stackFrames-1)*stackSkip
 
 	brainInputs = baseInputs * stackFrames // повний вхід мережі (стек кадрів)
 
@@ -195,6 +195,15 @@ type Brain struct {
 	lastWhiskers [brainWhiskers]float32
 	lastAction   int
 	lastReward   float32 // [МЕТРИКИ] нагорода останнього кроку (для середнього по рою)
+
+	// [МЕТРИКИ ПАМʼЯТІ] Blind-pursuit: чи бачив агент гравця, КОЛИ обирав минулу
+	// дію (visible на момент рішення). Дозволяє поміряти: коли агент СЛІПИЙ, чи
+	// продовжує він скорочувати дистанцію (памʼять) чи блукає (реактивний амнезик).
+	// Лічильники пише лише власна горутина агента (paralel-фаза) → без гонок;
+	// collect() підсумовує їх однопотоково й скидає (як lastReward).
+	prevVisible  bool
+	mBlindN      int // «сліпих рішень» за період
+	mBlindClosed int // ...із них скоротили дистанцію до гравця
 }
 
 // tanh — активація прихованого шару. Похідна: tanh'(z) = 1 - tanh(z)².
@@ -426,8 +435,21 @@ func (b *Brain) Step(cur [baseInputs]float32, dist float32, hitWall bool) int {
 	// (тому maxWhisker/escapeAction/proximity-reward працюють без змін).
 	stacked := b.buildStacked(cur)
 
+	// [МЕТРИКИ ПАМʼЯТІ] Чи бачить агент гравця ЦЬОГО кадру (вхід visible = cur[13]).
+	visible := cur[baseInputs-1] > 0.5
+
 	// 1) Нагорода за попередню дію → перехід у (можливо спільний) буфер.
 	if b.hasPrev {
+		// [МЕТРИКИ ПАМʼЯТІ] Зміна дистанції (prevDist→dist) — наслідок дії, обраної
+		// МИНУЛОГО кадру. Якщо тоді агент був СЛІПИЙ (prevVisible=false) — це
+		// «сліпе рішення»; фіксуємо, чи він усе одно наблизився. Реактивний агент
+		// без памʼяті наосліп ≈ випадковий; агент із памʼяттю тримає слід → частіше +.
+		if !b.prevVisible {
+			b.mBlindN++
+			if dist < b.prevDist {
+				b.mBlindClosed++
+			}
+		}
 		// [RL: REWARD SHAPING]
 		// Хижак: наблизився → +. [SELF-PLAY] Жертва (flee): інвертуємо — далі → +.
 		sign := float32(1)
@@ -481,18 +503,22 @@ func (b *Brain) Step(cur [baseInputs]float32, dist float32, hitWall bool) int {
 	b.prevState = stacked
 	b.prevAction = action
 	b.prevDist = dist
+	b.prevVisible = visible // [МЕТРИКИ ПАМʼЯТІ] видимість на момент цього рішення
 	b.hasPrev = true
 	b.lastAction = action
 
 	// [ПАМ'ЯТЬ] Раз на stackSkip кадрів записуємо поточний кадр в історію (зсув).
+	// Індекс СКРІЗЬ змінна i (не літерал 0) — інакше при stackFrames=1 масив frames
+	// має тип [0] і Go бракує константний frames[0] ще на компіляції.
 	b.frameTick++
 	if b.frameTick >= stackSkip {
 		b.frameTick = 0
-		for i := stackFrames - 2; i > 0; i-- {
-			b.frames[i] = b.frames[i-1]
-		}
-		if stackFrames > 1 {
-			b.frames[0] = cur
+		for i := stackFrames - 2; i >= 0; i-- {
+			if i > 0 {
+				b.frames[i] = b.frames[i-1] // зсуваємо старі кадри назад
+			} else {
+				b.frames[i] = cur // найновіший кадр — у позицію 0
+			}
 		}
 	}
 	return action

@@ -105,7 +105,7 @@ var (
 		AlignmentRate:   0.0, // не флокується — думає сам
 		CohesionRate:    0.0,
 		SeparationRate:  0.01,
-		MaxSpeed:        0.8, // середня швидкість
+		MaxSpeed:        1,   // середня швидкість
 		AggressionForce: 0.0, // НЕ використовується — замість цього Brain
 		BurstChance:     0.0,
 		BurstForce:      0.0,
