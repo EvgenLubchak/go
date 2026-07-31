@@ -15,8 +15,8 @@ import (
 const (
 	screenWidth  = 1680
 	screenHeight = 960
-	pixelSize    = 20
-	enemyCount   = 10
+	pixelSize    = 25
+	enemyCount   = 15
 
 	// Глобальна фізика — однакова для всіх типів ворогів.
 	// Поведінка (швидкість, агресія, burst) — в EnemyConfig у pixel.go.
@@ -29,6 +29,23 @@ const (
 	frustrationDecay   = 0.970 // затухання сліду щокадру (місце поступово «забувається»)
 	frustrationRepel   = 0.05  // сила відштовхування від слідів
 	frustrationRadius  = 3     // радіус сканування слідів навколо агента (клітинки)
+
+	// [БІЙ] Шкода від УДАРУ НА ШВИДКОСТІ («кидок кобри»).
+	// Шкодить не сам дотик, а ЗБЛИЖЕННЯ на швидкості: беремо проєкцію швидкості
+	// на напрямок до цілі (closing speed). Асиметрично — шкоду завдає той, хто
+	// летить У іншого. Тому: повільно зіштовхнулись = нічого; налетів = вкусив;
+	// лоб-у-лоб = обидва отримали. «Кидок і відступ» виникає САМ (після удару
+	// швидкість витрачена → ти вразливий), його не треба програмувати.
+	//
+	// Поріг — ЧАСТКА власної максимальної швидкості, а не абсолют: гравець
+	// (5.0 px/кадр) у ~6 разів швидший за учня (0.8), тож абсолютний поріг зробив
+	// би гравця танком, а ворогів — безпечними. Плюс абсолютна підлога, щоб
+	// повільні типи не вбивали «повзком».
+	impactSpeedFrac = 0.6 // ≥60% власного максимуму в бік цілі → удар
+	impactMinSpeed  = 0.4 // абсолютна підлога швидкості удару (px/кадр)
+	impactDamage    = 1   // шкода за один удар
+	impactInvuln    = 45  // кадрів невразливості після отриманого удару
+	playerMaxHP     = 10  // здоровʼя гравця (більше не вмирає з одного дотику)
 
 	attackRadius      = 120 // радіус удару в пікселях
 	attackDamage      = 1   // пошкодження за один удар
@@ -68,13 +85,15 @@ var (
 	difficultyGrowth    = false // false — складність не росте (для тренування AI)
 	showWhiskers        = true  // показувати сенсори стін і обрану дію Learner-а
 	showMetrics         = true  // показувати панель метрик навчання (крива reward/TD) — клавіша G
-	showFrustration     = true  // показувати теплову карту феромонів фрустрації
+	showFrustration     = false // показувати теплову карту феромонів фрустрації
 	pheromonesEnabled   = false // вмикає феромони фрустрації (стигмергію); false = чистий Q-learning без слідів
 	epsilonDecayEnabled = false // ε: false = постійна (qEpsilonConst); true = автоспад max→min
 	sharedBrain         = true  // true = всі учні ділять ОДНУ мережу (вулик-розум); false = кожен свою
 	localSight          = true  // [POMDP] true = агент бачить гравця лише поблизу+по прямій; false = всевидющий
 	aiPlayer            = false // [SELF-PLAY] true = гравцем керує мозок-жертва (вчиться тікати); false = людина
 	useGRU              = true  // [RNN] true = рекурентна памʼять (GRU); false = frame-stacking (стек кадрів)
+	friendlyFire        = false // [БІЙ] true = свої теж шкодять своїм (рій проріджує себе) — для експериментів
+	showFlowField       = false // [FLOW-FIELD] показати поле напрямків до гравця — клавіша V
 )
 
 func init() {
@@ -89,10 +108,15 @@ func main() {
 	game := &Game{
 		difficulty: 1.0,
 		player: Pixel{
-			X:     playerSpawn.X,
-			Y:     playerSpawn.Y,
-			Color: color.RGBA{R: 0, G: 255, B: 180, A: 255},
-			Label: "Y}{IJIEC",
+			X: playerSpawn.X,
+			Y: playerSpawn.Y,
+			// [БІЙ] HP > 0 → гравець витримує кілька ударів; MaxHP>0 ще й вмикає
+			// малювання HP-бару в drawPixel (те саме, що у ворогів).
+			HP:      playerMaxHP,
+			MaxHP:   playerMaxHP,
+			Faction: factionPlayer,
+			Color:   color.RGBA{R: 0, G: 255, B: 180, A: 255},
+			Label:   "Y}{IJIEC",
 		},
 		enemies: newEnemies(enemyCount),
 	}

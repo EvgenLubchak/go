@@ -5,6 +5,13 @@ import (
 	"math/rand"
 )
 
+// [БІЙ] Фракції — «хто кому свій». Поки дві: гравець (+ у майбутньому його юніти)
+// і рій. Далі на цьому виростуть командні бої: вбивці vs дружні боти.
+const (
+	factionPlayer = 0 // гравець і його союзники
+	factionEnemy  = 1 // рій-хижак
+)
+
 // EnemyConfig — параметри поведінки конкретного типу ворога.
 // Замість глобальних констант — кожен тип несе свої налаштування.
 //
@@ -105,13 +112,13 @@ var (
 		AlignmentRate:   0.0, // не флокується — думає сам
 		CohesionRate:    0.0,
 		SeparationRate:  0.01,
-		MaxSpeed:        1,   // середня швидкість
+		MaxSpeed:        1.2, // середня швидкість
 		AggressionForce: 0.0, // НЕ використовується — замість цього Brain
 		BurstChance:     0.0,
 		BurstForce:      0.0,
 		DetectionRange:  300.0, // бачить далеко — щоб було що вивчати
 		PounceMulti:     0.0,
-		MaxHP:           8,                            // живучий — більше часу на навчання
+		MaxHP:           2,                            // живучий — більше часу на навчання
 		Color:           color.RGBA{0, 255, 100, 255}, // зелений — учень
 		Label:           "",
 		IsLearner:       true, // ← саме це вмикає мозок, а не мітка
@@ -143,10 +150,16 @@ type Pixel struct {
 	HP, MaxHP  int
 	HitTimer   int
 	HitWall    bool // [RL] чи врізався у стіну цього кадру (сигнал штрафу для Brain)
-	Color      color.RGBA
-	Label      string
-	Cfg        EnemyConfig // конфіг типу (порожній для гравця)
-	Brain      *Brain      // нейронна мережа (nil для звичайних ворогів, не nil для Learner)
+
+	// [БІЙ] Кому належить юніт (свої не б'ють своїх, якщо friendlyFire=false).
+	Faction int
+	// [БІЙ] Кадри невразливості після отриманого удару. Без цього агенти, що
+	// перекриваються, отримували б шкоду КОЖЕН кадр (миттєва смерть у купі).
+	InvulnTimer int
+	Color       color.RGBA
+	Label       string
+	Cfg         EnemyConfig // конфіг типу (порожній для гравця)
+	Brain       *Brain      // нейронна мережа (nil для звичайних ворогів, не nil для Learner)
 }
 
 // aggressionColor повертає колір від синього (пасивний) до червоного (агресивний).
@@ -235,6 +248,7 @@ func newEnemies(count int) []Pixel {
 			Aggression: aggression,
 			HP:         cfg.MaxHP,
 			MaxHP:      cfg.MaxHP,
+			Faction:    factionEnemy, // [БІЙ] увесь рій — одна фракція
 			Color:      col,
 			Label:      cfg.Label,
 			Cfg:        cfg,

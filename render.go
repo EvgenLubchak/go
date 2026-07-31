@@ -143,6 +143,12 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			}
 		}
 
+		// [FLOW-FIELD] Поле напрямків до гравця (клавіша V) — під юнітами,
+		// щоб стрілки не перекривали ворогів і гравця.
+		if showFlowField {
+			g.drawFlowField(screen)
+		}
+
 		for _, e := range g.enemies {
 			// Радіус огляду — дуже прозоре кільце навколо ворога
 			cx := e.X + pixelSize/2
@@ -175,6 +181,13 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	cyan := color.RGBA{0, 220, 180, 255}
 	fps := ebiten.ActualFPS()
 	drawText(screen, fmt.Sprintf("LVL %d", level), 10, 30, 10, white)
+
+	// [БІЙ] HP гравця — червоніє, коли мало. Видно і у виді від 1-ї особи.
+	hpCol := color.RGBA{90, 230, 120, 255}
+	if g.player.MaxHP > 0 && g.player.HP*3 <= g.player.MaxHP {
+		hpCol = color.RGBA{240, 80, 60, 255}
+	}
+	drawText(screen, fmt.Sprintf("HP %d/%d", g.player.HP, g.player.MaxHP), 10, 110, 10, hpCol)
 	drawText(screen, fmt.Sprintf("SPD %.1f", playerSpeed), 10, screenWidth-32, 10, cyan)
 	drawText(screen, fmt.Sprintf("DIF %.1f", g.difficulty), 10, screenWidth-32, 25, color.RGBA{255, 140, 50, 255})
 	drawText(screen, fmt.Sprintf("FPS %.0f", fps), 10, screenWidth/2, 10, color.RGBA{150, 150, 150, 255})

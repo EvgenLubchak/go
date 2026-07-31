@@ -77,6 +77,8 @@ func (g *Game) respawnPlayer() {
 		}
 	}
 	g.player.VelX, g.player.VelY = 0, 0
+	g.player.HP = playerMaxHP // [БІЙ] новий «епізод» → повне здоровʼя
+	g.player.InvulnTimer = 0
 	if g.player.Brain != nil {
 		g.player.Brain.hasPrev = false
 		g.player.Brain.h = [gruHidden]float32{} // [RNN] скидаємо рекурентну памʼять
@@ -88,6 +90,14 @@ func (g *Game) respawnPlayer() {
 // Макс швидкість росте через sqrt(difficulty) — повільніше ніж вороги.
 func (g *Game) updatePlayer() {
 	g.player.HitWall = false // [SELF-PLAY] сигнал удару об стіну для мозку-жертви
+
+	// [БІЙ] Тікають кадри невразливості й білого блимання після удару.
+	if g.player.InvulnTimer > 0 {
+		g.player.InvulnTimer--
+	}
+	if g.player.HitTimer > 0 {
+		g.player.HitTimer--
+	}
 
 	// Тертя — при відпусканні клавіші гравець поступово зупиняється (інерція)
 	g.player.VelX *= playerFriction

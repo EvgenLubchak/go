@@ -217,6 +217,9 @@ func (g *Game) updateEnemies() {
 		if e.HitTimer > 0 {
 			e.HitTimer--
 		}
+		if e.InvulnTimer > 0 { // [БІЙ] кадри невразливості після удару
+			e.InvulnTimer--
+		}
 
 		// Рух: відбивання від тайлових стін і країв екрану.
 		newX := e.X + e.VelX

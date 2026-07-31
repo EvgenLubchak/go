@@ -15,20 +15,133 @@ func collides(ax, ay, bx, by float32) bool {
 		ay+pixelSize > by
 }
 
-// checkCollisions перевіряє чи торкнувся ворог гравця → game over.
-func (g *Game) checkCollisions() {
-	for _, e := range g.enemies {
-		if collides(g.player.X, g.player.Y, e.X, e.Y) {
-			g.metrics.catches++ // [МЕТРИКИ] спіймання (для catch-rate)
-			if aiPlayer {
-				// [SELF-PLAY] Не game over — переносимо жертву й тренуємось далі.
-				g.respawnPlayer()
-			} else {
-				g.gameOver = true
-				g.saveBrains() // зберігаємо мозок хижаків
-			}
-			return
+// ==========================================================================
+// [БІЙ] ШКОДА ВІД УДАРУ НА ШВИДКОСТІ («кидок кобри»)
+//
+// Шкодить не дотик, а ЗБЛИЖЕННЯ на швидкості. Міра — closing speed: проєкція
+// швидкості на напрямок до цілі (звичайний dot product одиничних векторів).
+//
+//	повільно зіштовхнулись   → impact малий → шкоди НЕМА (нема взаємного знищення)
+//	налетів на нерухомого    → шкода лише жертві (перевага атакуючому)
+//	лоб-у-лоб на швидкості   → обидва отримали (реальний ризик атаки)
+//	летять паралельно, торк. → impact ≈ 0 → нічого
+//
+// Наслідок: hit-and-run стає оптимальним МАТЕМАТИЧНО, а не бо ми так закодували.
+// ==========================================================================
+
+// closingSpeed — наскільки швидко об'єкт зі швидкістю (vx,vy) зближується з ціллю
+// у напрямку (nx,ny). Додатне = летить У ціль, від'ємне = віддаляється.
+func closingSpeed(vx, vy, nx, ny float32) float32 {
+	return vx*nx + vy*ny
+}
+
+// unitTo — одиничний вектор від центру (ax,ay) до центру (bx,by) + чи він валідний.
+func unitTo(ax, ay, bx, by float32) (nx, ny float32, ok bool) {
+	dx := (bx + pixelSize/2) - (ax + pixelSize/2)
+	dy := (by + pixelSize/2) - (ay + pixelSize/2)
+	d := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+	if d < 0.001 {
+		return 0, 0, false // центри збіглись — напрямок невизначений
+	}
+	return dx / d, dy / d, true
+}
+
+// impactThreshold — мінімальна швидкість зближення, щоб удар зарахувався:
+// частка ВЛАСНОГО максимуму (щоб швидкі й повільні юніти були в рівних умовах)
+// але не нижче абсолютної підлоги.
+func impactThreshold(ownMaxSpeed float32) float32 {
+	t := ownMaxSpeed * impactSpeedFrac
+	if t < impactMinSpeed {
+		t = impactMinSpeed
+	}
+	return t
+}
+
+// applyImpactDamage завдає шкоди, якщо ціль не в невразливості.
+// Працює однаково для гравця і для ворога (обидва — Pixel).
+func applyImpactDamage(p *Pixel) {
+	if p.InvulnTimer > 0 {
+		return
+	}
+	p.HP -= impactDamage
+	p.HitTimer = hitFlashDuration // біле блимання (вже було для удару гравця)
+	p.InvulnTimer = impactInvuln
+}
+
+// resolveImpacts — [БІЙ] проходить пари, що перетинаються, і завдає шкоди за
+// closing speed. Обробляє і гравець↔вороги, і вороги↔вороги.
+// Однопотоково (після паралельної фази) → без гонок.
+func (g *Game) resolveImpacts() {
+	// Максимальна швидкість гравця — та сама формула, що в updatePlayer.
+	playerMax := float32(playerBaseSpeed) * float32(math.Sqrt(float64(g.difficulty)))
+
+	// --- Гравець ↔ вороги ---
+	for i := range g.enemies {
+		e := &g.enemies[i]
+		if e.HP <= 0 || !collides(g.player.X, g.player.Y, e.X, e.Y) {
+			continue
 		}
+		if !friendlyFire && e.Faction == g.player.Faction {
+			continue
+		}
+		nx, ny, ok := unitTo(g.player.X, g.player.Y, e.X, e.Y) // від гравця до ворога
+		if !ok {
+			continue
+		}
+		// Гравець таранить ворога.
+		if closingSpeed(g.player.VelX, g.player.VelY, nx, ny) >= impactThreshold(playerMax) {
+			applyImpactDamage(e)
+		}
+		// Ворог кидається на гравця (напрямок навпаки).
+		eMax := e.Cfg.MaxSpeed * g.difficulty
+		if eMax > 0 && closingSpeed(e.VelX, e.VelY, -nx, -ny) >= impactThreshold(eMax) {
+			applyImpactDamage(&g.player)
+		}
+	}
+
+	// --- Вороги ↔ вороги (i<j, щоб кожну пару рахувати раз) ---
+	for i := range g.enemies {
+		a := &g.enemies[i]
+		if a.HP <= 0 {
+			continue
+		}
+		for j := i + 1; j < len(g.enemies); j++ {
+			b := &g.enemies[j]
+			if b.HP <= 0 || !collides(a.X, a.Y, b.X, b.Y) {
+				continue
+			}
+			if !friendlyFire && a.Faction == b.Faction {
+				continue
+			}
+			nx, ny, ok := unitTo(a.X, a.Y, b.X, b.Y)
+			if !ok {
+				continue
+			}
+			aMax := a.Cfg.MaxSpeed * g.difficulty
+			bMax := b.Cfg.MaxSpeed * g.difficulty
+			if aMax > 0 && closingSpeed(a.VelX, a.VelY, nx, ny) >= impactThreshold(aMax) {
+				applyImpactDamage(b)
+			}
+			if bMax > 0 && closingSpeed(b.VelX, b.VelY, -nx, -ny) >= impactThreshold(bMax) {
+				applyImpactDamage(a)
+			}
+		}
+	}
+}
+
+// checkCollisions — [БІЙ] тепер перевіряє не дотик, а СМЕРТЬ гравця (HP ≤ 0).
+// Саму шкоду завдає resolveImpacts.
+func (g *Game) checkCollisions() {
+	if g.player.HP > 0 {
+		return
+	}
+	g.metrics.catches++ // [МЕТРИКИ] вбивство гравця (для catch-rate)
+	if aiPlayer {
+		// [SELF-PLAY] Не game over — переносимо жертву й тренуємось далі.
+		g.respawnPlayer()
+	} else {
+		g.gameOver = true
+		g.saveBrains() // зберігаємо мозок хижаків
 	}
 }
 

@@ -51,11 +51,24 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 	useGRU = false // цей тест перевіряє СТЕК-шлях (Step/train/forwardQ)
 	defer func() { useGRU = savedGRU }()
 
+	// [ТЕСТ НЕ ЗАЛЕЖИТЬ ВІД ДИЗАЙНУ РІВНЯ] Прибираємо ВСІ стіни на час тесту.
+	// Інакше правки levelLayout або pixelSize засівають «порожню» зону стінами →
+	// whiskers ≠ 0 → reward губиться у штрафах за стіни, і агент вчиться їх
+	// обходити, а не переслідувати. Тест зветься NoWalls — робимо це буквально.
+	// [GO: масив — значимий тип] savedMap := tileMap копіює його повністю.
+	savedMap := tileMap
+	tileMap = [boidMapH][boidMapW]bool{}
+	defer func() { tileMap = savedMap }()
+
 	b := NewBrain()
 	// Ворог у відкритій зоні без стін (whiskers ≈ 0).
 	enemy := &Pixel{X: 1100, Y: 500, Cfg: ConfigLearner, Brain: b}
 	player := &Pixel{X: 1300, Y: 600}
-	maxSpd := ConfigLearner.MaxSpeed
+	// [ТЕСТ НЕ ЗАЛЕЖИТЬ ВІД ТЮНІНГУ] Фіксована швидкість, а НЕ ConfigLearner.MaxSpeed:
+	// інакше кожна правка гейм-балансу зсуває збіжність тесту. Причина — швидкість
+	// масштабує нагороду (reward = Δdist × rewardCloserScale), а більші TD-помилки
+	// частіше впираються в кліп ±1 → сигнал тупіє. Тут перевіряємо САМ алгоритм.
+	maxSpd := float32(0.8)
 
 	dist := func() float32 {
 		dx, dy := player.X-enemy.X, player.Y-enemy.Y

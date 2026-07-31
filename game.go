@@ -45,6 +45,10 @@ type Game struct {
 	camAngle    float32 // напрямок камери (рад), слідує за напрямком руху гравця
 
 	metrics Metrics // [МЕТРИКИ] крива навчання рою (клавіша G)
+
+	// [FLOW-FIELD] Поле напрямків до гравця крізь лабіринт (BFS від гравця).
+	// Перебудовується, коли гравець змінив клітинку. Візуалізація — клавіша V.
+	flow FlowField
 }
 
 // [GO: SENTINEL ERROR]
@@ -58,6 +62,8 @@ func (g *Game) restart() {
 	g.player.Y = playerSpawn.Y
 	g.player.VelX = 0
 	g.player.VelY = 0
+	g.player.HP = playerMaxHP // [БІЙ] відновлюємо здоровʼя
+	g.player.InvulnTimer = 0
 	g.attackCooldown = 0
 	g.attackTimer = 0
 	g.enemies = newEnemies(enemyCount)
@@ -106,6 +112,11 @@ func (g *Game) Update() error {
 		g.metrics.resetCounters()
 	}
 
+	// V — [FLOW-FIELD] показати поле напрямків до гравця (стрілки + BFS-хвиля)
+	if inpututil.IsKeyJustPressed(ebiten.KeyV) {
+		showFlowField = !showFlowField
+	}
+
 	if g.gameOver {
 		if ebiten.IsKeyPressed(ebiten.KeyR) {
 			g.restart()
@@ -133,6 +144,7 @@ func (g *Game) Update() error {
 		g.handlePlayerInput()
 	}
 	g.updatePlayer()
+	g.updateFlowField() // [FLOW-FIELD] BFS від гравця (лише коли змінив клітинку)
 	g.playerAttack()
 	g.updateBoidMap()
 	g.calcAcceleration()
@@ -142,6 +154,7 @@ func (g *Game) Update() error {
 	}
 	g.metrics.collect(g) // [МЕТРИКИ] збір показників навчання (однопотоково)
 	g.updateEnemies()
+	g.resolveImpacts() // [БІЙ] шкода від удару на швидкості (після руху — швидкості свіжі)
 	g.removeDeadEnemies()
 	g.checkCollisions()
 	return nil
