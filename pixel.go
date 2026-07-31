@@ -105,8 +105,8 @@ var (
 	}
 
 	// ConfigLearner — ворог-учень з нейронною мережею замість захардкоджених правил.
-	// Не використовує AggressionForce/PounceMulti — замість них Brain підбирає ваги сам.
-	// MaxSpeed і DetectionRange задають фізичні межі, а рішення приймає нейрон.
+	// Не використовує AggressionForce/PounceMulti/DetectionRange — замість них Brain
+	// підбирає ваги сам. Фізичну межу задає лише MaxSpeed; рішення приймає нейрон.
 	ConfigLearner = EnemyConfig{
 		WanderStrength:  0.1, // мінімальне блукання для дослідження
 		AlignmentRate:   0.0, // не флокується — думає сам
@@ -116,12 +116,13 @@ var (
 		AggressionForce: 0.0, // НЕ використовується — замість цього Brain
 		BurstChance:     0.0,
 		BurstForce:      0.0,
-		DetectionRange:  300.0, // бачить далеко — щоб було що вивчати
-		PounceMulti:     0.0,
-		MaxHP:           2,                            // живучий — більше часу на навчання
-		Color:           color.RGBA{0, 255, 100, 255}, // зелений — учень
-		Label:           "",
-		IsLearner:       true, // ← саме це вмикає мозок, а не мітка
+		DetectionRange:  300.0, // НЕ впливає на учня (лише debug-коло showDetectionCircle);
+		//                        зір мозку — це sightRange (POMDP) + whiskerRange (вуса)
+		PounceMulti: 0.0,
+		MaxHP:       2,                            // живучий — більше часу на навчання
+		Color:       color.RGBA{0, 255, 100, 255}, // зелений — учень
+		Label:       "",
+		IsLearner:   true, // ← саме це вмикає мозок, а не мітка
 	}
 
 	ConfigGroup = EnemyConfig{

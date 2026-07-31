@@ -83,7 +83,7 @@ var (
 	fontFaceSource      *etext.GoTextFaceSource
 	soundEnabled        = false // false — вимкнути фоновий ритм
 	difficultyGrowth    = false // false — складність не росте (для тренування AI)
-	showWhiskers        = true  // показувати сенсори стін і обрану дію Learner-а
+	showWhiskers        = false // показувати сенсори стін і обрану дію Learner-а
 	showMetrics         = true  // показувати панель метрик навчання (крива reward/TD) — клавіша G
 	showFrustration     = false // показувати теплову карту феромонів фрустрації
 	pheromonesEnabled   = false // вмикає феромони фрустрації (стигмергію); false = чистий Q-learning без слідів
@@ -93,7 +93,7 @@ var (
 	aiPlayer            = false // [SELF-PLAY] true = гравцем керує мозок-жертва (вчиться тікати); false = людина
 	useGRU              = true  // [RNN] true = рекурентна памʼять (GRU); false = frame-stacking (стек кадрів)
 	friendlyFire        = false // [БІЙ] true = свої теж шкодять своїм (рій проріджує себе) — для експериментів
-	showFlowField       = false // [FLOW-FIELD] показати поле напрямків до гравця — клавіша V
+	showFlowField       = true  // [FLOW-FIELD] показати поле напрямків до гравця — клавіша V
 )
 
 func init() {
