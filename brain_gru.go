@@ -180,7 +180,7 @@ func (n *Net) trainSeq(k int) {
 // + anti-stuck + reward + накопичення ВІДРІЗКА у буфер послідовностей. Навчання
 // (BPTT) ще НЕ підключене (крок 3) — ваги GRU поки не міняються, рій діє випадково;
 // але дані для навчання вже течуть у seqReplay, а метрики reward/blind оживають.
-func (b *Brain) stepGRU(cur [baseInputs]float32, dist float32, hitWall bool) int {
+func (b *Brain) stepGRU(cur [baseInputs]float32, hitWall bool) int {
 	// Рекурентний forward: несемо власний стан b.h крізь кадри.
 	q, hNew := b.net.forwardGRU(cur, b.h)
 	b.h = hNew
@@ -194,13 +194,13 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, dist float32, hitWall bool) int
 		// [МЕТРИКИ ПАМʼЯТІ] blind-chase (як у стек-шляху).
 		if !b.flowNav && !b.prevVisible {
 			b.mBlindN++
-			if dist < b.prevDist {
+			if b.progress > 0 {
 				b.mBlindClosed++
 			}
 		}
 		// Нагорода — у спільному rewardFor (див. brain.go); вус напрямку минулої
 		// дії беремо з попереднього кадру цього агента.
-		reward := b.rewardFor(dist, hitWall, b.gruPrevX[inWhisker0+b.prevAction])
+		reward := b.rewardFor(hitWall, b.gruPrevX[inWhisker0+b.prevAction])
 
 		// Записуємо завершений крок (x_{t-1}, a_{t-1}, r) у накопичувач відрізка.
 		b.seqX[b.seqN] = b.gruPrevX
@@ -215,9 +215,9 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, dist float32, hitWall bool) int
 	}
 
 	// Anti-stuck — та сама сітка безпеки, що й у стек-режимі (по вусах кадру).
-	// Прогрес — за метрикою ЦЬОГО типу мозку (пряма для рою, коридор для вбивці),
-	// щоб anti-stuck не сварив вбивцю саме за обхід стіни.
-	madeProgress := b.hasPrev && b.progressToward(dist) > stuckProgressEps
+	// Прогрес — ВЛАСНИЙ внесок агента в потрібному напрямку (пряма для рою,
+	// коридор для вбивці), щоб anti-stuck не сварив за обхід стіни.
+	madeProgress := b.hasPrev && b.progressToward() > stuckProgressEps
 	switch {
 	case madeProgress:
 		if b.stuckCounter > 0 {
@@ -247,7 +247,6 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, dist float32, hitWall bool) int
 
 	b.gruPrevX = cur
 	b.prevAction = action
-	b.prevDist = dist
 	b.prevVisible = visible
 	b.hasPrev = true
 	b.lastAction = action

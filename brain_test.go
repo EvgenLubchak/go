@@ -70,10 +70,6 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 	// частіше впираються в кліп ±1 → сигнал тупіє. Тут перевіряємо САМ алгоритм.
 	maxSpd := float32(0.8)
 
-	dist := func() float32 {
-		dx, dy := player.X-enemy.X, player.Y-enemy.Y
-		return float32(math.Sqrt(float64(dx*dx + dy*dy)))
-	}
 	// Відкритий прямокутник без стін і подалі від країв (щоб whiskers=0).
 	const x0, x1, y0, y1 = 950, 1450, 360, 740
 	randOpen := func(lo, hi float32) float32 { return lo + rand.Float32()*(hi-lo) }
@@ -87,7 +83,7 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 
 		for step := 0; step < 150; step++ {
 			state := GatherInputs(enemy, player)
-			action := b.Step(state, dist(), false)
+			action := b.Step(state, false)
 			b.net.train(qBatch) // Step лише збирає досвід; тренуємо явно (як g.trainBrains)
 			enemy.VelX += dirs8[action][0] * brainForce
 			enemy.VelY += dirs8[action][1] * brainForce
@@ -142,7 +138,7 @@ func TestSharedBrainNoRace(t *testing.T) {
 				var state [baseInputs]float32 // один кадр (Step склеїть у стек)
 				state[0] = float32(seed%7) * 0.1
 				state[5+seed%brainWhiskers] = 0.6
-				b.Step(state, float32(50+seed), seed%3 == 0)
+				b.Step(state, seed%3 == 0)
 			}(brains[i], i)
 		}
 		wg.Wait()
@@ -268,21 +264,21 @@ func TestSaveLoadGRURoundTrip(t *testing.T) {
 func TestKillerHasSeparateHive(t *testing.T) {
 	// [СКЛАД ПОЛЯ] Тест не залежить від бойового балансу: підставляємо власний
 	// roster (по одному юніту кожного типу), а справжній повертаємо через defer.
-	savedRoster, savedShared := enemyRoster, sharedBrain
-	defer func() { enemyRoster, sharedBrain = savedRoster, savedShared }()
+	savedRoster, savedShared := unitRoster, sharedBrain
+	defer func() { unitRoster, sharedBrain = savedRoster, savedShared }()
 	sharedBrain = true
 	chaser, killer := ConfigLearner, ConfigKiller
 	chaser.Count, killer.Count = 2, 2
-	enemyRoster = []EnemyConfig{chaser, killer}
+	unitRoster = []UnitConfig{chaser, killer}
 
-	enemies := newEnemies()
+	units := newUnits()
 	var killerNet, chaserNet *Net
-	for i := range enemies {
-		b := enemies[i].Brain
+	for i := range units {
+		b := units[i].Brain
 		if b == nil || b.net == nil {
 			t.Fatalf("агент %d без мозку", i)
 		}
-		if enemies[i].Cfg.UsesFlowField {
+		if units[i].Cfg.UsesFlowField {
 			if killerNet == nil {
 				killerNet = b.net
 			} else if b.net != killerNet {
@@ -320,7 +316,7 @@ func TestSaveBrainsWritesEachHive(t *testing.T) {
 	hiveB.file = dir + "/b.json"
 	// ephemeral.file лишається "" → не зберігається (як мозок-жертва в self-play)
 
-	g := &Game{enemies: []Pixel{
+	g := &Game{units: []Pixel{
 		{Brain: NewBrainWith(hiveA)}, {Brain: NewBrainWith(hiveA)},
 		{Brain: NewBrainWith(hiveB)},
 		{Brain: NewBrainWith(ephemeral)},
@@ -349,10 +345,10 @@ func TestCombatRewardAndAttribution(t *testing.T) {
 	victim := Pixel{X: 110, Y: 100, Cfg: ConfigLearner, // стоїть на місці
 		HP: 1, MaxHP: 2, Faction: factionPlayer, Brain: NewBrain()}
 
-	g := &Game{difficulty: 1.0, enemies: []Pixel{attacker, victim}}
+	g := &Game{difficulty: 1.0, units: []Pixel{attacker, victim}}
 	g.resolveImpacts()
 
-	a, v := &g.enemies[0], &g.enemies[1]
+	a, v := &g.units[0], &g.units[1]
 	if a.Brain.dmgDealt != impactDamage {
 		t.Fatalf("нападнику не зараховано шкоду: dmgDealt=%d", a.Brain.dmgDealt)
 	}
@@ -372,13 +368,13 @@ func TestCombatRewardAndAttribution(t *testing.T) {
 	mk := func(combat bool) *Brain {
 		b := NewBrain()
 		b.combat = combat
-		b.prevDist = 100 // дистанція не змінилась → щільний член = 0
+		b.progress = 0 // нема власного руху → щільний член = 0
 		b.dmgDealt, b.dmgTaken, b.kills = 2, 1, 1
 		return b
 	}
 	plain, fighter := mk(false), mk(true)
-	rPlain := plain.rewardFor(100, false, 0)
-	rFight := fighter.rewardFor(100, false, 0)
+	rPlain := plain.rewardFor(false, 0)
+	rFight := fighter.rewardFor(false, 0)
 
 	want := float32(rewardDamageDealt*2 + rewardDamageTaken*1 + rewardKill*1)
 	if got := rFight - rPlain; got != want {
@@ -396,4 +392,58 @@ func TestCombatRewardAndAttribution(t *testing.T) {
 	}
 	t.Logf("бойова добавка = %.1f (шкода +%.0f/−%.0f, вбивство +%.0f)",
 		want, rewardDamageDealt, -rewardDamageTaken, rewardKill)
+}
+
+// TestRosterConfigsAreComplete — [КОМАНДИ] страховка від класу помилок, який ми
+// щойно зловили наживо: у конфігах забулись Faction і WeightsFile. Оскільки
+// factionPlayer == 0, забутий Faction МОВЧКИ робить ворогів «своїми», а порожній
+// WeightsFile злипає два типи в один вулик. Компілятор такого не бачить.
+//
+// [ТЕСТ НЕ ЗАЛЕЖИТЬ ВІД БАЛАНСУ] Count=0 — це не помилка, а свідомо вимкнений тип
+// (так робимо ізольовані прогони). Перевіряємо УЗГОДЖЕНІСТЬ конфігів, а не те,
+// який склад поля обрано зараз.
+func TestRosterConfigsAreComplete(t *testing.T) {
+	seenFile := map[string]string{}
+	for _, cfg := range unitRoster {
+		if cfg.Count < 0 {
+			t.Errorf("відʼємний Count=%d", cfg.Count)
+		}
+		if cfg.Count == 0 {
+			continue // тип свідомо вимкнено (ізольовані прогони) — не помилка
+		}
+		if cfg.Faction != factionEnemy && cfg.Faction != factionPlayer {
+			t.Errorf("невідома фракція %d", cfg.Faction)
+		}
+		if !cfg.IsLearner {
+			continue
+		}
+		if cfg.WeightsFile == "" {
+			t.Errorf("тип-учень без WeightsFile → ділив би вулик з іншим типом")
+			continue
+		}
+		// Один файл ваг = один тип мозку. Два різні типи з тим самим файлом
+		// означали б, що вони вчаться в одну мережу з різними входами/нагородами.
+		if prev, dup := seenFile[cfg.WeightsFile]; dup {
+			t.Errorf("файл ваг %q ділять два типи (%s і цей) — вулики не розділені",
+				cfg.WeightsFile, prev)
+		}
+		seenFile[cfg.WeightsFile] = cfg.WeightsFile
+	}
+
+	// На полі мають бути ОБИДВІ сторони — інакше командного бою не вийде.
+	var enemies, allies int
+	for _, cfg := range unitRoster {
+		if cfg.Count == 0 {
+			continue
+		}
+		if cfg.Faction == factionEnemy {
+			enemies += cfg.Count
+		} else {
+			allies += cfg.Count
+		}
+	}
+	t.Logf("склад поля: %d ворогів проти %d юнітів гравця", enemies, allies)
+	if enemies == 0 || allies == 0 {
+		t.Log("увага: одна зі сторін порожня — командного бою не буде")
+	}
 }

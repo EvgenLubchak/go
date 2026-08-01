@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"image/color"
+	"strings"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
@@ -23,9 +24,20 @@ import (
 // ==========================================================================
 
 const (
-	metricSamples = 240  // точок у кривій (ширина графіка)
+	metricSamples = 480  // точок у кривій (ширина графіка ≈ 60с історії)
 	metricEvery   = 15   // семпл раз на N кадрів (не щокадру — шумно)
 	metricEMA     = 0.08 // згладжування (менше = плавніше, повільніше реагує)
+
+	// [ПАНЕЛЬ] Один масштаб на всю панель: ширина, шрифти, висота рядків і графіка
+	// рахуються від нього. Хочеш більшу/меншу панель — крути лише це число.
+	metricScale = 2.2
+
+	// Базові розміри (при metricScale = 1).
+	metricBaseW      = 380 // ширина панелі
+	metricBasePad    = 10  // внутрішні відступи
+	metricBaseRowH   = 14  // висота рядка вулика
+	metricBaseGraphH = 80  // висота області графіка
+	metricBaseFont   = 9   // кегль тексту
 )
 
 // curve — кільцевий буфер значень для лінійного графіка.
@@ -49,18 +61,27 @@ func (c *curve) at(i int) float32 {
 	return c.buf[(start+i)%metricSamples]
 }
 
-// Metrics збирає й зберігає показники навчання рою.
-type Metrics struct {
-	tick int
-
-	reward float32 // згладжені поточні значення
+// hiveStat — показники ОДНОГО вулика (типу мозку). Раніше метрики усереднювались
+// по ВСІХ мозках разом, і це вже брехало: у вбивці нагорода іншого масштабу (+5 за
+// вбивство проти ±0.5 у рою), тож середнє змішувало різні речі. З трьома командами
+// стало б зовсім нечитабельно.
+type hiveStat struct {
+	label  string     // «brain» / «killer» / «ally» — з імені файлу ваг
+	color  color.RGBA // колір юнітів цього типу → лінія збігається з тим, що на полі
+	reward float32    // згладжені (EMA) поточні значення
 	tdErr  float32
 	maxQ   float32
 	eps    float32
 	inited bool
+	curve  curve // крива reward саме цього вулика
+}
 
-	rewardCurve curve
-	tdCurve     curve
+// Metrics збирає й зберігає показники навчання — ОКРЕМО по кожному вулику.
+type Metrics struct {
+	tick int
+
+	hives map[string]*hiveStat // ключ — файл ваг (= тип мозку)
+	order []string             // стабільний порядок показу (як зустріли)
 
 	// [ПАМʼЯТЬ] Кумулятивні лічильники ВІД МОМЕНТУ СКИДАННЯ (клавіша M). Скидаємо
 	// вручну, коли рій уже навчився → міряємо саме навчену політику, а не історію.
@@ -80,57 +101,89 @@ func (m *Metrics) resetCounters() {
 // Однопотоково → без гонок: lastReward писався в паралельній фазі (вже завершеній),
 // акумулятори мережі — в trainBrains (теж завершеному).
 func (m *Metrics) collect(g *Game) {
-	var rSum float32
-	var rN int
-	var tdSum, qSum float32
-	var tdN int
+	if m.hives == nil {
+		m.hives = map[string]*hiveStat{}
+	}
+	// Сума нагород і кількість агентів — ОКРЕМО по кожному вулику.
+	type acc struct {
+		rSum float32
+		rN   int
+	}
+	sums := map[string]*acc{}
 	seen := map[*Net]bool{}
 
-	for i := range g.enemies {
-		b := g.enemies[i].Brain
-		if b == nil {
+	for i := range g.units {
+		u := &g.units[i]
+		b := u.Brain
+		if b == nil || b.net == nil {
 			continue
 		}
-		rSum += b.lastReward
-		rN++
-		// [ПАМʼЯТЬ] Забираємо «сліпі рішення» цього агента й скидаємо (однопотоково,
+		key := b.net.file
+		if key == "" {
+			key = "ephemeral" // мозок-жертва в self-play (не зберігається)
+		}
+		h := m.hives[key]
+		if h == nil {
+			h = &hiveStat{label: hiveLabel(key), color: u.Cfg.Color}
+			m.hives[key] = h
+			m.order = append(m.order, key)
+		}
+		if sums[key] == nil {
+			sums[key] = &acc{}
+		}
+		sums[key].rSum += b.lastReward
+		sums[key].rN++
+		h.eps = b.epsilon()
+
+		// [ПАМʼЯТЬ] Забираємо «сліпі рішення» агента й скидаємо (однопотоково,
 		// паралельна фаза calcAcceleration уже завершена → без гонок).
 		m.blindN += b.mBlindN
 		m.blindClosed += b.mBlindClosed
 		b.mBlindN, b.mBlindClosed = 0, 0
-		if b.net != nil && !seen[b.net] {
+
+		// TD/maxQ — з МЕРЕЖІ, тож беремо раз на унікальну мережу.
+		if !seen[b.net] {
 			seen[b.net] = true
-			tdSum += b.net.mTDSum
-			qSum += b.net.mQSum
-			tdN += b.net.mTDN
-			m.eps = b.epsilon() // репрезентативна ε
+			if n := b.net.mTDN; n > 0 {
+				frameTD := b.net.mTDSum / float32(n)
+				frameQ := b.net.mQSum / float32(n)
+				if !h.inited {
+					h.tdErr, h.maxQ = frameTD, frameQ
+				} else {
+					h.tdErr += (frameTD - h.tdErr) * metricEMA
+					h.maxQ += (frameQ - h.maxQ) * metricEMA
+				}
+			}
 			b.net.mTDSum, b.net.mQSum, b.net.mTDN = 0, 0, 0
 		}
 	}
 
-	var frameR, frameTD, frameQ float32
-	if rN > 0 {
-		frameR = rSum / float32(rN)
-	}
-	if tdN > 0 {
-		frameTD = tdSum / float32(tdN)
-		frameQ = qSum / float32(tdN)
-	}
-
-	if !m.inited {
-		m.reward, m.tdErr, m.maxQ, m.inited = frameR, frameTD, frameQ, true
-	} else {
-		m.reward += (frameR - m.reward) * metricEMA
-		m.tdErr += (frameTD - m.tdErr) * metricEMA
-		m.maxQ += (frameQ - m.maxQ) * metricEMA
+	for key, a := range sums {
+		h := m.hives[key]
+		var frameR float32
+		if a.rN > 0 {
+			frameR = a.rSum / float32(a.rN)
+		}
+		if !h.inited {
+			h.reward, h.inited = frameR, true
+		} else {
+			h.reward += (frameR - h.reward) * metricEMA
+		}
 	}
 
 	m.tick++
 	m.window++ // [ПАМʼЯТЬ] кадрів від моменту скидання (для catch-rate)
 	if m.tick%metricEvery == 0 {
-		m.rewardCurve.push(m.reward)
-		m.tdCurve.push(m.tdErr)
+		for _, key := range m.order {
+			m.hives[key].curve.push(m.hives[key].reward)
+		}
 	}
+}
+
+// hiveLabel — коротка назва вулика з імені файлу ваг: "killer_weights.json" → "killer".
+func hiveLabel(file string) string {
+	name := strings.TrimSuffix(file, ".json")
+	return strings.TrimSuffix(name, "_weights")
 }
 
 // onoff — короткий підпис прапорця для ярлика конфігурації.
@@ -141,74 +194,112 @@ func onoff(b bool) string {
 	return "off"
 }
 
-// draw малює панель метрик (конфіг + числа + криві + памʼять/лов) у лівому куті.
+// draw малює панель метрик: рядок на КОЖЕН вулик + криві його кольором.
+// Усі розміри — від metricScale, тож панель масштабується одним числом.
 func (m *Metrics) draw(screen *ebiten.Image) {
-	const px, pw, ph = 12, 760, 180
-	const py = screenHeight - ph - 12
-	vector.FillRect(screen, px, py, pw, ph, color.RGBA{0, 0, 0, 170}, false)
+	const (
+		pad    = metricBasePad * metricScale
+		pw     = metricBaseW * metricScale
+		rowH   = metricBaseRowH * metricScale
+		graphH = metricBaseGraphH * metricScale
+		font   = metricBaseFont * metricScale
+	)
+	ph := float32(pad*2+graphH+rowH) + float32(rowH)*float32(len(m.order)+1) // +1 рядок конфігу, +рядок підсумків
+	px := float32(12)
+	py := float32(screenHeight) - ph - 12
+	vector.FillRect(screen, px, py, float32(pw), ph, color.RGBA{0, 0, 0, 190}, false)
 
-	green := color.RGBA{90, 220, 120, 255}
-	orange := color.RGBA{235, 150, 50, 255}
-	gray := color.RGBA{170, 170, 180, 255}
 	cyan := color.RGBA{95, 200, 220, 255}
-	mem := color.RGBA{205, 140, 235, 255}   // blind-pursuit — метрика памʼяті
-	yellow := color.RGBA{230, 215, 95, 255} // спіймання
+	mem := color.RGBA{205, 140, 235, 255}
+	yellow := color.RGBA{230, 215, 95, 255}
 
 	// Рядок 0: ЯРЛИК КОНФІГУРАЦІЇ — щоб скріншоти A/B самі себе документували.
 	memMode := "stk"
 	if useGRU {
 		memMode = "gru"
 	}
-	cfg := fmt.Sprintf("mem:%s  stk%d  local:%s  shared:%s  ai:%s",
-		memMode, stackFrames, onoff(localSight), onoff(sharedBrain), onoff(aiPlayer))
-	drawTextL(screen, cfg, 8, px+10, py+12, cyan)
+	y := float64(py) + pad + rowH*0.7
+	drawTextL(screen, fmt.Sprintf("mem:%s  stk%d  local:%s  shared:%s  ai:%s  eps %.3f",
+		memMode, stackFrames, onoff(localSight), onoff(sharedBrain), onoff(aiPlayer),
+		m.firstEps()), font*0.85, float64(px)+pad, y, cyan)
 
-	// Рядок 1: числа навчання.
-	drawTextL(screen, fmt.Sprintf("reward %+.3f", m.reward), 9, px+10, py+28, green)
-	drawTextL(screen, fmt.Sprintf("TD %.3f", m.tdErr), 9, px+150, py+28, orange)
-	drawTextL(screen, fmt.Sprintf("maxQ %.2f", m.maxQ), 9, px+250, py+28, gray)
+	// Рядок на КОЖЕН вулик — свої reward/TD/maxQ, кольором своїх юнітів.
+	for _, key := range m.order {
+		h := m.hives[key]
+		y += rowH
+		drawTextL(screen, fmt.Sprintf("%-11s r %+.3f    TD %.3f    Q %.2f",
+			h.label, h.reward, h.tdErr, h.maxQ), font, float64(px)+pad, y, h.color)
+	}
 
-	// Крива навчання (кожна в СВОЄМУ масштабі — різні діапазони).
-	gx, gy, gw, gh := float32(px+10), float32(py+40), float32(pw-20), float32(60)
-	drawCurve(screen, &m.rewardCurve, gx, gy, gw, gh, green)
-	drawCurve(screen, &m.tdCurve, gx, gy, gw, gh, orange)
+	// Криві reward — по одній на вулик, тим самим кольором, у СПІЛЬНОМУ масштабі
+	// (щоб вулики можна було порівнювати між собою, а не кожен у своїй системі).
+	gx := px + float32(pad)
+	gy := float32(y) + float32(rowH)*0.6
+	gw := float32(pw - pad*2)
+	lo, hi := m.curveRange()
+	// Нульова лінія — орієнтир «вчиться / деградує».
+	if lo < 0 && hi > 0 {
+		zy := gy + float32(graphH) - float32(graphH)*(0-lo)/(hi-lo)
+		vector.StrokeLine(screen, gx, zy, gx+gw, zy, 1, color.RGBA{110, 110, 130, 140}, false)
+	}
+	for _, key := range m.order {
+		drawCurveIn(screen, &m.hives[key].curve, gx, gy, gw, float32(graphH), lo, hi, m.hives[key].color)
+	}
+	drawTextL(screen, fmt.Sprintf("%+.2f", hi), font*0.8, float64(gx), float64(gy)+7, color.RGBA{130, 130, 150, 200})
+	drawTextL(screen, fmt.Sprintf("%+.2f", lo), font*0.8, float64(gx), float64(gy)+graphH-7, color.RGBA{130, 130, 150, 200})
 
-	// Рядок 2: BLIND-PURSUIT — головна метрика памʼяті (частка «сліпих» кадрів,
-	// де агент усе одно скоротив дистанцію). База ~50% (навмання) → вище = памʼять.
+	// Підсумкові лічильники заміру (скидаються клавішею M).
 	bp := "—"
 	if m.blindN > 0 {
 		bp = fmt.Sprintf("%.0f%%", 100*float32(m.blindClosed)/float32(m.blindN))
 	}
-	drawTextL(screen, fmt.Sprintf("blind-chase %s  (n=%d)", bp, m.blindN), 9, px+10, py+ph-30, mem)
-
-	// Рядок 3: спіймання + темп (catch/min) та ε; праворуч — легенда кривих.
 	rate := float32(0)
 	if m.window > 0 {
 		rate = float32(m.catches) * (120 * 60) / float32(m.window) // TPS=120
 	}
-	drawTextL(screen, fmt.Sprintf("catch %d (%.1f/min)", m.catches, rate), 9, px+10, py+ph-14, yellow)
-	drawTextL(screen, fmt.Sprintf("eps %.3f", m.eps), 8, px+185, py+ph-14, gray)
-	drawTextL(screen, "reward", 8, px+250, py+ph-14, green)
-	drawTextL(screen, "TD", 8, px+320, py+ph-14, orange)
+	fy := float64(py+ph) - pad - rowH*0.2
+	drawTextL(screen, fmt.Sprintf("blind-chase %s (n=%d)", bp, m.blindN), font, float64(px)+pad, fy, mem)
+	drawTextL(screen, fmt.Sprintf("catch %d (%.1f/min)", m.catches, rate), font, float64(px)+pw*0.5, fy, yellow)
 }
 
-// drawCurve малює полілінію значень, автомасштабуючи до прямокутника (x,y,w,h).
-func drawCurve(screen *ebiten.Image, c *curve, x, y, w, h float32, col color.RGBA) {
-	if c.n < 2 {
-		return
+// firstEps — ε будь-якого вулика (у всіх однакова формула, показуємо як довідку).
+func (m *Metrics) firstEps() float32 {
+	for _, key := range m.order {
+		return m.hives[key].eps
 	}
-	lo, hi := c.at(0), c.at(0)
-	for i := 1; i < c.n; i++ {
-		v := c.at(i)
-		if v < lo {
-			lo = v
+	return 0
+}
+
+// curveRange — СПІЛЬНИЙ масштаб для всіх кривих, щоб вулики можна було
+// порівнювати між собою (у кожного свій масштаб — це були б різні системи координат).
+func (m *Metrics) curveRange() (lo, hi float32) {
+	lo, hi = 1e30, -1e30
+	for _, key := range m.order {
+		c := &m.hives[key].curve
+		for i := 0; i < c.n; i++ {
+			v := c.at(i)
+			if v < lo {
+				lo = v
+			}
+			if v > hi {
+				hi = v
+			}
 		}
-		if v > hi {
-			hi = v
-		}
+	}
+	if lo > hi {
+		return 0, 1
 	}
 	if hi-lo < 1e-6 {
-		hi = lo + 1 // рівна лінія — уникаємо ділення на нуль
+		hi = lo + 1
+	}
+	return lo, hi
+}
+
+// drawCurveIn малює полілінію в ЗАДАНОМУ масштабі [lo..hi] — щоб кілька кривих
+// лягали в одну систему координат і були порівнювані.
+func drawCurveIn(screen *ebiten.Image, c *curve, x, y, w, h, lo, hi float32, col color.RGBA) {
+	if c.n < 2 {
+		return
 	}
 
 	var prevX, prevY float32

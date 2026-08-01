@@ -158,24 +158,24 @@ func (g *Game) drawFirstPerson(screen *ebiten.Image) {
 // Далі: екранна X-позиція, розмір ∝ 1/глибина, і малюємо вертикальними смугами,
 // пропускаючи ті, що ЗА стіною (tY ≥ zbuf[смуга]).
 func (g *Game) drawSprites(screen *ebiten.Image, zbuf []float32, posX, posY, dirX, dirY, planeX, planeY float32) {
-	if len(g.enemies) == 0 {
+	if len(g.units) == 0 {
 		return
 	}
 
 	// Порядок далеко→близько (painter's): дальні першими, щоб ближчі перекривали.
-	order := make([]int, len(g.enemies))
-	d2 := make([]float32, len(g.enemies))
-	for i := range g.enemies {
+	order := make([]int, len(g.units))
+	d2 := make([]float32, len(g.units))
+	for i := range g.units {
 		order[i] = i
-		rx := (g.enemies[i].X+pixelSize/2)/pixelSize - posX
-		ry := (g.enemies[i].Y+pixelSize/2)/pixelSize - posY
+		rx := (g.units[i].X+pixelSize/2)/pixelSize - posX
+		ry := (g.units[i].Y+pixelSize/2)/pixelSize - posY
 		d2[i] = rx*rx + ry*ry
 	}
 	sort.Slice(order, func(a, b int) bool { return d2[order[a]] > d2[order[b]] })
 
 	invDet := 1 / (planeX*dirY - dirX*planeY)
 	for _, i := range order {
-		e := &g.enemies[i]
+		e := &g.units[i]
 		relX := (e.X+pixelSize/2)/pixelSize - posX
 		relY := (e.Y+pixelSize/2)/pixelSize - posY
 

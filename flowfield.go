@@ -41,20 +41,33 @@ var flowOff8 = [8][2]int{
 	{0, 1}, {-1, 1}, {-1, 0}, {-1, -1},
 }
 
-// FlowField — поле напрямків до гравця для всієї карти.
+// flowSource — клітинка-джерело хвилі.
+type flowSource struct{ col, row int }
+
+// FlowField — поле напрямків до НАЙБЛИЖЧОГО джерела для всієї карти.
 type FlowField struct {
-	dist [boidMapH][boidMapW]int32   // кроків до гравця; flowUnreachable = недосяжно
+	dist [boidMapH][boidMapW]int32   // кроків до найближчого джерела; -1 = недосяжно
 	dirX [boidMapH][boidMapW]float32 // одиничний напрямок «куди йти»
 	dirY [boidMapH][boidMapW]float32
 
-	queue          []int32 // черга BFS, перевикористовується (без алокацій щокадру)
-	srcCol, srcRow int     // клітинка гравця, від якої будували
-	maxDist        int32   // найдальша досяжна клітинка (для розфарбування)
-	valid          bool
+	queue   []int32 // черга BFS, перевикористовується (без алокацій щокадру)
+	maxDist int32   // найдальша досяжна клітинка (для розфарбування)
+	valid   bool
 }
 
-// rebuild — будує поле від клітинки гравця. O(клітинок), ~2500 ітерацій.
-func (f *FlowField) rebuild(srcCol, srcRow int) {
+// rebuildFrom — зручний варіант для ОДНОГО джерела (використовують тести).
+func (f *FlowField) rebuildFrom(col, row int) {
+	f.rebuild([]flowSource{{col, row}})
+}
+
+// rebuild — будує поле від УСІХ джерел одразу (multi-source BFS).
+//
+// [ЧОМУ БАГАТО ДЖЕРЕЛ] Юніту потрібен шлях до НАЙБЛИЖЧОГО супротивника, а не до
+// одного конкретного. Замість поля на кожну ціль кладемо в стартову чергу ВСІ
+// цілі одразу з відстанню 0 — і хвиля сама «розділить» карту: кожна клітинка
+// отримає напрямок до тієї цілі, що ближча ЛАБІРИНТОМ. Ціна та сама: один прохід
+// по ~2500 клітинок.
+func (f *FlowField) rebuild(sources []flowSource) {
 	f.valid = false
 	f.maxDist = 0
 	for r := 0; r < boidMapH; r++ {
@@ -63,15 +76,18 @@ func (f *FlowField) rebuild(srcCol, srcRow int) {
 			f.dirX[r][c], f.dirY[r][c] = 0, 0
 		}
 	}
-	if isWallAt(srcCol, srcRow) {
-		return // гравець усередині стіни — поля нема (не має траплятись)
-	}
-	f.srcCol, f.srcRow = srcCol, srcRow
-	f.dist[srcRow][srcCol] = 0
-
-	// --- Крок 1: BFS-хвиля від гравця (відстань у клітинках) ---
+	// --- Крок 1: BFS-хвиля від УСІХ джерел (відстань у клітинках) ---
 	q := f.queue[:0]
-	q = append(q, int32(srcRow*boidMapW+srcCol))
+	for _, s := range sources {
+		if isWallAt(s.col, s.row) || f.dist[s.row][s.col] == 0 {
+			continue // джерело в стіні або вже додане
+		}
+		f.dist[s.row][s.col] = 0
+		q = append(q, int32(s.row*boidMapW+s.col))
+	}
+	if len(q) == 0 {
+		return // джерел немає (усіх убито) → поля нема
+	}
 	for head := 0; head < len(q); head++ {
 		cell := q[head]
 		c := int(cell) % boidMapW
@@ -117,13 +133,13 @@ func (f *FlowField) rebuild(srcCol, srcRow int) {
 				f.dirX[r][c] = float32(bx) / l
 				f.dirY[r][c] = float32(by) / l
 			}
-			// (клітинка гравця лишається (0,0) — ми вже на місці)
+			// (клітинки-джерела лишаються (0,0) — ми вже на місці)
 		}
 	}
 	f.valid = true
 }
 
-// dirAt — напрямок до гравця з точки (x,y) у пікселях. ok=false, якщо
+// dirAt — напрямок до найближчого джерела з точки (x,y). ok=false, якщо
 // поле не готове або точка в недосяжній кишені. Знадобиться мозку вбивці.
 func (f *FlowField) dirAt(x, y float32) (dx, dy float32, ok bool) {
 	c := int(x+pixelSize/2) / pixelSize
@@ -137,7 +153,7 @@ func (f *FlowField) dirAt(x, y float32) (dx, dy float32, ok bool) {
 	return f.dirX[r][c], f.dirY[r][c], true
 }
 
-// distAt — відстань у клітинках до гравця крізь лабіринт (−1 = недосяжно).
+// distAt — відстань у клітинках до найближчого джерела крізь лабіринт (−1 = недосяжно).
 func (f *FlowField) distAt(x, y float32) int32 {
 	c := int(x+pixelSize/2) / pixelSize
 	r := int(y+pixelSize/2) / pixelSize
@@ -147,15 +163,52 @@ func (f *FlowField) distAt(x, y float32) int32 {
 	return f.dist[r][c]
 }
 
-// updateFlowField — перебудовує поле, коли гравець перейшов в іншу клітинку.
-// Стоїть на місці → поле лишається валідним, нічого не рахуємо.
-func (g *Game) updateFlowField() {
-	c := int(g.player.X+pixelSize/2) / pixelSize
-	r := int(g.player.Y+pixelSize/2) / pixelSize
-	if g.flow.valid && c == g.flow.srcCol && r == g.flow.srcRow {
+// cellOf — клітинка сітки, у якій стоїть юніт.
+func cellOf(p *Pixel) flowSource {
+	return flowSource{int(p.X+pixelSize/2) / pixelSize, int(p.Y+pixelSize/2) / pixelSize}
+}
+
+// updateFlowFields — [КОМАНДИ] перебудовує ОБИДВА поля:
+//
+//	flowToPlayerSide — джерела: гравець + його юніти → читають ВОРОГИ
+//	flowToEnemySide  — джерела: ворожі юніти        → читають ЮНІТИ ГРАВЦЯ
+//
+// Симетрично: кожна сторона має маршрут до найближчого супротивника крізь стіни.
+// Побічний (бажаний) ефект: вороги більше не пробігають повз твоїх юнітів до тебе
+// — вони йдуть на найближчого з вашого боку, тож перехоплення реально працює.
+//
+// Троттлимо раз на flowRebuildEvery кадрів: джерел багато й вони весь час рухаються,
+// тож «перебудова при зміні клітинки» вже не економила б. 2 поля × 2500 клітинок
+// × 20 разів/с — мізер.
+func (g *Game) updateFlowFields() {
+	if g.flowTick > 0 && g.tick%flowRebuildEvery != 0 {
 		return
 	}
-	g.flow.rebuild(c, r)
+	g.flowTick++
+
+	playerSide := []flowSource{cellOf(&g.player)}
+	var enemySide []flowSource
+	for i := range g.units {
+		u := &g.units[i]
+		if u.HP <= 0 {
+			continue
+		}
+		if u.Faction == factionPlayer {
+			playerSide = append(playerSide, cellOf(u))
+		} else {
+			enemySide = append(enemySide, cellOf(u))
+		}
+	}
+	g.flowToPlayerSide.rebuild(playerSide)
+	g.flowToEnemySide.rebuild(enemySide)
+}
+
+// flowFor — яке поле читає юніт: те, що веде до ЧУЖОЇ сторони.
+func (g *Game) flowFor(u *Pixel) *FlowField {
+	if u.Faction == factionPlayer {
+		return &g.flowToEnemySide
+	}
+	return &g.flowToPlayerSide
 }
 
 // drawFlowField — візуалізація (клавіша V): бачимо, як алгоритм «знає лабіринт».
@@ -164,7 +217,12 @@ func (g *Game) updateFlowField() {
 //	кожні flowBandStep кроків — світліша смуга (контурні «кільця» хвилі),
 //	коротка стрілка — куди веде поле з цієї клітинки.
 func (g *Game) drawFlowField(screen *ebiten.Image) {
-	f := &g.flow
+	// Клавіша V циклює: 0 = вимкнено, 1 = поле ДО СТОРОНИ ГРАВЦЯ (його бачать
+	// вороги), 2 = поле ДО ВОРОГІВ (його бачать твої юніти).
+	f := &g.flowToPlayerSide
+	if showFlowField == 2 {
+		f = &g.flowToEnemySide
+	}
 	if !f.valid || f.maxDist == 0 {
 		return
 	}
@@ -181,7 +239,7 @@ func (g *Game) drawFlowField(screen *ebiten.Image) {
 			cx := float32(c*pixelSize) + pixelSize/2
 			cy := float32(r*pixelSize) + pixelSize/2
 
-			// Клітинка гравця — без напрямку; позначаємо точкою.
+			// Клітинка-джерело — без напрямку; позначаємо точкою.
 			if dx == 0 && dy == 0 {
 				vector.FillRect(screen, cx-2, cy-2, 4, 4, color.RGBA{255, 255, 255, 220}, false)
 				continue

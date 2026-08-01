@@ -14,7 +14,7 @@ func (g *Game) updateBoidMap() {
 			g.boidMap[y][x] = 0
 		}
 	}
-	for i, e := range g.enemies {
+	for i, e := range g.units {
 		cx := int(e.X) / pixelSize
 		cy := int(e.Y) / pixelSize
 		if cx >= 0 && cx < boidMapW && cy >= 0 && cy < boidMapH {
@@ -33,7 +33,7 @@ func (g *Game) updateBoidMap() {
 // Worker pool: runtime.NumCPU() goroutines замість одного на кожного ворога —
 // мінімальний overhead при максимальному паралелізмі.
 func (g *Game) calcAcceleration() {
-	n := len(g.enemies)
+	n := len(g.units)
 	if n == 0 {
 		return
 	}
@@ -42,10 +42,14 @@ func (g *Game) calcAcceleration() {
 	// Копіюємо VelX/VelY/X/Y всіх ворогів перед паралельним обрахунком.
 	// Goroutines читають snapshot (незмінний) → пишуть тільки у свій AccX/AccY.
 	// X/Y потрібні для cohesion: середня позиція сусідів (центр маси).
-	type snap struct{ VelX, VelY, X, Y float32 }
+	type snap struct {
+		VelX, VelY, X, Y float32
+		Faction          int // [КОМАНДИ] щоб флокуватись лише зі СВОЇМИ
+	}
 	snaps := make([]snap, n)
-	for i := range g.enemies {
-		snaps[i] = snap{g.enemies[i].VelX, g.enemies[i].VelY, g.enemies[i].X, g.enemies[i].Y}
+	for i := range g.units {
+		u := &g.units[i]
+		snaps[i] = snap{u.VelX, u.VelY, u.X, u.Y, u.Faction}
 	}
 
 	// Ділимо ворогів рівномірно між CPU ядрами
@@ -76,14 +80,14 @@ func (g *Game) calcAcceleration() {
 			defer wg.Done() // [GO: DEFER] — гарантовано викличеться при виході з функції
 
 			for i := start; i < end; i++ {
-				e := &g.enemies[i]
+				e := &g.units[i]
 				cx := int(e.X) / pixelSize
 				cy := int(e.Y) / pixelSize
 
 				var avgVX, avgVY float32
 				var avgX, avgY float32 // cohesion: центр маси сусідів
 				var sepX, sepY float32 // separation: сума векторів відштовхування
-				count := 0
+				flockCount := 0        // [КОМАНДИ] лише СВОЇ — для alignment/cohesion
 
 				for dy := -visionRadius; dy <= visionRadius; dy++ {
 					for dx := -visionRadius; dx <= visionRadius; dx++ {
@@ -95,49 +99,67 @@ func (g *Game) calcAcceleration() {
 						if idx == 0 || idx-1 == i {
 							continue
 						}
-						avgVX += snaps[idx-1].VelX
-						avgVY += snaps[idx-1].VelY
-						avgX += snaps[idx-1].X
-						avgY += snaps[idx-1].Y
+						nb := &snaps[idx-1]
 
-						// [GO: SEPARATION]
-						// Вектор від сусіда до мене (repulsion direction).
-						// Ділимо на відстань: ближчий сусід = сильніше відштовхування.
-						rdx := e.X - snaps[idx-1].X
-						rdy := e.Y - snaps[idx-1].Y
+						// [GO: SEPARATION] — з УСІМА сусідами, хоч би якої фракції:
+						// юніти фізично не мають накладатись, і свої, і чужі.
+						// Вектор від сусіда до мене; ділимо на відстань, тож ближчий
+						// сусід відштовхує сильніше.
+						rdx := e.X - nb.X
+						rdy := e.Y - nb.Y
 						d := float32(math.Sqrt(float64(rdx*rdx + rdy*rdy)))
 						if d > 0 {
 							sepX += rdx / d
 							sepY += rdy / d
 						}
 
-						count++
+						// [КОМАНДИ] Alignment/cohesion — ЛИШЕ зі своїми. Інакше дві
+						// команди «вирівнювались» би одна з одною замість того, щоб
+						// битись. (Зараз обидва коефіцієнти 0, тож фільтр — на майбутнє,
+						// коли захочемо ввімкнути флокінг у якогось типу.)
+						if nb.Faction != e.Faction {
+							continue
+						}
+						avgVX += nb.VelX
+						avgVY += nb.VelY
+						avgX += nb.X
+						avgY += nb.Y
+						flockCount++
 					}
 				}
 
-				if count > 0 {
-					fc := float32(count)
+				e.AccX, e.AccY = 0, 0
+				if flockCount > 0 {
+					fc := float32(flockCount)
 
-					// Alignment: тягнемо швидкість до середньої швидкості сусідів
-					e.AccX = (avgVX/fc - e.VelX) * e.Cfg.AlignmentRate
-					e.AccY = (avgVY/fc - e.VelY) * e.Cfg.AlignmentRate
+					// Alignment: тягнемо швидкість до середньої швидкості СВОЇХ
+					e.AccX += (avgVX/fc - e.VelX) * e.Cfg.AlignmentRate
+					e.AccY += (avgVY/fc - e.VelY) * e.Cfg.AlignmentRate
 
-					// Cohesion: тягнемо до центру маси (одна сила до середньої позиції)
+					// Cohesion: тягнемо до центру маси СВОЇХ
 					e.AccX += (avgX/fc - e.X) * e.Cfg.CohesionRate
 					e.AccY += (avgY/fc - e.Y) * e.Cfg.CohesionRate
-
-					// Separation: відштовхуємось від кожного сусіда окремо
-					// sum(repulsion/dist) — не ділимо на count, бо сума, а не середнє
-					e.AccX += sepX * e.Cfg.SeparationRate
-					e.AccY += sepY * e.Cfg.SeparationRate
-				} else {
-					e.AccX = 0
-					e.AccY = 0
 				}
+				// Separation: сума відштовхувань від УСІХ сусідів (не ділимо на
+				// кількість — це сума, а не середнє).
+				e.AccX += sepX * e.Cfg.SeparationRate
+				e.AccY += sepY * e.Cfg.SeparationRate
 
-				// Chase або Brain — залежить від типу ворога.
-				fdx := g.player.X - e.X
-				fdy := g.player.Y - e.Y
+				// [КОМАНДИ] ЦІЛЬ ЗАЛЕЖИТЬ ВІД ФРАКЦІЇ:
+				//   рій і вбивці      → полюють на ГРАВЦЯ (їхні ваги навчені саме
+				//                       під це, тож ми їх не інвалідуємо);
+				//   юніти гравця      → на найближчого ВОРОГА (перехоплення).
+				// Відповідь ворога виникає сама: resolveImpacts симетричний, тож
+				// коли рій налітає на твого юніта — шкоду отримують обидва.
+				//
+				// [GO: БЕЗПЕКА] Позиції в цій фазі ніхто не пише (пишемо лише свій
+				// AccX/AccY), тож читати g.units із горутин безпечно.
+				target := g.nearestTargetFor(e)
+				if target == nil {
+					continue // супротивників не лишилось — полювати нема на кого
+				}
+				fdx := target.X - e.X
+				fdy := target.Y - e.Y
 				dist := float32(math.Sqrt(float64(fdx*fdx + fdy*fdy)))
 
 				if e.Brain != nil {
@@ -145,17 +167,20 @@ func (g *Game) calcAcceleration() {
 					// 1. state: куди гравець + 8 whiskers (зір на стіни)
 					// 2. Step: оцінює минулу дію за reward і обирає нову (ε-greedy)
 					// 3. дія = один з 8 напрямків → прискорення туди
-					// e.HitWall (наслідок минулого руху, виставлений у updateEnemies)
+					// e.HitWall (наслідок минулого руху, виставлений у updateUnits)
 					// стає сигналом штрафу за зіткнення зі стіною.
 					// [ВБИВЦЯ] Той самий Step, але ІНШИЙ набір входів: замість
 					// прямого напрямку — flow-field (шлях крізь стіни).
+					// [КОМАНДИ] Поле беремо ЗА ФРАКЦІЄЮ: кожна сторона читає те,
+					// що веде до супротивника (flowFor). Тому вбивці працюють
+					// симетрично — і ворожі, і твої.
 					var state [baseInputs]float32
 					if e.Cfg.UsesFlowField {
-						state = GatherKillerInputs(e, &g.player, &g.flow)
+						state = GatherKillerInputs(e, target, g.flowFor(e))
 					} else {
-						state = GatherInputs(e, &g.player)
+						state = GatherInputs(e, target)
 					}
-					action := e.Brain.Step(state, dist, e.HitWall)
+					action := e.Brain.Step(state, e.HitWall)
 
 					e.AccX += dirs8[action][0] * brainForce * g.difficulty
 					e.AccY += dirs8[action][1] * brainForce * g.difficulty
@@ -181,16 +206,16 @@ func (g *Game) calcAcceleration() {
 
 	// [GO: WAWG.WAIT]
 	// Блокуємо головний goroutine поки всі workers не завершать свій chunk.
-	// Тільки після цього updateEnemies() отримає актуальні AX/AY.
+	// Тільки після цього updateUnits() отримає актуальні AX/AY.
 	wg.Wait()
 }
 
-// updateEnemies застосовує блукання, burst, прискорення, damping, рух і відбивання.
-func (g *Game) updateEnemies() {
+// updateUnits застосовує блукання, burst, прискорення, damping, рух і відбивання.
+func (g *Game) updateUnits() {
 	g.decayFrustration() // [СТИГМЕРГІЯ] сліди тануть щокадру (однопотоково)
 
-	for i := range g.enemies {
-		e := &g.enemies[i]
+	for i := range g.units {
+		e := &g.units[i]
 
 		// [RL] Скидаємо прапор удару — фіксуємо зіткнення саме цього кадру.
 		// calcAcceleration наступного кадру прочитає його як сигнал штрафу.
@@ -319,4 +344,26 @@ func (g *Game) frustrationForce(x, y float32) (fx, fy float32) {
 		}
 	}
 	return fx * frustrationRepel, fy * frustrationRepel
+}
+
+// nearestTargetFor — [КОМАНДИ] найближчий супротивник для юніта.
+//
+// Чому окремий метод, а не просто nearestHostile: ГРАВЕЦЬ живе не в g.units, а
+// окремим полем Game. Для ворогів він теж легітимна ціль (і зазвичай головна),
+// тож перебираємо і юнітів чужої фракції, І гравця, якщо він з іншого боку.
+func (g *Game) nearestTargetFor(u *Pixel) *Pixel {
+	best := nearestHostile(u, g.units)
+	if u.Faction == g.player.Faction || g.player.HP <= 0 {
+		return best
+	}
+	pdx, pdy := g.player.X-u.X, g.player.Y-u.Y
+	pd := pdx*pdx + pdy*pdy
+	if best == nil {
+		return &g.player
+	}
+	bdx, bdy := best.X-u.X, best.Y-u.Y
+	if pd < bdx*bdx+bdy*bdy {
+		return &g.player
+	}
+	return best
 }

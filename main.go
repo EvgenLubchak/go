@@ -13,15 +13,15 @@ import (
 // Всі константи в одному місці — легко знайти і змінити.
 // В Go константи пакету видимі у всіх файлах цього пакету.
 const (
-	screenWidth  = 1680
-	screenHeight = 960
+	screenWidth  = 1700
+	screenHeight = 980
 	pixelSize    = 25
 	// [СКЛАД ПОЛЯ] Кількість ворогів більше НЕ тут: кожен тип несе своє поле Count,
-	// а хто виходить на поле — список enemyRoster (pixel.go). Так додати новий тип
+	// а хто виходить на поле — список unitRoster (pixel.go). Так додати новий тип
 	// = один рядок, і неможливо мовчки лишитись без переслідувачів.
 
 	// Глобальна фізика — однакова для всіх типів ворогів.
-	// Поведінка (швидкість, агресія, burst) — в EnemyConfig у pixel.go.
+	// Поведінка (швидкість, агресія, burst) — в UnitConfig у pixel.go.
 	damping             = 1     // множник швидкості щокадру (1 = без тертя, 0.9 = гальмує)
 	visionRadius        = 3     // радіус огляду в клітинках boidMap
 	showDetectionCircle = false // показувати радіус огляду ворогів (true/false)
@@ -72,6 +72,10 @@ const (
 	maxBPM           = 5000.0 // стеля темпу
 	bpmPerDifficulty = 24.0   // скільки BPM додається за одиницю difficulty
 
+	// [FLOW-FIELD] Раз на скільки кадрів перебудовувати маршрутні поля.
+	// Джерел багато й вони рухаються, тож троттлинг замість «при зміні клітинки».
+	flowRebuildEvery = 6
+
 	boidMapW = screenWidth / pixelSize  // клітинок по горизонталі
 	boidMapH = screenHeight / pixelSize // клітинок по вертикалі
 )
@@ -92,10 +96,12 @@ var (
 	epsilonDecayEnabled = false // ε: false = постійна (qEpsilonConst); true = автоспад max→min
 	sharedBrain         = true  // true = всі учні ділять ОДНУ мережу (вулик-розум); false = кожен свою
 	localSight          = true  // [POMDP] true = агент бачить гравця лише поблизу+по прямій; false = всевидющий
-	aiPlayer            = true  // [SELF-PLAY] true = гравцем керує мозок-жертва (вчиться тікати); false = людина
+	aiPlayer            = false // [SELF-PLAY] true = гравцем керує мозок-жертва (вчиться тікати); false = людина
 	useGRU              = true  // [RNN] true = рекурентна памʼять (GRU); false = frame-stacking (стек кадрів)
 	friendlyFire        = false // [БІЙ] true = свої теж шкодять своїм (рій проріджує себе) — для експериментів
-	showFlowField       = true  // [FLOW-FIELD] показати поле напрямків до гравця — клавіша V
+	// [FLOW-FIELD] Режим показу поля (клавіша V циклює):
+	//   0 = вимкнено, 1 = поле ДО СТОРОНИ ГРАВЦЯ, 2 = поле ДО ВОРОГІВ
+	showFlowField = 0
 )
 
 func init() {
@@ -120,7 +126,7 @@ func main() {
 			Color:   color.RGBA{R: 0, G: 255, B: 180, A: 255},
 			Label:   "Y}{IJIEC",
 		},
-		enemies: newEnemies(),
+		units: newUnits(),
 	}
 
 	// [SELF-PLAY] Даємо гравцю власний мозок-жертву (flee=true → reward за ВТЕЧУ).

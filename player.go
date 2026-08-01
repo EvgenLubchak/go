@@ -58,8 +58,8 @@ func (g *Game) handleFirstPersonInput() {
 // Спостерігає загрозу, обирає дію (тікати), прискорюється в той бік. Далі
 // updatePlayer застосує фізику (тертя, стіни, обмеження швидкості).
 func (g *Game) updatePrey() {
-	state, dist := GatherPreyInputs(&g.player, g.enemies)
-	action := g.player.Brain.Step(state, dist, g.player.HitWall)
+	state := GatherPreyInputs(&g.player, g.units)
+	action := g.player.Brain.Step(state, g.player.HitWall)
 	g.player.VelX += dirs8[action][0] * playerAccel
 	g.player.VelY += dirs8[action][1] * playerAccel
 }
@@ -83,6 +83,7 @@ func (g *Game) respawnPlayer() {
 		g.player.Brain.hasPrev = false
 		g.player.Brain.h = [gruHidden]float32{} // [RNN] скидаємо рекурентну памʼять
 		g.player.Brain.seqN = 0                 // [RNN] відкидаємо недособраний відрізок
+		g.player.Brain.progress = 0             // [RL] новий епізод — прогресу ще нема
 	}
 }
 

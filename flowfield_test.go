@@ -32,7 +32,7 @@ func TestFlowFieldInvariant(t *testing.T) {
 	}
 
 	var f FlowField
-	f.rebuild(pc, pr)
+	f.rebuildFrom(pc, pr)
 	if !f.valid {
 		t.Fatal("поле не побудувалось")
 	}
@@ -97,7 +97,7 @@ func TestFlowFieldWalksToPlayer(t *testing.T) {
 		}
 	}
 	var f FlowField
-	f.rebuild(pc, pr)
+	f.rebuildFrom(pc, pr)
 
 	worst := int32(0)
 	for r := 0; r < boidMapH; r++ {
@@ -148,7 +148,7 @@ func TestKillerInputsUseFlowNotDirect(t *testing.T) {
 	ex, ey := toPx(wallCol+3, boidMapH-3)
 
 	var flow FlowField
-	flow.rebuild((int(px)+pixelSize/2)/pixelSize, (int(py)+pixelSize/2)/pixelSize)
+	flow.rebuildFrom((int(px)+pixelSize/2)/pixelSize, (int(py)+pixelSize/2)/pixelSize)
 	if !flow.valid {
 		t.Fatal("поле не побудувалось")
 	}
@@ -199,7 +199,7 @@ func TestKillerRewardFollowsCorridor(t *testing.T) {
 	ex, ey := toPx(wallCol+3, boidMapH-3) // вбивця праворуч
 
 	var flow FlowField
-	flow.rebuild((int(px)+pixelSize/2)/pixelSize, (int(py)+pixelSize/2)/pixelSize)
+	flow.rebuildFrom((int(px)+pixelSize/2)/pixelSize, (int(py)+pixelSize/2)/pixelSize)
 
 	// Вбивця рухається ВГОРУ — до прорізу. Пряма відстань до цілі при цьому росте.
 	killer := &Pixel{X: ex, Y: ey, VelY: -ConfigKiller.MaxSpeed, Cfg: ConfigKiller,
@@ -209,8 +209,8 @@ func TestKillerRewardFollowsCorridor(t *testing.T) {
 
 	GatherKillerInputs(killer, player, &flow) // побічно рахує flowProgress
 
-	if killer.Brain.flowProgress <= 0 {
-		t.Fatalf("рух до прорізу мав дати ДОДАТНИЙ прогрес, а дав %.3f", killer.Brain.flowProgress)
+	if killer.Brain.progress <= 0 {
+		t.Fatalf("рух до прорізу мав дати ДОДАТНИЙ прогрес, а дав %.3f", killer.Brain.progress)
 	}
 
 	// А тепер той самий стан очима СТАРОЇ (прямої) метрики: вона б сказала «гірше».
@@ -224,12 +224,58 @@ func TestKillerRewardFollowsCorridor(t *testing.T) {
 	}
 
 	// Нагорода за flow-метрикою — додатна, попри зростання прямої відстані.
-	killer.Brain.prevDist = distNow
 	killer.Brain.hasPrev = true
-	r := killer.Brain.rewardFor(distAfter, false, 0)
+	r := killer.Brain.rewardFor(false, 0)
 	if r <= 0 {
 		t.Fatalf("нагорода за правильний обхід має бути > 0, а вона %.3f", r)
 	}
 	t.Logf("обхід: прогрес коридором +%.2f → нагорода %+.3f (пряма відстань при цьому %.2f→%.2f — ЗРОСЛА)",
-		killer.Brain.flowProgress, r, distNow, distAfter)
+		killer.Brain.progress, r, distNow, distAfter)
+}
+
+// TestFlowFieldMultiSource — [КОМАНДИ] перевіряє серце симетричних боїв: поле з
+// БАГАТЬМА джерелами. Кожна клітинка має вести до НАЙБЛИЖЧОГО джерела лабіринтом,
+// а не до якогось одного. Без цього «свій вбивця» був би фікцією — він бігав би
+// до чужої цілі.
+func TestFlowFieldMultiSource(t *testing.T) {
+	saved := tileMap
+	defer func() { tileMap = saved }()
+	tileMap = [boidMapH][boidMapW]bool{} // відкрите поле, без стін
+
+	left := flowSource{5, boidMapH / 2}
+	right := flowSource{boidMapW - 6, boidMapH / 2}
+
+	var f FlowField
+	f.rebuild([]flowSource{left, right})
+	if !f.valid {
+		t.Fatal("поле не побудувалось")
+	}
+
+	// Обидва джерела мають dist=0 — хвиля стартувала з кожного.
+	if f.dist[left.row][left.col] != 0 || f.dist[right.row][right.col] != 0 {
+		t.Fatalf("не всі джерела на нулі: left=%d right=%d",
+			f.dist[left.row][left.col], f.dist[right.row][right.col])
+	}
+
+	// Клітинка біля ЛІВОГО джерела має вести ВЛІВО, біля правого — ВПРАВО.
+	nearLeftX := float32((left.col + 3) * pixelSize)
+	nearLeftY := float32(left.row * pixelSize)
+	if dx, _, ok := f.dirAt(nearLeftX, nearLeftY); !ok || dx >= 0 {
+		t.Fatalf("біля лівого джерела напрямок мав бути вліво, а dx=%.2f (ok=%v)", dx, ok)
+	}
+	nearRightX := float32((right.col - 3) * pixelSize)
+	nearRightY := float32(right.row * pixelSize)
+	if dx, _, ok := f.dirAt(nearRightX, nearRightY); !ok || dx <= 0 {
+		t.Fatalf("біля правого джерела напрямок мав бути вправо, а dx=%.2f (ok=%v)", dx, ok)
+	}
+
+	// Відстань посередині ≈ половина шляху між джерелами (хвилі зустрілись).
+	midX := float32((left.col + right.col) / 2 * pixelSize)
+	midY := float32(left.row * pixelSize)
+	mid := f.distAt(midX, midY)
+	halfGap := int32((right.col - left.col) / 2)
+	if mid < halfGap-2 || mid > halfGap+2 {
+		t.Fatalf("посередині відстань %d, очікували ≈%d (хвилі мали зустрітись)", mid, halfGap)
+	}
+	t.Logf("дві хвилі зустрілись посередині: dist=%d (≈%d), maxDist=%d", mid, halfGap, f.maxDist)
 }

@@ -90,8 +90,8 @@ func (g *Game) resolveImpacts() {
 	playerMax := float32(playerBaseSpeed) * float32(math.Sqrt(float64(g.difficulty)))
 
 	// --- Гравець ↔ вороги ---
-	for i := range g.enemies {
-		e := &g.enemies[i]
+	for i := range g.units {
+		e := &g.units[i]
 		if e.HP <= 0 || !collides(g.player.X, g.player.Y, e.X, e.Y) {
 			continue
 		}
@@ -114,13 +114,13 @@ func (g *Game) resolveImpacts() {
 	}
 
 	// --- Вороги ↔ вороги (i<j, щоб кожну пару рахувати раз) ---
-	for i := range g.enemies {
-		a := &g.enemies[i]
+	for i := range g.units {
+		a := &g.units[i]
 		if a.HP <= 0 {
 			continue
 		}
-		for j := i + 1; j < len(g.enemies); j++ {
-			b := &g.enemies[j]
+		for j := i + 1; j < len(g.units); j++ {
+			b := &g.units[j]
 			if b.HP <= 0 || !collides(a.X, a.Y, b.X, b.Y) {
 				continue
 			}
@@ -172,8 +172,8 @@ func (g *Game) playerAttack() {
 	px := g.player.X + pixelSize/2
 	py := g.player.Y + pixelSize/2
 
-	for i := range g.enemies {
-		e := &g.enemies[i]
+	for i := range g.units {
+		e := &g.units[i]
 		ex := e.X + pixelSize/2
 		ey := e.Y + pixelSize/2
 		dx := px - ex
@@ -186,16 +186,16 @@ func (g *Game) playerAttack() {
 	}
 }
 
-// removeDeadEnemies видаляє ворогів з HP <= 0.
+// removeDeadUnits видаляє ворогів з HP <= 0.
 // [GO: FILTER SLICE in-place]
-// g.enemies[:0] — той самий масив у пам'яті, але довжина 0.
+// g.units[:0] — той самий масив у пам'яті, але довжина 0.
 // append пише поверх — без нової алокації пам'яті.
-func (g *Game) removeDeadEnemies() {
-	alive := g.enemies[:0]
-	for _, e := range g.enemies {
+func (g *Game) removeDeadUnits() {
+	alive := g.units[:0]
+	for _, e := range g.units {
 		if e.HP > 0 {
 			alive = append(alive, e)
 		}
 	}
-	g.enemies = alive
+	g.units = alive
 }

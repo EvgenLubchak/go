@@ -145,11 +145,11 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 		// [FLOW-FIELD] Поле напрямків до гравця (клавіша V) — під юнітами,
 		// щоб стрілки не перекривали ворогів і гравця.
-		if showFlowField {
+		if showFlowField != 0 {
 			g.drawFlowField(screen)
 		}
 
-		for _, e := range g.enemies {
+		for _, e := range g.units {
 			// Радіус огляду — дуже прозоре кільце навколо ворога
 			cx := e.X + pixelSize/2
 			cy := e.Y + pixelSize/2

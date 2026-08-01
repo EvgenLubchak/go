@@ -15,7 +15,7 @@ import (
 // Game зберігає весь стан гри.
 type Game struct {
 	player   Pixel
-	enemies  []Pixel // [GO: SLICE] — динамічний масив, як Array в JS
+	units    []Pixel // [GO: SLICE] — динамічний масив, як Array в JS
 	gameOver bool
 
 	// [GO: MEMORY SHARING]
@@ -29,7 +29,7 @@ type Game struct {
 
 	// [СТИГМЕРГІЯ] Сітка «феромонів фрустрації»: де учні застрягають/б'ються об
 	// стіни — накопичується слід, від якого рій відштовхується (і з часом тане).
-	// Той самий патерн безпеки, що й boidMap: пишемо однопотоково (updateEnemies),
+	// Той самий патерн безпеки, що й boidMap: пишемо однопотоково (updateUnits),
 	// читаємо паралельно (calcAcceleration) — фази не перетинаються, гонок нема.
 	frustration [boidMapH][boidMapW]float32
 
@@ -46,9 +46,12 @@ type Game struct {
 
 	metrics Metrics // [МЕТРИКИ] крива навчання рою (клавіша G)
 
-	// [FLOW-FIELD] Поле напрямків до гравця крізь лабіринт (BFS від гравця).
-	// Перебудовується, коли гравець змінив клітинку. Візуалізація — клавіша V.
-	flow FlowField
+	// [FLOW-FIELD] Два поля маршрутів крізь лабіринт (multi-source BFS):
+	// одне веде до сторони гравця, друге — до ворогів. Кожна сторона читає те,
+	// що веде до супротивника. Візуалізація — клавіша V (циклює поля).
+	flowToPlayerSide FlowField
+	flowToEnemySide  FlowField
+	flowTick         int // лічильник перебудов (троттлинг)
 }
 
 // [GO: SENTINEL ERROR]
@@ -66,7 +69,7 @@ func (g *Game) restart() {
 	g.player.InvulnTimer = 0
 	g.attackCooldown = 0
 	g.attackTimer = 0
-	g.enemies = newEnemies()
+	g.units = newUnits()
 	g.gameOver = false
 	g.tick = 0
 	g.difficulty = 1.0
@@ -112,9 +115,9 @@ func (g *Game) Update() error {
 		g.metrics.resetCounters()
 	}
 
-	// V — [FLOW-FIELD] показати поле напрямків до гравця (стрілки + BFS-хвиля)
+	// V — [FLOW-FIELD] циклює: вимк → поле до сторони гравця → поле до ворогів
 	if inpututil.IsKeyJustPressed(ebiten.KeyV) {
-		showFlowField = !showFlowField
+		showFlowField = (showFlowField + 1) % 3
 	}
 
 	if g.gameOver {
@@ -144,7 +147,7 @@ func (g *Game) Update() error {
 		g.handlePlayerInput()
 	}
 	g.updatePlayer()
-	g.updateFlowField() // [FLOW-FIELD] BFS від гравця (лише коли змінив клітинку)
+	g.updateFlowFields() // [FLOW-FIELD] маршрути обох сторін (троттлинг)
 	g.playerAttack()
 	g.updateBoidMap()
 	g.calcAcceleration()
@@ -153,9 +156,9 @@ func (g *Game) Update() error {
 		g.player.Brain.net.train(qBatch) // [SELF-PLAY] тренуємо мозок-жертву
 	}
 	g.metrics.collect(g) // [МЕТРИКИ] збір показників навчання (однопотоково)
-	g.updateEnemies()
+	g.updateUnits()
 	g.resolveImpacts() // [БІЙ] шкода від удару на швидкості (після руху — швидкості свіжі)
-	g.removeDeadEnemies()
+	g.removeDeadUnits()
 	g.checkCollisions()
 	return nil
 }
@@ -169,8 +172,8 @@ func (g *Game) Update() error {
 // «всі читають паралельно → один пише однопотоково», що й для boidMap/феромонів.
 func (g *Game) trainBrains() {
 	seen := map[*Net]bool{}
-	for i := range g.enemies {
-		b := g.enemies[i].Brain
+	for i := range g.units {
+		b := g.units[i].Brain
 		if b == nil || b.net == nil || seen[b.net] {
 			continue
 		}
@@ -189,8 +192,8 @@ func (g *Game) saveBrains() {
 	// рій і вбивці вчаться незалежно. Дедуплікація по вказівнику — той самий
 	// патерн, що й у trainBrains. Ефемерні мережі (file == "") SaveNet пропустить.
 	seen := map[*Net]bool{}
-	for i := range g.enemies {
-		b := g.enemies[i].Brain
+	for i := range g.units {
+		b := g.units[i].Brain
 		if b == nil || b.net == nil || seen[b.net] {
 			continue
 		}

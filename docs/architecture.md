@@ -6,9 +6,9 @@
 |------|---------------|
 | `main.go` | Constants, font init, `main()` entry point |
 | `game.go` | `Game` struct, `Update()` game loop, `restart()` |
-| `pixel.go` | `Pixel` struct, `EnemyConfig` (+`Count`), конфіги типів, **`enemyRoster`** (склад поля), фракції, `newEnemies()` |
+| `pixel.go` | `Pixel` struct, `UnitConfig` (+`Count`), конфіги типів, **`unitRoster`** (склад поля), фракції, `newUnits()` |
 | `player.go` | Player input handling, velocity/friction physics |
-| `boids.go` | Boid AI: `updateBoidMap`, `calcAcceleration`, `updateEnemies`, стигмергія (феромони) |
+| `boids.go` | Boid AI: `updateBoidMap`, `calcAcceleration`, `updateUnits`, стигмергія (феромони) |
 | `brain.go` | Мозок — **спільне ядро**: `Net`/`Brain`, індекси слотів, ε-greedy, `rewardFor`, whiskers, save/load, диспетчери `Step`/`train`. Див. [ai-brain.md](ai-brain.md) |
 | `brain_stack.go` | Шлях памʼяті **frame-stacking** (`useGRU=false`): `forwardQ`, `tdUpdate`, `stepStack` |
 | `brain_gru.go` | Шлях памʼяті **GRU** (`useGRU=true`): `forwardGRU`, `tdUpdateSeq` (BPTT), `stepGRU` |
@@ -29,18 +29,18 @@ Update():
   input → handlePlayerInput() | updatePrey()   ([SELF-PLAY] мозок-жертва замість клавіш)
         → updatePlayer()       (friction, max speed, стіни й межа)
         → updateFlowField()    (BFS від гравця — лише коли змінив клітинку)
-        → playerAttack()       (SPACE → damage enemies in radius)
+        → playerAttack()       (SPACE → damage units in radius)
         → updateBoidMap()      (rebuild 2D grid of enemy positions)
         → calcAcceleration()   (boids + Brain.Step) ← parallel goroutines
         → trainBrains()        (навчання кожної УНІКАЛЬНОЇ мережі, однопотоково)
         → metrics.collect()
-        → updateEnemies()      (wander, burst, apply accel, bounce walls)
+        → updateUnits()      (wander, burst, apply accel, bounce walls)
         → resolveImpacts()     ([БІЙ] шкода від удару на швидкості + атрибуція)
-        → removeDeadEnemies()  (filter slice in-place)
+        → removeDeadUnits()  (filter slice in-place)
         → checkCollisions()    (HP гравця ≤ 0 → game over / respawn у self-play)
 
 Draw():
-  background → [flow-field] → enemies (сенсори, HP bar) → player → attack ring
+  background → [flow-field] → units (сенсори, HP bar) → player → attack ring
              → HUD (HP, LVL, FPS) → [панель метрик]
 ```
 
@@ -52,7 +52,7 @@ Draw():
 ```go
 type Game struct {
     player   Pixel
-    enemies  []Pixel
+    units  []Pixel
     boidMap  [boidMapH][boidMapW]int  // 2D grid: 0=empty, i+1=enemy index
     tick       int
     difficulty float32                 // multiplier: 1.0 at start, grows per level
@@ -69,15 +69,15 @@ type Pixel struct {
     Aggression float32     // 0..1: Boid=random, Predator/Speeder=1.0
     HP, MaxHP  int
     HitTimer   int         // flash white for N frames after hit
-    Cfg        EnemyConfig // behavior config (empty for player)
+    Cfg        UnitConfig // behavior config (empty for player)
 }
 ```
 
-### EnemyConfig — per-type behavior
+### UnitConfig — per-type behavior
 Each enemy type carries its own behavioral parameters instead of using global constants.
 
 ```go
-type EnemyConfig struct {
+type UnitConfig struct {
     WanderStrength, AlignmentRate float32
     MaxSpeed, AggressionForce     float32
     BurstChance, BurstForce       float32
@@ -92,7 +92,7 @@ type EnemyConfig struct {
 
 ## Enemy Types
 
-**Активні зараз** (список `enemyRoster` у `pixel.go`; кількість — поле `Count` у
+**Активні зараз** (список `unitRoster` у `pixel.go`; кількість — поле `Count` у
 кожному конфізі):
 
 | Type | Колір | Мозок | Поведінка |
@@ -105,7 +105,7 @@ type EnemyConfig struct {
 
 **Скриптовані типи** (без мозку) лишились у коді як приклади конфігурації, але не в
 складі поля: `Boid` (флокується), `Predator` (повільний, сильний кидок), `Speeder`
-(швидкий і крихкий), `HP`, `Group`. Щоб повернути в бій — дописати в `enemyRoster`
+(швидкий і крихкий), `HP`, `Group`. Щоб повернути в бій — дописати в `unitRoster`
 і виставити `Count`.
 
 ---
@@ -153,27 +153,27 @@ Toggle: `soundEnabled = true/false` (var in main.go)
 ## Concurrency — Worker Pool in calcAcceleration
 
 `calcAcceleration` is the most expensive function: O(n × visionRadius²) per frame.
-With 3000+ enemies it becomes the bottleneck → parallelized across CPU cores.
+With 3000+ units it becomes the bottleneck → parallelized across CPU cores.
 
 ```
 Main goroutine:
   updateBoidMap()         ← single-threaded (builds shared read-only grid)
   calcAcceleration()      ← spawns NumCPU workers via sync.WaitGroup
-    ├── goroutine [0..n/8)    reads boidMap + snaps snapshot → writes enemies[i].AccX/AccY
-    ├── goroutine [n/8..n/4)  reads boidMap + snaps snapshot → writes enemies[i].AccX/AccY
+    ├── goroutine [0..n/8)    reads boidMap + snaps snapshot → writes units[i].AccX/AccY
+    ├── goroutine [n/8..n/4)  reads boidMap + snaps snapshot → writes units[i].AccX/AccY
     ├── ...
-    └── goroutine [7n/8..n)   reads boidMap + snaps snapshot → writes enemies[i].AccX/AccY
+    └── goroutine [7n/8..n)   reads boidMap + snaps snapshot → writes units[i].AccX/AccY
   wg.Wait()               ← blocks until all workers done
-  updateEnemies()         ← single-threaded (uses freshly written AccX/AccY)
+  updateUnits()         ← single-threaded (uses freshly written AccX/AccY)
 ```
 
-**Snapshot pattern** — before parallelizing, VelX/VelY of all enemies are copied into
+**Snapshot pattern** — before parallelizing, VelX/VelY of all units are copied into
 a local `[]snap` slice. Goroutines read from this snapshot (immutable), write only
-to their own chunk of `enemies[i].AccX/AccY`. This avoids data races without any mutex.
+to their own chunk of `units[i].AccX/AccY`. This avoids data races without any mutex.
 
 **Why not one goroutine per enemy?** Goroutine creation has overhead (~1µs).
-With 3752 enemies × 120 FPS = 450k goroutine launches/sec — marginal.
-Worker pool (NumCPU goroutines) amortizes this: each goroutine processes n/CPU enemies.
+With 3752 units × 120 FPS = 450k goroutine launches/sec — marginal.
+Worker pool (NumCPU goroutines) amortizes this: each goroutine processes n/CPU units.
 
 ---
 
@@ -183,7 +183,7 @@ Worker pool (NumCPU goroutines) amortizes this: each goroutine processes n/CPU e
 |---------|-------|-----|
 | Pointer receiver `*Game` | All methods | Modify game state in-place |
 | `for i := range` + `&slice[i]` | boids.go, combat.go | Avoid copy — modify enemy directly |
-| Slice filter in-place | `removeDeadEnemies` | `alive := g.enemies[:0]` — no alloc |
+| Slice filter in-place | `removeDeadUnits` | `alive := g.units[:0]` — no alloc |
 | Zero value check | `pixel.go` | `cfg.Color.A == 0` detects Boid type |
 | Sentinel error | `game.go` | `errors.New("exit")` for clean Ebiten exit |
 | `sync.WaitGroup` | `boids.go` | Synchronizes worker goroutines in calcAcceleration |

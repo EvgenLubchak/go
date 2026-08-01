@@ -8,7 +8,7 @@
 **reward** (нагороду/штраф) і сам відкриває стратегію: переслідувати гравця й
 обходити стіни.
 
-> **Важливо:** мозок вмикається прапорцем `IsLearner: true` у `EnemyConfig`, а
+> **Важливо:** мозок вмикається прапорцем `IsLearner: true` у `UnitConfig`, а
 > НЕ міткою `Label` (мітка — лише для відображення). Це дозволяє назвати ворога
 > як завгодно, не ламаючи навчання.
 
@@ -259,7 +259,7 @@ Update():
            └─ обрати дію: фрустрація(escapeAction) / ε-greedy
       3. Acc += dirs8[action]·brainForce  (+ феромонне відштовхування)
   trainBrains()        ОДНОПОТОКОВО: кожну унікальну мережу — net.train(qBatch)
-  updateEnemies()      рух, відбивання, HitWall, deposit/decay феромонів
+  updateUnits()      рух, відбивання, HitWall, deposit/decay феромонів
 ```
 
 > Важливо: `Step` більше **НЕ тренує** — лише кладе досвід у буфер. Навчання
@@ -295,7 +295,7 @@ Update():
 | `boidMap`, `frustration` | паралельно | однопотоково (інша фаза) | розділення фаз |
 | `Net` ваги | паралельно (forward) | однопотоково (`trainBrains`) | розділення фаз |
 | `Net.replay` (СПІЛЬНИЙ буфер) | — | **паралельно** (`remember` з багатьох горутин) | **`sync.Mutex`** |
-| `Brain`-пам'ять, `enemies[i].Acc` | — | одна горутина на агента | власність |
+| `Brain`-пам'ять, `units[i].Acc` | — | одна горутина на агента | власність |
 
 Ключ: майже все безпечне через **розділення фаз** («всі читають → потім один пише»).
 Єдине місце зі справжнім одночасним записом — **спільний буфер досвіду** (у нього
@@ -528,7 +528,7 @@ flow-вхід, але лишили стару нагороду «зближен�
 > смерть = ти зібрав усі свої HP. Якщо вбивці почнуть самогубно лізти в розмін —
 > знадобиться термінальний перехід.
 
-**Склад поля бою** задає `enemyRoster` (`pixel.go`): список типів, у кожного своє
+**Склад поля бою** задає `unitRoster` (`pixel.go`): список типів, у кожного своє
 поле `Count`. Прибрати тип = закоментувати рядок, додати новий = дописати рядок.
 
 ---
@@ -617,7 +617,7 @@ playerMaxHP     = 10
 ```
 
 Кількість ворогів — **не** в `main.go`: кожен тип несе своє поле `Count`, а склад
-поля бою задає `enemyRoster` (обидва в `pixel.go`).
+поля бою задає `unitRoster` (обидва в `pixel.go`).
 
 ---
 
@@ -635,7 +635,7 @@ playerMaxHP     = 10
 | `game.go` | `trainBrains`/`saveBrains` (по мережі на тип); `updateFlowField`; [SELF-PLAY] `updatePrey`; сітка `frustration` |
 | `player.go` | Керування гравцем: клавіатура або [SELF-PLAY] `updatePrey`/`respawnPlayer`; фізика, стіни, HP |
 | `combat.go` | **[БІЙ]** `resolveImpacts` (closing speed + атрибуція шкоди), `applyImpactDamage`, смерть гравця, удар SPACE |
-| `pixel.go` | Конфіги типів (`ConfigLearner`/`ConfigKiller`), **`enemyRoster`** і `Count`, фракції, `newEnemies` (два вулики) |
+| `pixel.go` | Конфіги типів (`ConfigLearner`/`ConfigKiller`), **`unitRoster`** і `Count`, фракції, `newUnits` (два вулики) |
 | `render.go` | `drawBrainSensors` (вуса+стрілка), теплокарта феромонів, HP у HUD |
 | `metrics.go` | Крива навчання (reward/TD/maxQ/ε) + blind-chase + catch-rate — панель на клавішу G |
 | `render3d.go` | Raycaster: вид від 1-ї особи (див. [raycaster.md](raycaster.md)) |
@@ -685,7 +685,7 @@ playerMaxHP     = 10
 | `gruHidden` / `seqLen` | ємність рекурентної памʼяті / навчальне вікно BPTT (дужий вплив на навчання) |
 | `seqBurnIn` | кадрів прогріву `h` перед вікном (більше = точніший стан, але важчий відрізок) |
 | `gruGradClip` | кліп градієнта в часі: менше = стабільніше, але повільніше вчиться GRU |
-| `Count` у конфізі (pixel.go) | скільки юнітів цього типу на полі; склад бою — `enemyRoster` |
+| `Count` у конфізі (pixel.go) | скільки юнітів цього типу на полі; склад бою — `unitRoster` |
 | `impactSpeedFrac` / `impactMinSpeed` | наскільки треба розігнатись, щоб удар зарахувався |
 | `impactInvuln` / `playerMaxHP` | живучість: кадри невразливості й HP гравця |
 | `rewardDamageDealt/Taken/Kill` | характер бійця: агресивний розмін ↔ обережний hit-and-run |

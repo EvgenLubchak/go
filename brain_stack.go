@@ -137,40 +137,43 @@ func (n *Net) replayLen() int {
 // stepStack — крок агента у СТЕК-режимі (викликається з Brain.Step, коли
 // useGRU=false). НЕ тренує мережу — лише кладе досвід у буфер; навчання йде
 // раз/кадр однопотоково у g.trainBrains() (мережа може бути спільною).
-func (b *Brain) stepStack(cur [baseInputs]float32, dist float32, hitWall bool) int {
+func (b *Brain) stepStack(cur [baseInputs]float32, hitWall bool) int {
 	// [ПАМ'ЯТЬ] Склеюємо поточний кадр + історію → повний вхід мережі.
 	// Поточний кадр — ПЕРШИЙ у стеку, тож whiskers лишаються на індексах 5..12
 	// (тому maxWhisker/escapeAction/proximity-reward працюють без змін).
 	stacked := b.buildStacked(cur)
 
-	// [МЕТРИКИ ПАМʼЯТІ] Чи бачить агент гравця цього кадру. Вбивця ВСЕВИДЮЩИЙ
-	// (flow-field глобальний), і слот 13 у
-	// нього — не visible, а швидкість цілі. Читати його як видимість не можна.
+	// [МЕТРИКИ ПАМʼЯТІ] Чи бачить агент ціль цього кадру. Вбивця ВСЕВИДЮЩИЙ
+	// (flow-field глобальний), і слот 13 у нього — не visible, а швидкість цілі,
+	// тож читати його як видимість не можна.
 	visible := b.flowNav || cur[inVisible] > 0.5
 
 	// 1) Нагорода за попередню дію → перехід у (можливо спільний) буфер.
 	if b.hasPrev {
-		// [МЕТРИКИ ПАМʼЯТІ] Зміна дистанції (prevDist→dist) — наслідок дії, обраної
-		// МИНУЛОГО кадру. Якщо тоді агент був СЛІПИЙ (prevVisible=false) — це
-		// «сліпе рішення»; фіксуємо, чи він усе одно наблизився. Реактивний агент
-		// без памʼяті наосліп ≈ випадковий; агент із памʼяттю тримає слід → частіше +.
+		// [МЕТРИКИ ПАМʼЯТІ] Якщо на момент минулого рішення агент був СЛІПИЙ — це
+		// «сліпе рішення»; фіксуємо, чи він усе одно рушив У БІК цілі.
+		//
+		// Міряємо ВЛАСНИЙ прогрес, а не зміну відстані: інакше метрика зараховує
+		// агентові те, що дистанцію скоротив сам гравець, налетівши на нього. Саме
+		// через це цифра трималась ~55-73% незалежно від памʼяті.
+		// Реактивний агент наосліп ≈ 50%; агент із памʼяттю тримає слід → більше.
 		if !b.flowNav && !b.prevVisible {
 			b.mBlindN++
-			if dist < b.prevDist {
+			if b.progress > 0 {
 				b.mBlindClosed++
 			}
 		}
 		// Нагорода — у спільному rewardFor (див. brain.go). Вус напрямку, в який
 		// агент пішов минулого кадру, беремо з ПЕРШОГО кадру попереднього стеку.
-		reward := b.rewardFor(dist, hitWall, b.prevState[inWhisker0+b.prevAction])
+		reward := b.rewardFor(hitWall, b.prevState[inWhisker0+b.prevAction])
 		b.net.remember(transition{s: b.prevState, a: b.prevAction, r: reward, s2: stacked})
 	}
 
 	// 2) [2] Anti-stuck. КЛЮЧОВЕ: якщо агент наближається до гравця — він НЕ
 	//    застряг (хай навіть тернеться об стіну, productively ковзаючи вздовж неї).
-	// Прогрес — за метрикою ЦЬОГО типу мозку (пряма для рою, коридор для вбивці),
-	// щоб anti-stuck не сварив вбивцю саме за обхід стіни.
-	madeProgress := b.hasPrev && b.progressToward(dist) > stuckProgressEps
+	// Прогрес — ВЛАСНИЙ внесок агента в потрібному напрямку (пряма для рою,
+	// коридор для вбивці), щоб anti-stuck не сварив за обхід стіни.
+	madeProgress := b.hasPrev && b.progressToward() > stuckProgressEps
 	switch {
 	case madeProgress:
 		if b.stuckCounter > 0 {
@@ -202,7 +205,6 @@ func (b *Brain) stepStack(cur [baseInputs]float32, dist float32, hitWall bool) i
 
 	b.prevState = stacked
 	b.prevAction = action
-	b.prevDist = dist
 	b.prevVisible = visible // [МЕТРИКИ ПАМʼЯТІ] видимість на момент цього рішення
 	b.hasPrev = true
 	b.lastAction = action

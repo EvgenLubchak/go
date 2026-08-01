@@ -80,7 +80,13 @@ const (
 
 	qLearnRate = 0.005 // швидкість навчання (RL шумніший за supervised → помірно)
 	qGamma     = 0.95  // discount: наскільки цінувати майбутні нагороди (0..1)
-	qClip      = 10.0  // стеля TD-цілі (захист від розбіжності)
+	// Стеля Беллман-цілі (захист від розбіжності). ПІДБИРАТИ ЗА ФОРМУЛОЮ:
+	// при сталій нагороді r рівноважна цінність ≈ r / (1 − γ) = r × 20 (при γ=0.95).
+	// Виміряно на стенді: вбивця тримає r ≈ +0.74 → його «природна» Q ≈ 14.8, а
+	// стара стеля 10 її ОБРІЗАЛА — цілі клампились у нормальному режимі, і мережа
+	// переставала розрізняти «добре» і «дуже добре». Стеля 10 підбиралась ще ДО
+	// бойових нагород (+5 за вбивство). Тепер із запасом.
+	qClip = 25.0
 
 	// [3] ε-greedy: частка ВИПАДКОВИХ дій (exploration). За замовчуванням ПОСТІЙНА
 	// (qEpsilonConst). Якщо ввімкнути прапорець epsilonDecayEnabled (main.go) — ε
@@ -270,7 +276,6 @@ type Brain struct {
 	// Reward за дію відомий лише НАСТУПНОГО кадру (коли побачимо результат руху).
 	prevState  [brainInputs]float32 // попередній СТЕКНУТИЙ стан (для переходу)
 	prevAction int
-	prevDist   float32
 	hasPrev    bool
 
 	// [ПАМ'ЯТЬ] Історія кадрів для frame-stacking: семпли кожні stackSkip кадрів.
@@ -311,13 +316,21 @@ type Brain struct {
 	dmgTaken int // отримано шкоди
 	kills    int // добито цілей
 
-	// [ВБИВЦЯ] flowNav=true → агент навігує за flow-field. Тоді «прогрес» до цілі
-	// міряємо НЕ зближенням по прямій, а рухом УЗДОВЖ коридору (flowProgress) —
-	// інакше вхід і нагорода суперечать: обхід стіни тимчасово ЗБІЛЬШУЄ пряму
-	// відстань, тобто ми штрафували б агента саме за те, що він слухається поля.
-	// Заповнює GatherKillerInputs (своя горутина агента), споживає rewardFor.
-	flowNav      bool
-	flowProgress float32
+	// [ВБИВЦЯ] flowNav=true → агент навігує за flow-field (а не по прямій). Впливає
+	// на те, ЯКИЙ напрямок вважається «правильним», і на метрику blind-chase
+	// (вбивця всевидющий, тож у неї не входить).
+	flowNav bool
+
+	// [RL: ВЛАСНИЙ ВНЕСОК] Прогрес агента за минулий кадр — проєкція ЙОГО ВЛАСНОЇ
+	// швидкості на напрямок, куди йому треба. Заповнює Gather-функція (кожна знає
+	// свій «правильний» напрямок), споживає rewardFor.
+	//
+	// Чому не «зміна відстані до цілі», як було спочатку: та включає рух САМОЇ ЦІЛІ,
+	// якого агент не контролює. Виміряно на стенді: гравець (5.0 px/кадр) давав
+	// коливання нагороди ±2.1, тоді як стеля власного внеску рою (1.2 px/кадр) —
+	// лише ±0.6. Тобто ~75% сигналу було чужим рухом, і поведінка агента
+	// перевертались залежно від того, тікав гравець чи налітав.
+	progress float32
 
 	// Для візуалізації (читає Draw, пише calcAcceleration — різні фази, без гонки).
 	lastWhiskers [brainWhiskers]float32
@@ -469,25 +482,30 @@ func (b *Brain) selectFromQ(q [brainActions]float32) int {
 	return argmaxQ(q)
 }
 
-// progressToward — «наскільки агент наблизився до цілі за минулий кадр».
+// progressToward — «наскільки агент САМ просунувся туди, куди йому треба».
 // Одна величина живить і нагороду, і anti-stuck, тож вони не суперечать.
 //
-//	РІЙ (реактивний): зближення ПО ПРЯМІЙ — (prevDist − dist). Він не знає
-//	                  лабіринту, і пряма лінія — єдине, що йому доступне.
-//	ВБИВЦЯ (flowNav): рух УЗДОВЖ КОРИДОРУ — проєкція власної швидкості на
-//	                  напрямок flow-field. Обхід стіни тепер ЗАРАХОВУЄТЬСЯ як
-//	                  прогрес, хоч пряма відстань і зросла.
+// Правило одне для всіх типів мозку — різниться лише НАПРЯМОК, який Gather-функція
+// вважає правильним:
 //
-// Чому проєкція швидкості, а не «відстань по лабіринту»: та рахується в
-// КЛІТИНКАХ і міняється раз на ~20 кадрів → нагорода йшла б рваними стрибками.
-// Проєкція ж гладка, бо швидкість неперервна. Бонус: зникає шум від руху цілі —
-// агент отримує оцінку за ВЛАСНІ дії, а не за те, куди побіг гравець.
-func (b *Brain) progressToward(dist float32) float32 {
-	if b.flowNav {
-		return b.flowProgress
-	}
-	return b.prevDist - dist
-}
+//	РІЙ / ЖЕРТВА  → напрямок ПО ПРЯМІЙ до цілі (вони не знають лабіринту)
+//	ВБИВЦЯ        → напрямок FLOW-FIELD, тобто вздовж коридору крізь стіни
+//
+// [ЧОМУ НЕ «зміна відстані»] Спочатку прогрес рахувався як (prevDist − dist).
+// Розкладемо його:
+//
+//	prevDist − dist ≈ dot(ВЛАСНА швидкість, напрямок) − dot(швидкість ЦІЛІ, напрямок)
+//	                  └─ те, що агент контролює ─┘      └─ для нього чистий шум ─┘
+//
+// Другий доданок ми викинули. На стенді він давав ~75% розмаху нагороди (гравець
+// швидший за рій у 4 рази), через що сигнал/шум був ~1:50, а поведінка агента
+// перевертались залежно від стилю гравця: тікаєш — вчиться наздоганяти, налітаєш —
+// вчиться відступати (бо дистанція скорочується й без його зусиль).
+//
+// [ЧОМУ НЕ «відстань по лабіринту» для вбивці] Та рахується в КЛІТИНКАХ і
+// міняється раз на ~20 кадрів → нагорода йшла б рваними стрибками. Проєкція
+// швидкості гладка, бо швидкість неперервна.
+func (b *Brain) progressToward() float32 { return b.progress }
 
 // rewardFor — [RL: REWARD SHAPING] СПІЛЬНА нагорода за минулу дію для обох
 // шляхів памʼяті (раніше цей код був продубльований у stepStack і stepGRU).
@@ -502,12 +520,12 @@ func (b *Brain) progressToward(dist float32) float32 {
 //
 // Лічильники шкоди обнуляються ЗАВЖДИ — інакше в не-бойових мозків вони росли б
 // вічно й вистрілили б, якби combat колись увімкнули.
-func (b *Brain) rewardFor(dist float32, hitWall bool, prevWhisker float32) float32 {
+func (b *Brain) rewardFor(hitWall bool, prevWhisker float32) float32 {
 	sign := float32(1)
 	if b.flee {
 		sign = -1
 	}
-	r := sign * b.progressToward(dist) * rewardCloserScale
+	r := sign * b.progressToward() * rewardCloserScale
 	if hitWall {
 		r += rewardWallHit
 	}
@@ -532,12 +550,12 @@ func (b *Brain) rewardFor(dist float32, hitWall bool, prevWhisker float32) float
 //
 // [ДИСПЕТЧЕР] Тут обирається ШЛЯХ ПАМʼЯТІ: рекурентний GRU (brain_gru.go) або
 // frame-stacking (brain_stack.go). Усе інше в них — незалежне.
-func (b *Brain) Step(cur [baseInputs]float32, dist float32, hitWall bool) int {
+func (b *Brain) Step(cur [baseInputs]float32, hitWall bool) int {
 	b.age++ // [3] для автоспаду ε
 	if useGRU {
-		return b.stepGRU(cur, dist, hitWall)
+		return b.stepGRU(cur, hitWall)
 	}
-	return b.stepStack(cur, dist, hitWall)
+	return b.stepStack(cur, hitWall)
 }
 
 // train — k оновлень на випадкових вибірках із буфера (серце DQN).
@@ -663,37 +681,55 @@ func GatherInputs(enemy, player *Pixel) [baseInputs]float32 {
 			enemy.Brain.lastWhiskers[i] = w
 		}
 	}
+
+	// [RL] Прогрес за минулий кадр — ВЛАСНИЙ рух агента в бік цілі.
+	// Рахуємо від ІСТИННОГО напрямку, навіть коли ціль не видно: нагороду видає
+	// середовище, а не сприйняття агента — інакше сліпі кадри лишились би зовсім
+	// без сигналу. (Швидкість тут «вчорашня»: Step іде до updateUnits, тобто це
+	// саме те переміщення, яке щойно відбулось.)
+	if enemy.Brain != nil {
+		enemy.Brain.progress = closingSpeed(enemy.VelX, enemy.VelY, dx/dist, dy/dist)
+	}
 	return in
+}
+
+// nearestHostile — [КОМАНДИ] найближчий живий юніт ЧУЖОЇ фракції (або nil).
+//
+// Ключова функція командного бою: ціль більше не «завжди гравець». Свої одне
+// одного ігнорують — інакше юніти гравця тікали б від власних союзників, а рій
+// бив би своїх.
+func nearestHostile(from *Pixel, units []Pixel) *Pixel {
+	var best *Pixel
+	var bestD float32 = 1e30
+	for i := range units {
+		u := &units[i]
+		if u == from || u.HP <= 0 || u.Faction == from.Faction {
+			continue
+		}
+		dx, dy := u.X-from.X, u.Y-from.Y
+		if d := dx*dx + dy*dy; d < bestD {
+			bestD, best = d, u
+		}
+	}
+	return best
 }
 
 // GatherPreyInputs — стан для мозку-ЖЕРТВИ (гравця у self-play). Дзеркало
 // GatherInputs: замість «куди гравець» — «звідки загроза» (напрямок до НАЙБЛИЖЧОГО
 // ворога). Мережа вчиться рухатись ГЕТЬ (бо reward інвертований, flee=true).
 // Повертає кадр (baseInputs) і відстань до найближчого ворога (для reward).
-func GatherPreyInputs(player *Pixel, enemies []Pixel) ([baseInputs]float32, float32) {
+//
+// [КОМАНДИ] Ціль шукаємо через nearestHostile: відколи на полі є юніти гравця,
+// «найближчий юніт» ≠ «найближча загроза» — від своїх тікати не треба.
+func GatherPreyInputs(player *Pixel, units []Pixel) [baseInputs]float32 {
 	cx := player.X + pixelSize/2
 	cy := player.Y + pixelSize/2
 
-	// Найближчий ворог = головна загроза.
-	nearest := -1
-	var best float32 = 1e30
-	for i := range enemies {
-		dx := enemies[i].X - player.X
-		dy := enemies[i].Y - player.Y
-		d := dx*dx + dy*dy
-		if d < best {
-			best = d
-			nearest = i
-		}
-	}
-
 	var in [baseInputs]float32
-	dist := float32(1)
-	if nearest >= 0 {
-		e := &enemies[nearest]
+	if e := nearestHostile(player, units); e != nil {
 		dx := e.X - player.X
 		dy := e.Y - player.Y
-		dist = float32(math.Sqrt(float64(dx*dx + dy*dy)))
+		dist := float32(math.Sqrt(float64(dx*dx + dy*dy)))
 		if dist == 0 {
 			dist = 1
 		}
@@ -712,7 +748,20 @@ func GatherPreyInputs(player *Pixel, enemies []Pixel) ([baseInputs]float32, floa
 			player.Brain.lastWhiskers[i] = w
 		}
 	}
-	return in, dist
+
+	// [RL] Прогрес — власний рух У БІК загрози. Для жертви (flee=true) знак
+	// нагороди інвертується, тож рух ГЕТЬ від загрози й дає плюс.
+	if player.Brain != nil {
+		if e := nearestHostile(player, units); e != nil {
+			dx, dy := e.X-player.X, e.Y-player.Y
+			if d := float32(math.Sqrt(float64(dx*dx + dy*dy))); d > 0 {
+				player.Brain.progress = closingSpeed(player.VelX, player.VelY, dx/d, dy/d)
+			}
+		} else {
+			player.Brain.progress = 0
+		}
+	}
+	return in
 }
 
 // GatherKillerInputs — [ВБИВЦЯ] стан для мозку, що ЗНАЄ ЛАБІРИНТ.
@@ -735,19 +784,19 @@ func GatherKillerInputs(enemy, player *Pixel, flow *FlowField) [baseInputs]float
 	var in [baseInputs]float32
 
 	// [0,1] напрямок КРІЗЬ СТІНИ + [2] відстань ПО ЛАБІРИНТУ.
-	// Заразом рахуємо flowProgress — прогрес УЗДОВЖ коридору за минулий кадр
-	// (швидкість тут іще «вчорашня»: калькуляція йде до updateEnemies, тобто це
+	// Заразом рахуємо progress — рух УЗДОВЖ коридору за минулий кадр
+	// (швидкість тут іще «вчорашня»: калькуляція йде до updateUnits, тобто це
 	// саме те переміщення, яке щойно відбулось). Його споживає rewardFor.
 	if dx, dy, ok := flow.dirAt(enemy.X, enemy.Y); ok {
 		in[inDirX], in[inDirX+1] = dx, dy
 		in[inDist] = clamp(float32(flow.distAt(enemy.X, enemy.Y))/flowDistNorm, 0, 1)
 		if enemy.Brain != nil {
-			enemy.Brain.flowProgress = closingSpeed(enemy.VelX, enemy.VelY, dx, dy)
+			enemy.Brain.progress = closingSpeed(enemy.VelX, enemy.VelY, dx, dy)
 		}
 	} else {
 		in[inDist] = 1 // шляху нема (замкнена кишеня) → «нескінченно далеко»
 		if enemy.Brain != nil {
-			enemy.Brain.flowProgress = 0
+			enemy.Brain.progress = 0
 		}
 	}
 
@@ -780,8 +829,10 @@ func GatherKillerInputs(enemy, player *Pixel, flow *FlowField) [baseInputs]float
 
 // Файли ваг — по одному на ТИП мозку (різні типи вчаться незалежно).
 const (
-	brainFile  = "brain_weights.json"  // рій-переслідувач (ConfigLearner)
-	killerFile = "killer_weights.json" // вбивця з flow-field (ConfigKiller)
+	brainFile      = "brain_weights.json"       // ворожий рій-переслідувач (ConfigLearner)
+	killerFile     = "killer_weights.json"      // ворог-вбивця з flow-field (ConfigKiller)
+	allyFile       = "ally_weights.json"        // [КОМАНДИ] переслідувач гравця
+	allyKillerFile = "ally_killer_weights.json" // [КОМАНДИ] вбивця гравця
 )
 
 // BrainData — серіалізація ваг у JSON + розміри мережі для перевірки сумісності.
