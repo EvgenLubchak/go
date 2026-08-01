@@ -132,7 +132,7 @@ var (
 		DetectionRange:  300.0, // НЕ впливає на учня (лише debug-коло showDetectionCircle);
 		//                        зір мозку — це sightRange (POMDP) + whiskerRange (вуса)
 		PounceMulti: 0.0,
-		Count:       19, // скільки їх на полі
+		Count:       50, // скільки їх на полі
 		Faction:     factionEnemy,
 		WeightsFile: brainFile,
 		MaxHP:       2,                            // живучий — більше часу на навчання
@@ -186,7 +186,7 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           7,
+		Count:           4,
 		Faction:         factionPlayer, // ← свій; рій його атакує, він рій
 		WeightsFile:     allyFile,
 		MaxHP:           3,
@@ -215,10 +215,10 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           1,
+		Count:           3,
 		Faction:         factionPlayer,
 		WeightsFile:     allyKillerFile,
-		MaxHP:           10,
+		MaxHP:           50,
 		Color:           color.RGBA{140, 100, 255, 255}, // фіолетовий — твій вбивця
 		Label:           "",
 		IsLearner:       true,

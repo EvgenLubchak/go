@@ -53,6 +53,14 @@ type FlowField struct {
 	queue   []int32 // черга BFS, перевикористовується (без алокацій щокадру)
 	maxDist int32   // найдальша досяжна клітинка (для розфарбування)
 	valid   bool
+
+	// [КЕШ МАЛЮВАННЯ] Стрілки поля — це ~5000 vector-примітивів, і кожен коштує
+	// ТЕСЕЛЯЦІЇ НА CPU при кожному виклику. Але поле міняється лише при перебудові
+	// (раз на flowRebuildEvery кадрів), а Draw викликається щокадру монітора.
+	// Тож малюємо один раз у позаекранний шар, а далі виводимо його одним
+	// DrawImage (це вже дешевий GPU-blit).
+	overlay      *ebiten.Image
+	overlayValid bool
 }
 
 // rebuildFrom — зручний варіант для ОДНОГО джерела (використовують тести).
@@ -69,6 +77,7 @@ func (f *FlowField) rebuildFrom(col, row int) {
 // по ~2500 клітинок.
 func (f *FlowField) rebuild(sources []flowSource) {
 	f.valid = false
+	f.overlayValid = false // дані змінились → перемалювати шар
 	f.maxDist = 0
 	for r := 0; r < boidMapH; r++ {
 		for c := 0; c < boidMapW; c++ {
@@ -212,10 +221,8 @@ func (g *Game) flowFor(u *Pixel) *FlowField {
 }
 
 // drawFlowField — візуалізація (клавіша V): бачимо, як алгоритм «знає лабіринт».
-//
-//	підсвітка клітинки — яскравість ∝ близькість до гравця (видно BFS-хвилю),
-//	кожні flowBandStep кроків — світліша смуга (контурні «кільця» хвилі),
-//	коротка стрілка — куди веде поле з цієї клітинки.
+// Стрілка в клітинці — куди веде поле; яскравість ∝ близькість до цілі.
+// Саме малювання кешується — див. renderOverlay.
 func (g *Game) drawFlowField(screen *ebiten.Image) {
 	// Клавіша V циклює: 0 = вимкнено, 1 = поле ДО СТОРОНИ ГРАВЦЯ (його бачать
 	// вороги), 2 = поле ДО ВОРОГІВ (його бачать твої юніти).
@@ -226,6 +233,24 @@ func (g *Game) drawFlowField(screen *ebiten.Image) {
 	if !f.valid || f.maxDist == 0 {
 		return
 	}
+	screen.DrawImage(f.renderOverlay(), nil)
+}
+
+// renderOverlay — намальовані стрілки поля. Перемальовуємо ЛИШЕ коли поле
+// змінилось; решту кадрів повертаємо готовий шар.
+//
+// [GO: ЛІНИВА ІНІЦІАЛІЗАЦІЯ] ebiten.NewImage можна кликати лише коли графічний
+// контекст уже живий, тому створюємо шар при першому малюванні, а не в init.
+func (f *FlowField) renderOverlay() *ebiten.Image {
+	if f.overlay == nil {
+		f.overlay = ebiten.NewImage(screenWidth, screenHeight)
+	}
+	if f.overlayValid {
+		return f.overlay
+	}
+	f.overlayValid = true
+	screen := f.overlay
+	screen.Clear() // шар прозорий → лягає поверх карти без фону
 	// Заливку клітинок НЕ малюємо: контури рівної відстані в манхеттен-метриці —
 	// це «ромби», у відкритому просторі вони читаються як шахове штрихування, а не
 	// як кільця. Усю інформацію несуть стрілки: напрямок + яскравість = близькість.
@@ -245,7 +270,7 @@ func (g *Game) drawFlowField(screen *ebiten.Image) {
 				continue
 			}
 
-			t := 1 - float32(d)/float32(f.maxDist) // 1 біля гравця → 0 на краю
+			t := 1 - float32(d)/float32(f.maxDist) // 1 біля джерела → 0 на краю
 			col := color.RGBA{
 				R: uint8(80 + 175*t),
 				G: uint8(170 + 85*t),
@@ -264,4 +289,5 @@ func (g *Game) drawFlowField(screen *ebiten.Image) {
 			vector.FillRect(screen, tx-1.5, ty-1.5, 3, 3, col, false)
 		}
 	}
+	return f.overlay
 }
