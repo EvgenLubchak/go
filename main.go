@@ -17,6 +17,10 @@ const (
 	screenHeight = 960
 	pixelSize    = 25
 	enemyCount   = 15
+	// [ВБИВЦЯ] Скільки з enemyCount — вбивці (ConfigKiller, знають лабіринт через
+	// flow-field, вчаться в ОКРЕМІЙ мережі). Решта — звичайний рій-переслідувач.
+	// Тримаємо малим: вони сильніші, інакше бій стане бійнею.
+	killerCount = 3
 
 	// Глобальна фізика — однакова для всіх типів ворогів.
 	// Поведінка (швидкість, агресія, burst) — в EnemyConfig у pixel.go.
@@ -90,7 +94,7 @@ var (
 	epsilonDecayEnabled = false // ε: false = постійна (qEpsilonConst); true = автоспад max→min
 	sharedBrain         = true  // true = всі учні ділять ОДНУ мережу (вулик-розум); false = кожен свою
 	localSight          = true  // [POMDP] true = агент бачить гравця лише поблизу+по прямій; false = всевидющий
-	aiPlayer            = false // [SELF-PLAY] true = гравцем керує мозок-жертва (вчиться тікати); false = людина
+	aiPlayer            = true  // [SELF-PLAY] true = гравцем керує мозок-жертва (вчиться тікати); false = людина
 	useGRU              = true  // [RNN] true = рекурентна памʼять (GRU); false = frame-stacking (стек кадрів)
 	friendlyFire        = false // [БІЙ] true = свої теж шкодять своїм (рій проріджує себе) — для експериментів
 	showFlowField       = true  // [FLOW-FIELD] показати поле напрямків до гравця — клавіша V

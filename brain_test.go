@@ -261,3 +261,77 @@ func TestSaveLoadGRURoundTrip(t *testing.T) {
 		t.Fatal("старий файл: GRU-ваги лишились нульовими (initGRU не спрацював)")
 	}
 }
+
+// TestKillerHasSeparateHive — [ВБИВЦЯ] перевіряє головне у кроці 2b-1: вбивці й
+// рій вчаться в РІЗНИХ мережах і зберігаються в різні файли. Якщо це зламається,
+// зміна reward для вбивці мовчки перетре тонко налаштований рій.
+func TestKillerHasSeparateHive(t *testing.T) {
+	if killerCount == 0 {
+		t.Skip("killerCount = 0 — вбивць немає")
+	}
+	saved := sharedBrain
+	sharedBrain = true
+	defer func() { sharedBrain = saved }()
+
+	enemies := newEnemies(killerCount + 3) // гарантовано обидва типи
+	var killerNet, chaserNet *Net
+	for i := range enemies {
+		b := enemies[i].Brain
+		if b == nil || b.net == nil {
+			t.Fatalf("агент %d без мозку", i)
+		}
+		if enemies[i].Cfg.UsesFlowField {
+			if killerNet == nil {
+				killerNet = b.net
+			} else if b.net != killerNet {
+				t.Fatal("вбивці не ділять один вулик")
+			}
+		} else {
+			if chaserNet == nil {
+				chaserNet = b.net
+			} else if b.net != chaserNet {
+				t.Fatal("переслідувачі не ділять один вулик")
+			}
+		}
+	}
+	if killerNet == nil || chaserNet == nil {
+		t.Fatal("створено не обидва типи ворогів")
+	}
+	if killerNet == chaserNet {
+		t.Fatal("вбивця й рій ділять ОДНУ мережу — типи не розділені")
+	}
+	if killerNet.file != killerFile {
+		t.Fatalf("мережа вбивці пише в %q, а мала в %q", killerNet.file, killerFile)
+	}
+	if chaserNet.file != brainFile {
+		t.Fatalf("мережа рою пише в %q, а мала в %q", chaserNet.file, brainFile)
+	}
+}
+
+// TestSaveBrainsWritesEachHive — saveBrains зберігає КОЖНУ унікальну мережу у її
+// власний файл, а ефемерні (file == "") пропускає. Пишемо у tmp, не чіпаючи
+// справжні ваги.
+func TestSaveBrainsWritesEachHive(t *testing.T) {
+	dir := t.TempDir()
+	hiveA, hiveB, ephemeral := NewNet(), NewNet(), NewNet()
+	hiveA.file = dir + "/a.json"
+	hiveB.file = dir + "/b.json"
+	// ephemeral.file лишається "" → не зберігається (як мозок-жертва в self-play)
+
+	g := &Game{enemies: []Pixel{
+		{Brain: NewBrainWith(hiveA)}, {Brain: NewBrainWith(hiveA)},
+		{Brain: NewBrainWith(hiveB)},
+		{Brain: NewBrainWith(ephemeral)},
+	}}
+	g.saveBrains()
+
+	for _, p := range []string{hiveA.file, hiveB.file} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("не збережено %s: %v", p, err)
+		}
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 2 {
+		t.Fatalf("у теці %d файлів, очікували 2 (ефемерна мережа не мала зберігатись)", len(entries))
+	}
+}

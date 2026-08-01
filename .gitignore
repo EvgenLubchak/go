@@ -12,5 +12,6 @@ boids-macos
 *.iml
 .DS_Store
 
-# Brain — вивчені ваги нейрона (генеруються під час гри)
-brain_weights.json
+# Brain — вивчені ваги (генеруються під час гри), по файлу на ТИП мозку:
+# brain_weights.json — рій-переслідувач, killer_weights.json — вбивця
+*_weights.json

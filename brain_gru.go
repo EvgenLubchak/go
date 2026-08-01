@@ -185,7 +185,7 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, dist float32, hitWall bool) int
 	q, hNew := b.net.forwardGRU(cur, b.h)
 	b.h = hNew
 
-	visible := cur[baseInputs-1] > 0.5
+	visible := cur[inVisible] > 0.5
 
 	// Нагорода за ПОПЕРЕДНЮ дію (та сама схема, що й у стек-шляху) → крок у відрізок.
 	if b.hasPrev {
@@ -204,7 +204,7 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, dist float32, hitWall bool) int
 		if hitWall {
 			reward += rewardWallHit
 		}
-		reward += rewardNearWall * b.gruPrevX[5+b.prevAction]
+		reward += rewardNearWall * b.gruPrevX[inWhisker0+b.prevAction]
 		b.lastReward = reward
 
 		// Записуємо завершений крок (x_{t-1}, a_{t-1}, r) у накопичувач відрізка.

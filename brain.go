@@ -31,10 +31,10 @@ import (
 // --------------------------------------------------------------------------
 // ДВА ШЛЯХИ ПАМʼЯТІ (обираються прапорцем useGRU у рантаймі, див. Step/train):
 //
-//	brain_stack.go — FRAME-STACKING: вхід = стек stackFrames кадрів (56 чисел),
+//	brain_stack.go — FRAME-STACKING: вхід = стек stackFrames кадрів (64 числа),
 //	                 вікно історії задане НАМИ. Історично перший підхід; лишається
 //	                 як baseline для порівняння і як fallback.
-//	brain_gru.go   — GRU: вхід = ОДИН кадр (14), «минуле» живе в прихованому стані
+//	brain_gru.go   — GRU: вхід = ОДИН кадр (16), «минуле» живе в прихованому стані
 //	                 h, і мережа САМА вчиться, що тримати й як довго. Дефолт.
 //
 // Тут, у brain.go, — лише СПІЛЬНЕ ядро обох: константи, Net/Brain, активації,
@@ -45,7 +45,7 @@ import (
 // ==========================================================================
 
 const (
-	baseInputs  = 14 // ОДИН кадр стану: 5 базових + 8 whiskers + 1 «гравця видно»
+	baseInputs  = 16 // ОДИН кадр стану (спільний розмір для ВСІХ типів мозку)
 	stackFrames = 4  // [ПАМ'ЯТЬ] скільки кадрів склеюємо на вхід (1 = без пам'яті)
 	stackSkip   = 60 // кадрів між семплами історії → вікно пам'яті ≈ (stackFrames-1)*stackSkip
 
@@ -105,6 +105,11 @@ const (
 
 	sightRange = 260.0 // [POMDP] радіус видимості гравця (px) у режимі localSight
 
+	// [ВБИВЦЯ] Нормалізатор відстані по лабіринту (у клітинках BFS). Ділимо на
+	// ФІКСОВАНУ константу, а НЕ на maxDist поля: maxDist міняється при кожній
+	// перебудові, тож та сама фізична відстань давала б різні числа на вході.
+	flowDistNorm = 60.0
+
 	// Масштаб reward підібраний так, щоб «хороший» кадр давав сигнал ~0.5,
 	// а удар об стіну — помітний штраф. Замалий reward = TD-сигнал тоне в шумі.
 	rewardCloserScale = 0.5  // нагорода за наближення до гравця (на px/кадр)
@@ -121,6 +126,27 @@ const (
 	frustrationFrames = 24   // скільки кадрів напрямленого виходу
 	stuckNearWall     = 0.5  // whisker ≥ цього = «біля стіни»
 	stuckProgressEps  = 0.05 // наближення менше за це = «нема прогресу»
+)
+
+// ІНДЕКСИ СЛОТІВ у кадрі стану. Іменовані, а не «магічні числа», бо різні типи
+// мозку кладуть у той самий кадр РІЗНІ дані, і зміна baseInputs інакше тихо
+// ламає читання (напр. колись visible читався як cur[baseInputs-1] → зʼїхав би).
+//
+//	ПЕРЕСЛІДУВАЧ (GatherInputs)          ВБИВЦЯ (GatherKillerInputs)
+//	[0,1]  напрямок до гравця            [0,1]  напрямок FLOW-FIELD (крізь стіни)
+//	[2]    відстань по прямій            [2]    відстань ПО ЛАБІРИНТУ
+//	[3,4]  швидкість ГРАВЦЯ              [3,4]  ВЛАСНА швидкість
+//	[5..12] 8 whiskers                   [5..12] 8 whiskers
+//	[13]   чи видно гравця (POMDP)       [13,14] швидкість цілі
+//	[14,15] не вживаються (0)            [15]   власне HP
+const (
+	inDirX     = 0  // [0,1] напрямок до цілі: прямий (рій) або flow-field (вбивця)
+	inDist     = 2  // відстань до цілі: по прямій (рій) або по лабіринту (вбивця)
+	inVelX     = 3  // [3,4] швидкість: ГРАВЦЯ (рій) або ВЛАСНА (вбивця)
+	inWhisker0 = 5  // [5..12] 8 променів-вусів; whisker[i] ↔ dirs8[i] ↔ дія i
+	inVisible  = 13 // РІЙ: 1 = гравця видно (POMDP)
+	inTgtVelX  = 13 // ВБИВЦЯ: [13,14] швидкість цілі (вести на випередження)
+	inOwnHP    = 15 // ВБИВЦЯ: власне HP/MaxHP (коли відступати)
 )
 
 // sqrt2inv = 1/√2 — для діагональних напрямків (щоб були одиничної довжини).
@@ -176,6 +202,11 @@ type Net struct {
 	// через РОЗДІЛЕННЯ ФАЗ: forward читається паралельно, train пише однопотоково
 	// (g.trainBrains) — фази не перетинаються.
 	mu sync.Mutex
+
+	// [БАГАТО МОЗКІВ] Куди зберігати ці ваги. Різні ТИПИ ворогів мають різні
+	// мережі й різні файли (рій → brainFile, вбивці → killerBrainFile).
+	// Порожній рядок = ефемерна мережа, не зберігається (напр. мозок-жертва).
+	file string
 
 	// [МЕТРИКИ] акумулятори за період (скидаються в Metrics.collect). Пишуться
 	// у tdUpdate (однопотоково в trainBrains) → без локу.
@@ -343,10 +374,10 @@ func argmaxQ(q [brainActions]float32) int {
 // maxWhisker — найбільша близькість стіни серед 8 променів (0 = чисто навкруги).
 // Читає вуса ПОТОЧНОГО кадру (індекси 5..12) — вони однакові і в стеку, і в GRU.
 func maxWhisker(f [baseInputs]float32) float32 {
-	m := f[5]
+	m := f[inWhisker0]
 	for i := 1; i < brainWhiskers; i++ {
-		if f[5+i] > m {
-			m = f[5+i]
+		if f[inWhisker0+i] > m {
+			m = f[inWhisker0+i]
 		}
 	}
 	return m
@@ -356,9 +387,9 @@ func maxWhisker(f [baseInputs]float32) float32 {
 // гарантовано вийти з пастки, а не смикатись на місці. Серед однаково відкритих
 // напрямків — рівноймовірно (reservoir), аби агенти не злипались в один бік.
 func escapeAction(f [baseInputs]float32) int {
-	best, bestW, ties := 0, f[5], 1
+	best, bestW, ties := 0, f[inWhisker0], 1
 	for i := 1; i < brainWhiskers; i++ {
-		w := f[5+i]
+		w := f[inWhisker0+i]
 		switch {
 		case w < bestW:
 			best, bestW, ties = i, w, 1
@@ -535,13 +566,13 @@ func GatherInputs(enemy, player *Pixel) [baseInputs]float32 {
 		in[2] = dist / screenWidth
 		in[3] = player.VelX / 5.0
 		in[4] = player.VelY / 5.0
-		in[13] = 1
+		in[inVisible] = 1
 	}
 	// (якщо не видно — [0..4] і [13] лишаються 0)
 
 	for i := 0; i < brainWhiskers; i++ {
 		w := wallWhisker(cx, cy, dirs8[i][0], dirs8[i][1])
-		in[5+i] = w
+		in[inWhisker0+i] = w
 		if enemy.Brain != nil {
 			enemy.Brain.lastWhiskers[i] = w
 		}
@@ -585,12 +616,12 @@ func GatherPreyInputs(player *Pixel, enemies []Pixel) ([baseInputs]float32, floa
 		in[2] = dist / screenWidth
 		in[3] = e.VelX / 5.0
 		in[4] = e.VelY / 5.0
-		in[13] = 1
+		in[inVisible] = 1
 	}
 
 	for i := 0; i < brainWhiskers; i++ {
 		w := wallWhisker(cx, cy, dirs8[i][0], dirs8[i][1])
-		in[5+i] = w
+		in[inWhisker0+i] = w
 		if player.Brain != nil {
 			player.Brain.lastWhiskers[i] = w
 		}
@@ -598,8 +629,65 @@ func GatherPreyInputs(player *Pixel, enemies []Pixel) ([baseInputs]float32, floa
 	return in, dist
 }
 
-// brainFile — шлях до файлу де зберігаються вивчені ваги між сесіями.
-const brainFile = "brain_weights.json"
+// GatherKillerInputs — [ВБИВЦЯ] стан для мозку, що ЗНАЄ ЛАБІРИНТ.
+//
+// Той самий РОЗМІР кадру, що й у рою, але інший СЕНС слотів (див. таблицю вгорі).
+// Ключова різниця: замість «куди гравець по прямій» — «куди ЙТИ лабіринтом»
+// (flow-field). Мережа не витрачає ємність на розвʼязання лабіринту — навігація
+// їй підказана, і вся ємність іде на ТАКТИКУ: коли кинутись, коли відступити.
+//
+// Це свідомий поділ праці: те, що добре рахує алгоритм (BFS), не варто вчити
+// градієнтним спуском. Добрі фічі сильніші за більшу мережу.
+//
+// [GO: ПАРАЛЕЛЬНЕ ЧИТАННЯ] flow читається з горутин воркер-пулу, але поле
+// перебудовується РАНІШЕ в Update (однопотоково) → та сама «розділення фаз»,
+// що й для boidMap. Гонок нема.
+func GatherKillerInputs(enemy, player *Pixel, flow *FlowField) [baseInputs]float32 {
+	cx := enemy.X + pixelSize/2
+	cy := enemy.Y + pixelSize/2
+
+	var in [baseInputs]float32
+
+	// [0,1] напрямок КРІЗЬ СТІНИ + [2] відстань ПО ЛАБІРИНТУ.
+	if dx, dy, ok := flow.dirAt(enemy.X, enemy.Y); ok {
+		in[inDirX], in[inDirX+1] = dx, dy
+		in[inDist] = clamp(float32(flow.distAt(enemy.X, enemy.Y))/flowDistNorm, 0, 1)
+	} else {
+		in[inDist] = 1 // шляху нема (замкнена кишеня) → «нескінченно далеко»
+	}
+
+	// [3,4] ВЛАСНА швидкість, нормалізована власним максимумом → [-1..1].
+	// Критично для «кидка кобри»: шкода залежить від швидкості зближення, тож
+	// агент мусить ВІДЧУВАТИ, наскільки він розігнався. Вивести це з послідовності
+	// [2] він не зміг би — відстань квантована клітинками (міняється раз на ~20 кадрів).
+	if m := enemy.Cfg.MaxSpeed; m > 0 {
+		in[inVelX] = clamp(enemy.VelX/m, -1, 1)
+		in[inVelX+1] = clamp(enemy.VelY/m, -1, 1)
+	}
+
+	// [5..12] вуса — той самий зір на стіни, що й у рою (мікроманевр упритул).
+	for i := 0; i < brainWhiskers; i++ {
+		w := wallWhisker(cx, cy, dirs8[i][0], dirs8[i][1])
+		in[inWhisker0+i] = w
+		if enemy.Brain != nil {
+			enemy.Brain.lastWhiskers[i] = w
+		}
+	}
+
+	// [13,14] швидкість цілі (вести на випередження) + [15] власне HP.
+	in[inTgtVelX] = player.VelX / 5.0
+	in[inTgtVelX+1] = player.VelY / 5.0
+	if enemy.MaxHP > 0 {
+		in[inOwnHP] = float32(enemy.HP) / float32(enemy.MaxHP)
+	}
+	return in
+}
+
+// Файли ваг — по одному на ТИП мозку (різні типи вчаться незалежно).
+const (
+	brainFile  = "brain_weights.json"  // рій-переслідувач (ConfigLearner)
+	killerFile = "killer_weights.json" // вбивця з flow-field (ConfigKiller)
+)
 
 // BrainData — серіалізація ваг у JSON + розміри мережі для перевірки сумісності.
 type BrainData struct {
@@ -632,11 +720,25 @@ type BrainData struct {
 	Bq        [brainActions]float32            `json:"bq"`
 }
 
-// SaveBrain зберігає ваги мережі агента у JSON.
-func SaveBrain(b *Brain) error { return SaveNet(b.net) }
+// SaveNet зберігає ваги у ВЛАСНИЙ файл мережі (n.file). Ефемерні мережі
+// (file == "", напр. мозок-жертва в self-play) не зберігаються.
+func SaveNet(n *Net) error {
+	if n == nil || n.file == "" {
+		return nil
+	}
+	return saveNetTo(n, n.file)
+}
 
-// SaveNet зберігає ваги мережі у файл за замовчуванням (brainFile).
-func SaveNet(n *Net) error { return saveNetTo(n, brainFile) }
+// newNetFor — нова або завантажена мережа для конкретного ТИПУ мозку.
+// Повертає також loaded: чи ваги реально прийшли з файлу (навчена → ε на floor).
+func newNetFor(path string) (n *Net, loaded bool) {
+	if n = loadNetFrom(path); n != nil {
+		return n, true
+	}
+	n = NewNet()
+	n.file = path
+	return n, false
+}
 
 // saveNetTo серіалізує мережу (стек + GRU ваги) у JSON за вказаним шляхом.
 func saveNetTo(n *Net, path string) error {
@@ -678,6 +780,7 @@ func loadNetFrom(path string) *Net {
 		return nil // несумісна архітектура → почнемо з нуля
 	}
 	n := &Net{W1: data.W1, B1: data.B1, W2: data.W2, B2: data.B2, W3: data.W3, B3: data.B3}
+	n.file = path // мережа памʼятає, звідки прийшла → туди ж і збережеться
 	if data.HasGRU && data.GruHidden == gruHidden {
 		n.Wz, n.Uz, n.Bz = data.Wz, data.Uz, data.Bz
 		n.Wr, n.Ur, n.Br = data.Wr, data.Ur, data.Br

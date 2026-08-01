@@ -32,6 +32,11 @@ type EnemyConfig struct {
 	Color           color.RGBA // базовий колір; A==0 → колір визначається Aggression
 	Label           string     // мітка всередині пікселя (ЛИШЕ відображення)
 	IsLearner       bool       // true → створюємо Brain (Q-learning); незалежно від Label
+
+	// [ВБИВЦЯ] true → мозок цього типу отримує на вхід FLOW-FIELD (напрямок до
+	// цілі крізь стіни) замість прямого напрямку, і вчиться в ОКРЕМІЙ мережі
+	// (свій вулик + свій файл ваг). Так тонко налаштований рій лишається цілим.
+	UsesFlowField bool
 }
 
 // [GO: PACKAGE-LEVEL VAR]
@@ -125,6 +130,31 @@ var (
 		IsLearner:   true, // ← саме це вмикає мозок, а не мітка
 	}
 
+	// ConfigKiller — [ВБИВЦЯ] мисливець, що ЗНАЄ ЛАБІРИНТ. На відміну від рою
+	// (реактивний: тисне в бік, де «відчуває» ціль, і тому б'ється об стіни), він
+	// отримує напрямок flow-field як вхід → ходить коридорами. Вчиться в окремій
+	// мережі (killerFile), тож рій лишається недоторканим.
+	//
+	// Швидший і живучіший за рій — щоб «кидок кобри» був відчутним, але їх мало
+	// (killerCount), інакше бій перетвориться на бійню.
+	ConfigKiller = EnemyConfig{
+		WanderStrength:  0.05, // майже без хаосу — він цілеспрямований
+		AlignmentRate:   0.0,
+		CohesionRate:    0.0,
+		SeparationRate:  0.01,
+		MaxSpeed:        1.6, // швидший за рій (1.2) → сильніший удар
+		AggressionForce: 0.0, // не використовується — рішення приймає Brain
+		BurstChance:     0.0,
+		BurstForce:      0.0,
+		DetectionRange:  0.0, // не впливає (лише debug-коло)
+		PounceMulti:     0.0,
+		MaxHP:           3,                            // витримує на удар більше за рій
+		Color:           color.RGBA{255, 90, 60, 255}, // червоний — щоб одразу вирізняти
+		Label:           "",
+		IsLearner:       true,
+		UsesFlowField:   true, // ← окремий мозок + flow-field на вхід
+	}
+
 	ConfigGroup = EnemyConfig{
 		WanderStrength:  0.02,  // майже без хаосу — плавний рух
 		AlignmentRate:   0.08,  // сильно рівняється на сусідів (головний пріоритет)
@@ -173,29 +203,31 @@ func aggressionColor(a float32) color.RGBA {
 	}
 }
 
-// newEnemies створює slice з рівномірним розподілом усіх трьох типів.
+// newEnemies створює рій: перші killerCount — ВБИВЦІ (ConfigKiller), решта —
+// переслідувачі (ConfigLearner). Явний лічильник, а не modulo — щоб пропорцію
+// було видно й легко крутити.
 //
-// [GO: MODULO CYCLING]
-// i % len(configs) циклічно перебирає типи: 0,1,2,0,1,2,...
+// [ДВА ВУЛИКИ] Типи мозку вчаться НЕЗАЛЕЖНО: у кожного своя спільна мережа і
+// свій файл ваг. Тому зміна reward/входів для вбивці не чіпає тонко налаштований
+// рій — і навпаки.
 func newEnemies(count int) []Pixel {
-	//configs := []EnemyConfig{ConfigBoid, ConfigPredator, ConfigSpeeder, ConfigHP, ConfigGroup}
-	configs := []EnemyConfig{ConfigLearner}
 	enemies := make([]Pixel, count)
 
-	// [SHARED BRAIN] У режимі sharedBrain усі учні ділять ОДНУ мережу (вулик-розум).
-	// Створюємо її раз тут; нижче кожен Brain лише вказує на неї.
-	var sharedNet *Net
-	sharedLoaded := false
+	// [SHARED BRAIN] У режимі sharedBrain усі агенти ОДНОГО типу ділять одну
+	// мережу (вулик-розум). Створюємо/вантажимо по одній на тип; нижче кожен
+	// Brain лише вказує на потрібну.
+	var chaserNet, killerNet *Net
+	var chaserLoaded, killerLoaded bool
 	if sharedBrain {
-		if sharedNet = LoadNet(); sharedNet != nil {
-			sharedLoaded = true
-		} else {
-			sharedNet = NewNet()
-		}
+		chaserNet, chaserLoaded = newNetFor(brainFile)
+		killerNet, killerLoaded = newNetFor(killerFile)
 	}
 
 	for i := range enemies {
-		cfg := configs[i%len(configs)]
+		cfg := ConfigLearner
+		if i < killerCount {
+			cfg = ConfigKiller
+		}
 
 		// Boid: колір і агресія рандомні. Інші: фіксований колір, агресія 1.0.
 		// [GO: ZERO VALUE CHECK] cfg.Color.A == 0 → Color не виставлений → Boid
@@ -223,21 +255,18 @@ func newEnemies(count int) []Pixel {
 		// кожен має власну (завантажену з файлу або нову).
 		var brain *Brain
 		if cfg.IsLearner {
-			if sharedBrain {
-				brain = NewBrainWith(sharedNet)
-				if sharedLoaded {
-					brain.age = qEpsilonDecay // завантажена = навчена → ε-floor
-				}
-			} else {
-				net := LoadNet()
-				loaded := net != nil
-				if net == nil {
-					net = NewNet()
-				}
-				brain = NewBrainWith(net)
-				if loaded {
-					brain.age = qEpsilonDecay // завантажений = навчений → ε-floor
-				}
+			// Файл ваг залежить від ТИПУ мозку — вбивця вчиться окремо від рою.
+			file := brainFile
+			net, loaded := chaserNet, chaserLoaded
+			if cfg.UsesFlowField {
+				file, net, loaded = killerFile, killerNet, killerLoaded
+			}
+			if !sharedBrain {
+				net, loaded = newNetFor(file) // кожен агент — власна мережа
+			}
+			brain = NewBrainWith(net)
+			if loaded {
+				brain.age = qEpsilonDecay // завантажена = навчена → ε-floor
 			}
 		}
 

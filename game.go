@@ -185,11 +185,17 @@ func (g *Game) trainBrains() {
 // Зберігаємо тільки першого — всі Learner-и починають з однакових ваг,
 // тому зберігати кожного окремо не потрібно на цьому етапі.
 func (g *Game) saveBrains() {
-	for _, e := range g.enemies {
-		if e.Brain != nil {
-			SaveBrain(e.Brain)
-			return
+	// [ДВА ВУЛИКИ] Зберігаємо КОЖНУ унікальну мережу у ЇЇ власний файл (Net.file):
+	// рій і вбивці вчаться незалежно. Дедуплікація по вказівнику — той самий
+	// патерн, що й у trainBrains. Ефемерні мережі (file == "") SaveNet пропустить.
+	seen := map[*Net]bool{}
+	for i := range g.enemies {
+		b := g.enemies[i].Brain
+		if b == nil || b.net == nil || seen[b.net] {
+			continue
 		}
+		seen[b.net] = true
+		SaveNet(b.net)
 	}
 }
 

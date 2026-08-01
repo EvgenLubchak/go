@@ -126,3 +126,55 @@ func TestFlowFieldWalksToPlayer(t *testing.T) {
 	}
 	t.Logf("з усіх клітинок шлях знайдено; найдовший — %d кроків", worst)
 }
+
+// TestKillerInputsUseFlowNotDirect — [ВБИВЦЯ] суть кроку 2b-2: коли між агентом
+// і ціллю СТІНА, напрямок на вході має вести в ОБХІД (flow-field), а не прямо
+// в стіну. Саме через це вбивця ходить коридорами, а реактивний рій — тикається.
+func TestKillerInputsUseFlowNotDirect(t *testing.T) {
+	// Штучна карта: суцільна вертикальна стіна з прорізом угорі.
+	saved := tileMap
+	defer func() { tileMap = saved }()
+	tileMap = [boidMapH][boidMapW]bool{}
+	const wallCol = 20
+	for r := 2; r < boidMapH; r++ { // проріз — у рядках 0..1
+		tileMap[r][wallCol] = true
+	}
+
+	// Ціль ліворуч від стіни, вбивця праворуч, обидва внизу.
+	toPx := func(c, r int) (float32, float32) {
+		return float32(c * pixelSize), float32(r * pixelSize)
+	}
+	px, py := toPx(wallCol-3, boidMapH-3)
+	ex, ey := toPx(wallCol+3, boidMapH-3)
+
+	var flow FlowField
+	flow.rebuild((int(px)+pixelSize/2)/pixelSize, (int(py)+pixelSize/2)/pixelSize)
+	if !flow.valid {
+		t.Fatal("поле не побудувалось")
+	}
+
+	killer := &Pixel{X: ex, Y: ey, Cfg: ConfigKiller}
+	player := &Pixel{X: px, Y: py}
+	in := GatherKillerInputs(killer, player, &flow)
+
+	dirX, dirY := in[inDirX], in[inDirX+1]
+	if dirX == 0 && dirY == 0 {
+		t.Fatal("вбивця не отримав напрямку від flow-field")
+	}
+	// Прямий напрямок — ліворуч (у стіну). Правильний обхід — УГОРУ до прорізу.
+	if dirX < 0 && dirY >= 0 {
+		t.Fatalf("напрямок веде в стіну (прямо на ціль): dir=(%.2f, %.2f)", dirX, dirY)
+	}
+	if dirY >= 0 {
+		t.Fatalf("обхід мав вести вгору до прорізу, а веде dir=(%.2f, %.2f)", dirX, dirY)
+	}
+
+	// Відстань — ПО ЛАБІРИНТУ: обхід довгий, тож помітно більший за прямий шлях.
+	directCells := float32(6) // 6 клітинок по прямій
+	if got := in[inDist] * flowDistNorm; got <= directCells*2 {
+		t.Fatalf("відстань %.1f клітинок схожа на пряму (%.0f), а мала бути по лабіринту",
+			got, directCells)
+	}
+	t.Logf("обхід: dir=(%.2f, %.2f), відстань по лабіринту ≈ %.0f клітинок (прямо було б %.0f)",
+		dirX, dirY, in[inDist]*flowDistNorm, directCells)
+}

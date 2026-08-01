@@ -147,7 +147,14 @@ func (g *Game) calcAcceleration() {
 					// 3. дія = один з 8 напрямків → прискорення туди
 					// e.HitWall (наслідок минулого руху, виставлений у updateEnemies)
 					// стає сигналом штрафу за зіткнення зі стіною.
-					state := GatherInputs(e, &g.player)
+					// [ВБИВЦЯ] Той самий Step, але ІНШИЙ набір входів: замість
+					// прямого напрямку — flow-field (шлях крізь стіни).
+					var state [baseInputs]float32
+					if e.Cfg.UsesFlowField {
+						state = GatherKillerInputs(e, &g.player, &g.flow)
+					} else {
+						state = GatherInputs(e, &g.player)
+					}
 					action := e.Brain.Step(state, dist, e.HitWall)
 
 					e.AccX += dirs8[action][0] * brainForce * g.difficulty

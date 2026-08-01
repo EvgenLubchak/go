@@ -7,7 +7,7 @@ import "math"
 //
 // На вхід мережі йде СТЕК останніх stackFrames кадрів (семпли кожні stackSkip),
 // тобто вікно історії фіксованої довжини, яке задали МИ. Мережа звичайна
-// feedforward: brainInputs(56) → hidden1 → hidden2 → Q(8).
+// feedforward: brainInputs(64) → hidden1 → hidden2 → Q(8).
 //
 // Це історично перший підхід до памʼяті в цьому стенді. Він лишається як:
 //   • BASELINE для порівняння (blind-chase ~55% проти ~61% у GRU),
@@ -144,7 +144,7 @@ func (b *Brain) stepStack(cur [baseInputs]float32, dist float32, hitWall bool) i
 	stacked := b.buildStacked(cur)
 
 	// [МЕТРИКИ ПАМʼЯТІ] Чи бачить агент гравця ЦЬОГО кадру (вхід visible = cur[13]).
-	visible := cur[baseInputs-1] > 0.5
+	visible := cur[inVisible] > 0.5
 
 	// 1) Нагорода за попередню дію → перехід у (можливо спільний) буфер.
 	if b.hasPrev {
@@ -170,7 +170,7 @@ func (b *Brain) stepStack(cur [baseInputs]float32, dist float32, hitWall bool) i
 		}
 		// [1b] плавний штраф за рух У БІК близької стіни: whisker напрямку, в який
 		// пішли минулого кадру. Градієнт «тримай дистанцію» ще ДО зіткнення.
-		reward += rewardNearWall * b.prevState[5+b.prevAction]
+		reward += rewardNearWall * b.prevState[inWhisker0+b.prevAction]
 
 		b.lastReward = reward // [МЕТРИКИ] для середньої нагороди по рою
 		b.net.remember(transition{s: b.prevState, a: b.prevAction, r: reward, s2: stacked})
