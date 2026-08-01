@@ -178,3 +178,58 @@ func TestKillerInputsUseFlowNotDirect(t *testing.T) {
 	t.Logf("обхід: dir=(%.2f, %.2f), відстань по лабіринту ≈ %.0f клітинок (прямо було б %.0f)",
 		dirX, dirY, in[inDist]*flowDistNorm, directCells)
 }
+
+// TestKillerRewardFollowsCorridor — [ВБИВЦЯ] крок 2b-4: коли ціль за стіною,
+// правильний рух (в обхід, УЗДОВЖ коридору) має давати ДОДАТНУ нагороду, хоча
+// пряма відстань при цьому РОСТЕ. Без цього вхід і нагорода суперечать: поле
+// каже «йди в обхід», а нагорода штрафує саме за це — і агент тикається в стіну.
+func TestKillerRewardFollowsCorridor(t *testing.T) {
+	saved := tileMap
+	defer func() { tileMap = saved }()
+	tileMap = [boidMapH][boidMapW]bool{}
+	const wallCol = 20
+	for r := 2; r < boidMapH; r++ { // суцільна стіна, проріз угорі
+		tileMap[r][wallCol] = true
+	}
+
+	toPx := func(c, r int) (float32, float32) {
+		return float32(c * pixelSize), float32(r * pixelSize)
+	}
+	px, py := toPx(wallCol-3, boidMapH-3) // ціль ліворуч від стіни
+	ex, ey := toPx(wallCol+3, boidMapH-3) // вбивця праворуч
+
+	var flow FlowField
+	flow.rebuild((int(px)+pixelSize/2)/pixelSize, (int(py)+pixelSize/2)/pixelSize)
+
+	// Вбивця рухається ВГОРУ — до прорізу. Пряма відстань до цілі при цьому росте.
+	killer := &Pixel{X: ex, Y: ey, VelY: -ConfigKiller.MaxSpeed, Cfg: ConfigKiller,
+		HP: 3, MaxHP: 3, Brain: NewBrain()}
+	killer.Brain.flowNav = true
+	player := &Pixel{X: px, Y: py}
+
+	GatherKillerInputs(killer, player, &flow) // побічно рахує flowProgress
+
+	if killer.Brain.flowProgress <= 0 {
+		t.Fatalf("рух до прорізу мав дати ДОДАТНИЙ прогрес, а дав %.3f", killer.Brain.flowProgress)
+	}
+
+	// А тепер той самий стан очима СТАРОЇ (прямої) метрики: вона б сказала «гірше».
+	dx, dy := px-ex, py-ey
+	distNow := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+	afterY := ey + killer.VelY
+	dyAfter := py - afterY
+	distAfter := float32(math.Sqrt(float64(dx*dx + dyAfter*dyAfter)))
+	if distAfter <= distNow {
+		t.Fatalf("для чистоти тесту пряма відстань мала ЗРОСТИ: %.1f → %.1f", distNow, distAfter)
+	}
+
+	// Нагорода за flow-метрикою — додатна, попри зростання прямої відстані.
+	killer.Brain.prevDist = distNow
+	killer.Brain.hasPrev = true
+	r := killer.Brain.rewardFor(distAfter, false, 0)
+	if r <= 0 {
+		t.Fatalf("нагорода за правильний обхід має бути > 0, а вона %.3f", r)
+	}
+	t.Logf("обхід: прогрес коридором +%.2f → нагорода %+.3f (пряма відстань при цьому %.2f→%.2f — ЗРОСЛА)",
+		killer.Brain.flowProgress, r, distNow, distAfter)
+}

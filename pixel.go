@@ -31,12 +31,18 @@ type EnemyConfig struct {
 	MaxHP           int        // початкове HP
 	Color           color.RGBA // базовий колір; A==0 → колір визначається Aggression
 	Label           string     // мітка всередині пікселя (ЛИШЕ відображення)
+	Count           int        // скільки таких виходить на поле (див. enemyRoster)
 	IsLearner       bool       // true → створюємо Brain (Q-learning); незалежно від Label
 
 	// [ВБИВЦЯ] true → мозок цього типу отримує на вхід FLOW-FIELD (напрямок до
 	// цілі крізь стіни) замість прямого напрямку, і вчиться в ОКРЕМІЙ мережі
 	// (свій вулик + свій файл ваг). Так тонко налаштований рій лишається цілим.
 	UsesFlowField bool
+
+	// [БІЙ] true → до нагороди додаються бойові члени (+ за завдану шкоду,
+	// − за отриману, ++ за вбивство). Окремий прапорець від UsesFlowField, щоб
+	// можна було вмикати їх незалежно (напр. дати бойову нагороду і рою — для A/B).
+	CombatReward bool
 }
 
 // [GO: PACKAGE-LEVEL VAR]
@@ -124,6 +130,7 @@ var (
 		DetectionRange:  300.0, // НЕ впливає на учня (лише debug-коло showDetectionCircle);
 		//                        зір мозку — це sightRange (POMDP) + whiskerRange (вуса)
 		PounceMulti: 0.0,
+		Count:       20,                           // скільки їх на полі
 		MaxHP:       2,                            // живучий — більше часу на навчання
 		Color:       color.RGBA{0, 255, 100, 255}, // зелений — учень
 		Label:       "",
@@ -136,7 +143,7 @@ var (
 	// мережі (killerFile), тож рій лишається недоторканим.
 	//
 	// Швидший і живучіший за рій — щоб «кидок кобри» був відчутним, але їх мало
-	// (killerCount), інакше бій перетвориться на бійню.
+	// (Count), інакше бій перетвориться на бійню.
 	ConfigKiller = EnemyConfig{
 		WanderStrength:  0.05, // майже без хаосу — він цілеспрямований
 		AlignmentRate:   0.0,
@@ -148,11 +155,13 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0, // не впливає (лише debug-коло)
 		PounceMulti:     0.0,
+		Count:           5,                            // мало: вони сильніші за рій
 		MaxHP:           3,                            // витримує на удар більше за рій
 		Color:           color.RGBA{255, 90, 60, 255}, // червоний — щоб одразу вирізняти
 		Label:           "",
 		IsLearner:       true,
 		UsesFlowField:   true, // ← окремий мозок + flow-field на вхід
+		CombatReward:    true, // ← вчиться БИТИ, а не лише наздоганяти
 	}
 
 	ConfigGroup = EnemyConfig{
@@ -171,6 +180,26 @@ var (
 		Label:           "",
 	}
 )
+
+// enemyRoster — СКЛАД поля бою: які типи виходять і (через Count у кожному) по
+// скільки. Прибрати тип = закоментувати рядок; додати новий = дописати рядок.
+//
+// Чому список, а не «перші N — вбивці»: раніше кількість задавалась двома
+// незалежними числами (enemyCount + killerCount), і при enemyCount ≤ killerCount
+// переслідувачі МОВЧКИ зникали. Тепер кожен тип відповідає сам за себе.
+var enemyRoster = []EnemyConfig{
+	ConfigLearner, // зелені: реактивний рій-переслідувач (baseline)
+	ConfigKiller,  // червоні: знають лабіринт (flow-field) + бойова нагорода
+}
+
+// enemyTotal — скільки всього ворогів дає поточний склад.
+func enemyTotal() int {
+	n := 0
+	for _, cfg := range enemyRoster {
+		n += cfg.Count
+	}
+	return n
+}
 
 // Pixel описує одну частинку — гравця або ворога.
 type Pixel struct {
@@ -203,15 +232,13 @@ func aggressionColor(a float32) color.RGBA {
 	}
 }
 
-// newEnemies створює рій: перші killerCount — ВБИВЦІ (ConfigKiller), решта —
-// переслідувачі (ConfigLearner). Явний лічильник, а не modulo — щоб пропорцію
-// було видно й легко крутити.
+// newEnemies створює поле бою за enemyRoster: кожен тип дає cfg.Count юнітів.
 //
 // [ДВА ВУЛИКИ] Типи мозку вчаться НЕЗАЛЕЖНО: у кожного своя спільна мережа і
 // свій файл ваг. Тому зміна reward/входів для вбивці не чіпає тонко налаштований
 // рій — і навпаки.
-func newEnemies(count int) []Pixel {
-	enemies := make([]Pixel, count)
+func newEnemies() []Pixel {
+	enemies := make([]Pixel, 0, enemyTotal())
 
 	// [SHARED BRAIN] У режимі sharedBrain усі агенти ОДНОГО типу ділять одну
 	// мережу (вулик-розум). Створюємо/вантажимо по одній на тип; нижче кожен
@@ -223,66 +250,68 @@ func newEnemies(count int) []Pixel {
 		killerNet, killerLoaded = newNetFor(killerFile)
 	}
 
-	for i := range enemies {
-		cfg := ConfigLearner
-		if i < killerCount {
-			cfg = ConfigKiller
-		}
+	i := -1 // наскрізний номер юніта — для циклічного перебору спавн-точок
+	for _, cfg := range enemyRoster {
+		for k := 0; k < cfg.Count; k++ {
+			i++
 
-		// Boid: колір і агресія рандомні. Інші: фіксований колір, агресія 1.0.
-		// [GO: ZERO VALUE CHECK] cfg.Color.A == 0 → Color не виставлений → Boid
-		aggression := float32(1.0)
-		col := cfg.Color
-		if col.A == 0 {
-			aggression = rand.Float32()
-			col = aggressionColor(aggression)
-		}
-
-		// Спавн: якщо в levelLayout є 'E' → циклічно по ним; інакше — рандом.
-		// [GO: MODULO] i%len(enemySpawns) — циклічний перебір без виходу за межі.
-		var spawnX, spawnY float32
-		if len(enemySpawns) > 0 {
-			sp := enemySpawns[i%len(enemySpawns)]
-			spawnX, spawnY = sp.X, sp.Y
-		} else {
-			spawnX = float32(rand.Intn(screenWidth - pixelSize))
-			spawnY = float32(rand.Intn(screenHeight - pixelSize))
-		}
-
-		// [GO: POINTER = nil для звичайних ворогів]
-		// Brain створюємо тільки для Learner (cfg.IsLearner). Тригер — прапорець,
-		// НЕ мітка. У режимі sharedBrain усі вказують на спільну мережу; інакше —
-		// кожен має власну (завантажену з файлу або нову).
-		var brain *Brain
-		if cfg.IsLearner {
-			// Файл ваг залежить від ТИПУ мозку — вбивця вчиться окремо від рою.
-			file := brainFile
-			net, loaded := chaserNet, chaserLoaded
-			if cfg.UsesFlowField {
-				file, net, loaded = killerFile, killerNet, killerLoaded
+			// Boid: колір і агресія рандомні. Інші: фіксований колір, агресія 1.0.
+			// [GO: ZERO VALUE CHECK] cfg.Color.A == 0 → Color не виставлений → Boid
+			aggression := float32(1.0)
+			col := cfg.Color
+			if col.A == 0 {
+				aggression = rand.Float32()
+				col = aggressionColor(aggression)
 			}
-			if !sharedBrain {
-				net, loaded = newNetFor(file) // кожен агент — власна мережа
-			}
-			brain = NewBrainWith(net)
-			if loaded {
-				brain.age = qEpsilonDecay // завантажена = навчена → ε-floor
-			}
-		}
 
-		enemies[i] = Pixel{
-			X:          spawnX,
-			Y:          spawnY,
-			VelX:       (rand.Float32() - 0.5) * cfg.MaxSpeed,
-			VelY:       (rand.Float32() - 0.5) * cfg.MaxSpeed,
-			Aggression: aggression,
-			HP:         cfg.MaxHP,
-			MaxHP:      cfg.MaxHP,
-			Faction:    factionEnemy, // [БІЙ] увесь рій — одна фракція
-			Color:      col,
-			Label:      cfg.Label,
-			Cfg:        cfg,
-			Brain:      brain,
+			// Спавн: якщо в levelLayout є 'E' → циклічно по ним; інакше — рандом.
+			// [GO: MODULO] i%len(enemySpawns) — циклічний перебір без виходу за межі.
+			var spawnX, spawnY float32
+			if len(enemySpawns) > 0 {
+				sp := enemySpawns[i%len(enemySpawns)]
+				spawnX, spawnY = sp.X, sp.Y
+			} else {
+				spawnX = float32(rand.Intn(screenWidth - pixelSize))
+				spawnY = float32(rand.Intn(screenHeight - pixelSize))
+			}
+
+			// [GO: POINTER = nil для звичайних ворогів]
+			// Brain створюємо тільки для Learner (cfg.IsLearner). Тригер — прапорець,
+			// НЕ мітка. У режимі sharedBrain усі вказують на спільну мережу; інакше —
+			// кожен має власну (завантажену з файлу або нову).
+			var brain *Brain
+			if cfg.IsLearner {
+				// Файл ваг залежить від ТИПУ мозку — вбивця вчиться окремо від рою.
+				file := brainFile
+				net, loaded := chaserNet, chaserLoaded
+				if cfg.UsesFlowField {
+					file, net, loaded = killerFile, killerNet, killerLoaded
+				}
+				if !sharedBrain {
+					net, loaded = newNetFor(file) // кожен агент — власна мережа
+				}
+				brain = NewBrainWith(net)
+				brain.combat = cfg.CombatReward   // [БІЙ] бойові члени нагороди
+				brain.flowNav = cfg.UsesFlowField // [ВБИВЦЯ] прогрес міряємо вздовж коридору
+				if loaded {
+					brain.age = qEpsilonDecay // завантажена = навчена → ε-floor
+				}
+			}
+
+			enemies = append(enemies, Pixel{
+				X:          spawnX,
+				Y:          spawnY,
+				VelX:       (rand.Float32() - 0.5) * cfg.MaxSpeed,
+				VelY:       (rand.Float32() - 0.5) * cfg.MaxSpeed,
+				Aggression: aggression,
+				HP:         cfg.MaxHP,
+				MaxHP:      cfg.MaxHP,
+				Faction:    factionEnemy, // [БІЙ] увесь рій — одна фракція
+				Color:      col,
+				Label:      cfg.Label,
+				Cfg:        cfg,
+				Brain:      brain,
+			})
 		}
 	}
 	return enemies

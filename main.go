@@ -16,11 +16,9 @@ const (
 	screenWidth  = 1680
 	screenHeight = 960
 	pixelSize    = 25
-	enemyCount   = 15
-	// [ВБИВЦЯ] Скільки з enemyCount — вбивці (ConfigKiller, знають лабіринт через
-	// flow-field, вчаться в ОКРЕМІЙ мережі). Решта — звичайний рій-переслідувач.
-	// Тримаємо малим: вони сильніші, інакше бій стане бійнею.
-	killerCount = 3
+	// [СКЛАД ПОЛЯ] Кількість ворогів більше НЕ тут: кожен тип несе своє поле Count,
+	// а хто виходить на поле — список enemyRoster (pixel.go). Так додати новий тип
+	// = один рядок, і неможливо мовчки лишитись без переслідувачів.
 
 	// Глобальна фізика — однакова для всіх типів ворогів.
 	// Поведінка (швидкість, агресія, burst) — в EnemyConfig у pixel.go.
@@ -122,7 +120,7 @@ func main() {
 			Color:   color.RGBA{R: 0, G: 255, B: 180, A: 255},
 			Label:   "Y}{IJIEC",
 		},
-		enemies: newEnemies(enemyCount),
+		enemies: newEnemies(),
 	}
 
 	// [SELF-PLAY] Даємо гравцю власний мозок-жертву (flee=true → reward за ВТЕЧУ).

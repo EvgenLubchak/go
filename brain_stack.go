@@ -143,8 +143,10 @@ func (b *Brain) stepStack(cur [baseInputs]float32, dist float32, hitWall bool) i
 	// (тому maxWhisker/escapeAction/proximity-reward працюють без змін).
 	stacked := b.buildStacked(cur)
 
-	// [МЕТРИКИ ПАМʼЯТІ] Чи бачить агент гравця ЦЬОГО кадру (вхід visible = cur[13]).
-	visible := cur[inVisible] > 0.5
+	// [МЕТРИКИ ПАМʼЯТІ] Чи бачить агент гравця цього кадру. Вбивця ВСЕВИДЮЩИЙ
+	// (flow-field глобальний), і слот 13 у
+	// нього — не visible, а швидкість цілі. Читати його як видимість не можна.
+	visible := b.flowNav || cur[inVisible] > 0.5
 
 	// 1) Нагорода за попередню дію → перехід у (можливо спільний) буфер.
 	if b.hasPrev {
@@ -152,33 +154,23 @@ func (b *Brain) stepStack(cur [baseInputs]float32, dist float32, hitWall bool) i
 		// МИНУЛОГО кадру. Якщо тоді агент був СЛІПИЙ (prevVisible=false) — це
 		// «сліпе рішення»; фіксуємо, чи він усе одно наблизився. Реактивний агент
 		// без памʼяті наосліп ≈ випадковий; агент із памʼяттю тримає слід → частіше +.
-		if !b.prevVisible {
+		if !b.flowNav && !b.prevVisible {
 			b.mBlindN++
 			if dist < b.prevDist {
 				b.mBlindClosed++
 			}
 		}
-		// [RL: REWARD SHAPING]
-		// Хижак: наблизився → +. [SELF-PLAY] Жертва (flee): інвертуємо — далі → +.
-		sign := float32(1)
-		if b.flee {
-			sign = -1
-		}
-		reward := sign * (b.prevDist - dist) * rewardCloserScale
-		if hitWall {
-			reward += rewardWallHit // [1a] по факту удару
-		}
-		// [1b] плавний штраф за рух У БІК близької стіни: whisker напрямку, в який
-		// пішли минулого кадру. Градієнт «тримай дистанцію» ще ДО зіткнення.
-		reward += rewardNearWall * b.prevState[inWhisker0+b.prevAction]
-
-		b.lastReward = reward // [МЕТРИКИ] для середньої нагороди по рою
+		// Нагорода — у спільному rewardFor (див. brain.go). Вус напрямку, в який
+		// агент пішов минулого кадру, беремо з ПЕРШОГО кадру попереднього стеку.
+		reward := b.rewardFor(dist, hitWall, b.prevState[inWhisker0+b.prevAction])
 		b.net.remember(transition{s: b.prevState, a: b.prevAction, r: reward, s2: stacked})
 	}
 
 	// 2) [2] Anti-stuck. КЛЮЧОВЕ: якщо агент наближається до гравця — він НЕ
 	//    застряг (хай навіть тернеться об стіну, productively ковзаючи вздовж неї).
-	madeProgress := b.hasPrev && dist < b.prevDist-stuckProgressEps
+	// Прогрес — за метрикою ЦЬОГО типу мозку (пряма для рою, коридор для вбивці),
+	// щоб anti-stuck не сварив вбивцю саме за обхід стіни.
+	madeProgress := b.hasPrev && b.progressToward(dist) > stuckProgressEps
 	switch {
 	case madeProgress:
 		if b.stuckCounter > 0 {

@@ -59,13 +59,27 @@ func impactThreshold(ownMaxSpeed float32) float32 {
 
 // applyImpactDamage завдає шкоди, якщо ціль не в невразливості.
 // Працює однаково для гравця і для ворога (обидва — Pixel).
-func applyImpactDamage(p *Pixel) {
-	if p.InvulnTimer > 0 {
+//
+// [БІЙ: АТРИБУЦІЯ] Записує подію обом сторонам у лічильники мозку — це
+// сировина для бойової нагороди (rewardFor споживає й обнуляє їх наступного
+// кадру). attacker може бути nil (напр. шкода не від агента).
+func applyImpactDamage(attacker, target *Pixel) {
+	if target.InvulnTimer > 0 {
 		return
 	}
-	p.HP -= impactDamage
-	p.HitTimer = hitFlashDuration // біле блимання (вже було для удару гравця)
-	p.InvulnTimer = impactInvuln
+	target.HP -= impactDamage
+	target.HitTimer = hitFlashDuration // біле блимання (вже було для удару гравця)
+	target.InvulnTimer = impactInvuln
+
+	if attacker != nil && attacker.Brain != nil {
+		attacker.Brain.dmgDealt += impactDamage
+		if target.HP <= 0 {
+			attacker.Brain.kills++ // добив — головна ціль бойової нагороди
+		}
+	}
+	if target.Brain != nil {
+		target.Brain.dmgTaken += impactDamage
+	}
 }
 
 // resolveImpacts — [БІЙ] проходить пари, що перетинаються, і завдає шкоди за
@@ -90,12 +104,12 @@ func (g *Game) resolveImpacts() {
 		}
 		// Гравець таранить ворога.
 		if closingSpeed(g.player.VelX, g.player.VelY, nx, ny) >= impactThreshold(playerMax) {
-			applyImpactDamage(e)
+			applyImpactDamage(&g.player, e)
 		}
 		// Ворог кидається на гравця (напрямок навпаки).
 		eMax := e.Cfg.MaxSpeed * g.difficulty
 		if eMax > 0 && closingSpeed(e.VelX, e.VelY, -nx, -ny) >= impactThreshold(eMax) {
-			applyImpactDamage(&g.player)
+			applyImpactDamage(e, &g.player)
 		}
 	}
 
@@ -120,10 +134,10 @@ func (g *Game) resolveImpacts() {
 			aMax := a.Cfg.MaxSpeed * g.difficulty
 			bMax := b.Cfg.MaxSpeed * g.difficulty
 			if aMax > 0 && closingSpeed(a.VelX, a.VelY, nx, ny) >= impactThreshold(aMax) {
-				applyImpactDamage(b)
+				applyImpactDamage(a, b)
 			}
 			if bMax > 0 && closingSpeed(b.VelX, b.VelY, -nx, -ny) >= impactThreshold(bMax) {
-				applyImpactDamage(a)
+				applyImpactDamage(b, a)
 			}
 		}
 	}

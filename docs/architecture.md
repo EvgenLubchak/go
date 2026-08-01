@@ -6,12 +6,16 @@
 |------|---------------|
 | `main.go` | Constants, font init, `main()` entry point |
 | `game.go` | `Game` struct, `Update()` game loop, `restart()` |
-| `pixel.go` | `Pixel` struct, `EnemyConfig`, 3 enemy type configs, `newEnemies()` |
+| `pixel.go` | `Pixel` struct, `EnemyConfig` (+`Count`), конфіги типів, **`enemyRoster`** (склад поля), фракції, `newEnemies()` |
 | `player.go` | Player input handling, velocity/friction physics |
 | `boids.go` | Boid AI: `updateBoidMap`, `calcAcceleration`, `updateEnemies`, стигмергія (феромони) |
-| `brain.go` | Q-learning мозок: `Net`/`Brain`, forward, `Step`, `tdUpdate`, whiskers, save/load. Див. [ai-brain.md](ai-brain.md) |
+| `brain.go` | Мозок — **спільне ядро**: `Net`/`Brain`, індекси слотів, ε-greedy, `rewardFor`, whiskers, save/load, диспетчери `Step`/`train`. Див. [ai-brain.md](ai-brain.md) |
+| `brain_stack.go` | Шлях памʼяті **frame-stacking** (`useGRU=false`): `forwardQ`, `tdUpdate`, `stepStack` |
+| `brain_gru.go` | Шлях памʼяті **GRU** (`useGRU=true`): `forwardGRU`, `tdUpdateSeq` (BPTT), `stepGRU` |
+| `flowfield.go` | **Pathfinding**: BFS-хвиля від гравця, поле напрямків, `dirAt`/`distAt`, візуалізація (`V`) |
+| `metrics.go` | Панель метрик навчання (`G`): reward/TD/maxQ, blind-chase, catch-rate |
 | `level.go` | Тайлова мапа рівня, спавни, `isWallAt`/`isWallRect` |
-| `combat.go` | AABB collision, SPACE attack, HP damage, dead enemy removal |
+| `combat.go` | AABB collision, **[БІЙ] `resolveImpacts`** (шкода від closing speed + атрибуція), SPACE attack, смерть гравця, dead enemy removal |
 | `render.go` | Малювання виду ЗВЕРХУ: pixels, HP bars, HUD, game over |
 | `render3d.go` | Raycaster: вид від 1-ї особи (стіни + спрайти). Див. [raycaster.md](raycaster.md) |
 | `sound.go` | Procedural 8-bit audio, drum patterns, BPM scaling |
@@ -22,17 +26,22 @@
 
 ```
 Update():
-  input → handlePlayerInput()
-        → updatePlayer()       (friction, max speed, wrap-around)
+  input → handlePlayerInput() | updatePrey()   ([SELF-PLAY] мозок-жертва замість клавіш)
+        → updatePlayer()       (friction, max speed, стіни й межа)
+        → updateFlowField()    (BFS від гравця — лише коли змінив клітинку)
         → playerAttack()       (SPACE → damage enemies in radius)
         → updateBoidMap()      (rebuild 2D grid of enemy positions)
-        → calcAcceleration()   (boids alignment + predator chase) ← parallel goroutines
+        → calcAcceleration()   (boids + Brain.Step) ← parallel goroutines
+        → trainBrains()        (навчання кожної УНІКАЛЬНОЇ мережі, однопотоково)
+        → metrics.collect()
         → updateEnemies()      (wander, burst, apply accel, bounce walls)
+        → resolveImpacts()     ([БІЙ] шкода від удару на швидкості + атрибуція)
         → removeDeadEnemies()  (filter slice in-place)
-        → checkCollisions()    (enemy touches player → game over)
+        → checkCollisions()    (HP гравця ≤ 0 → game over / respawn у self-play)
 
 Draw():
-  background → enemies (HP bar + label) → player → attack ring → HUD
+  background → [flow-field] → enemies (сенсори, HP bar) → player → attack ring
+             → HUD (HP, LVL, FPS) → [панель метрик]
 ```
 
 ---
@@ -83,13 +92,21 @@ type EnemyConfig struct {
 
 ## Enemy Types
 
-| Type | Label | Behavior |
-|------|-------|----------|
-| **Boid** | `FOE` | Flocks with neighbors, moderate aggression, color varies by Aggression |
-| **Predator** | `PRD` | Red, 5HP, large detection (160px), powerful pounce ×14, ignores flock |
-| **Speeder** | `SPD` | Yellow, 1HP, very fast (2.8), chaotic wander, frequent bursts |
+**Активні зараз** (список `enemyRoster` у `pixel.go`; кількість — поле `Count` у
+кожному конфізі):
 
-Enemies cycle: `FOE, PRD, SPD, FOE, PRD, SPD, ...` (index % 3)
+| Type | Колір | Мозок | Поведінка |
+|------|-------|-------|-----------|
+| **Learner** | зелений | вулик `brain_weights.json` | Реактивний переслідувач, POMDP (`localSight`), памʼять GRU. **Baseline** — навмисно не знає лабіринту |
+| **Killer** | червоний | вулик `killer_weights.json` | Знає лабіринт (**flow-field на вході**), всевидющий, швидший (1.6), 3 HP, **бойова нагорода** |
+
+Обидва типи вчаться **незалежно** (окремі мережі + окремі файли ваг), тож зміни для
+вбивці не чіпають налаштований рій. Деталі — [ai-brain.md](ai-brain.md).
+
+**Скриптовані типи** (без мозку) лишились у коді як приклади конфігурації, але не в
+складі поля: `Boid` (флокується), `Predator` (повільний, сильний кидок), `Speeder`
+(швидкий і крихкий), `HP`, `Group`. Щоб повернути в бій — дописати в `enemyRoster`
+і виставити `Count`.
 
 ---
 

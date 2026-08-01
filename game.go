@@ -66,7 +66,7 @@ func (g *Game) restart() {
 	g.player.InvulnTimer = 0
 	g.attackCooldown = 0
 	g.attackTimer = 0
-	g.enemies = newEnemies(enemyCount)
+	g.enemies = newEnemies()
 	g.gameOver = false
 	g.tick = 0
 	g.difficulty = 1.0

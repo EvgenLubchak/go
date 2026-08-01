@@ -266,14 +266,16 @@ func TestSaveLoadGRURoundTrip(t *testing.T) {
 // рій вчаться в РІЗНИХ мережах і зберігаються в різні файли. Якщо це зламається,
 // зміна reward для вбивці мовчки перетре тонко налаштований рій.
 func TestKillerHasSeparateHive(t *testing.T) {
-	if killerCount == 0 {
-		t.Skip("killerCount = 0 — вбивць немає")
-	}
-	saved := sharedBrain
+	// [СКЛАД ПОЛЯ] Тест не залежить від бойового балансу: підставляємо власний
+	// roster (по одному юніту кожного типу), а справжній повертаємо через defer.
+	savedRoster, savedShared := enemyRoster, sharedBrain
+	defer func() { enemyRoster, sharedBrain = savedRoster, savedShared }()
 	sharedBrain = true
-	defer func() { sharedBrain = saved }()
+	chaser, killer := ConfigLearner, ConfigKiller
+	chaser.Count, killer.Count = 2, 2
+	enemyRoster = []EnemyConfig{chaser, killer}
 
-	enemies := newEnemies(killerCount + 3) // гарантовано обидва типи
+	enemies := newEnemies()
 	var killerNet, chaserNet *Net
 	for i := range enemies {
 		b := enemies[i].Brain
@@ -334,4 +336,64 @@ func TestSaveBrainsWritesEachHive(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("у теці %d файлів, очікували 2 (ефемерна мережа не мала зберігатись)", len(entries))
 	}
+}
+
+// TestCombatRewardAndAttribution — [БІЙ] крок 2b-3: перевіряє два звʼязані місця.
+//  1. resolveImpacts правильно АТРИБУТУЄ удар: хто завдав, хто отримав, хто добив;
+//  2. rewardFor перетворює це на нагороду — але ЛИШЕ для мозків із combat=true,
+//     а лічильники обнуляє ЗАВЖДИ (інакше в рою вони росли б вічно).
+func TestCombatRewardAndAttribution(t *testing.T) {
+	// --- Частина 1: атрибуція в resolveImpacts ---
+	attacker := Pixel{X: 100, Y: 100, VelX: ConfigKiller.MaxSpeed, Cfg: ConfigKiller,
+		HP: 3, MaxHP: 3, Faction: factionEnemy, Brain: NewBrain()}
+	victim := Pixel{X: 110, Y: 100, Cfg: ConfigLearner, // стоїть на місці
+		HP: 1, MaxHP: 2, Faction: factionPlayer, Brain: NewBrain()}
+
+	g := &Game{difficulty: 1.0, enemies: []Pixel{attacker, victim}}
+	g.resolveImpacts()
+
+	a, v := &g.enemies[0], &g.enemies[1]
+	if a.Brain.dmgDealt != impactDamage {
+		t.Fatalf("нападнику не зараховано шкоду: dmgDealt=%d", a.Brain.dmgDealt)
+	}
+	if v.Brain.dmgTaken != impactDamage {
+		t.Fatalf("жертві не зараховано отриману шкоду: dmgTaken=%d", v.Brain.dmgTaken)
+	}
+	if a.Brain.kills != 1 {
+		t.Fatalf("ціль загинула (HP=%d), але вбивство не зараховано: kills=%d", v.HP, a.Brain.kills)
+	}
+	if v.Brain.dmgDealt != 0 {
+		t.Fatalf("нерухома жертва не мала завдати шкоди, а має dmgDealt=%d", v.Brain.dmgDealt)
+	}
+
+	// --- Частина 2: нагорода з цих лічильників ---
+	// Той самий стан, але два мозки: бойовий і звичайний. Різниця має дорівнювати
+	// рівно бойовим членам.
+	mk := func(combat bool) *Brain {
+		b := NewBrain()
+		b.combat = combat
+		b.prevDist = 100 // дистанція не змінилась → щільний член = 0
+		b.dmgDealt, b.dmgTaken, b.kills = 2, 1, 1
+		return b
+	}
+	plain, fighter := mk(false), mk(true)
+	rPlain := plain.rewardFor(100, false, 0)
+	rFight := fighter.rewardFor(100, false, 0)
+
+	want := float32(rewardDamageDealt*2 + rewardDamageTaken*1 + rewardKill*1)
+	if got := rFight - rPlain; got != want {
+		t.Fatalf("бойова добавка %.2f, очікували %.2f", got, want)
+	}
+	if rPlain != 0 {
+		t.Fatalf("небойовий мозок мав отримати 0, а отримав %.2f", rPlain)
+	}
+	// Лічильники обнуляються в ОБОХ.
+	for name, b := range map[string]*Brain{"небойовий": plain, "бойовий": fighter} {
+		if b.dmgDealt != 0 || b.dmgTaken != 0 || b.kills != 0 {
+			t.Fatalf("%s мозок не обнулив лічильники: %d/%d/%d",
+				name, b.dmgDealt, b.dmgTaken, b.kills)
+		}
+	}
+	t.Logf("бойова добавка = %.1f (шкода +%.0f/−%.0f, вбивство +%.0f)",
+		want, rewardDamageDealt, -rewardDamageTaken, rewardKill)
 }

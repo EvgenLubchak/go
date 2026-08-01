@@ -185,27 +185,22 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, dist float32, hitWall bool) int
 	q, hNew := b.net.forwardGRU(cur, b.h)
 	b.h = hNew
 
-	visible := cur[inVisible] > 0.5
+	// [МЕТРИКИ ПАМʼЯТІ] Вбивця ВСЕВИДЮЩИЙ (flow-field глобальний), і слот 13 у
+	// нього — не visible, а швидкість цілі. Читати його як видимість не можна.
+	visible := b.flowNav || cur[inVisible] > 0.5
 
 	// Нагорода за ПОПЕРЕДНЮ дію (та сама схема, що й у стек-шляху) → крок у відрізок.
 	if b.hasPrev {
 		// [МЕТРИКИ ПАМʼЯТІ] blind-chase (як у стек-шляху).
-		if !b.prevVisible {
+		if !b.flowNav && !b.prevVisible {
 			b.mBlindN++
 			if dist < b.prevDist {
 				b.mBlindClosed++
 			}
 		}
-		sign := float32(1)
-		if b.flee {
-			sign = -1
-		}
-		reward := sign * (b.prevDist - dist) * rewardCloserScale
-		if hitWall {
-			reward += rewardWallHit
-		}
-		reward += rewardNearWall * b.gruPrevX[inWhisker0+b.prevAction]
-		b.lastReward = reward
+		// Нагорода — у спільному rewardFor (див. brain.go); вус напрямку минулої
+		// дії беремо з попереднього кадру цього агента.
+		reward := b.rewardFor(dist, hitWall, b.gruPrevX[inWhisker0+b.prevAction])
 
 		// Записуємо завершений крок (x_{t-1}, a_{t-1}, r) у накопичувач відрізка.
 		b.seqX[b.seqN] = b.gruPrevX
@@ -220,7 +215,9 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, dist float32, hitWall bool) int
 	}
 
 	// Anti-stuck — та сама сітка безпеки, що й у стек-режимі (по вусах кадру).
-	madeProgress := b.hasPrev && dist < b.prevDist-stuckProgressEps
+	// Прогрес — за метрикою ЦЬОГО типу мозку (пряма для рою, коридор для вбивці),
+	// щоб anti-stuck не сварив вбивцю саме за обхід стіни.
+	madeProgress := b.hasPrev && b.progressToward(dist) > stuckProgressEps
 	switch {
 	case madeProgress:
 		if b.stuckCounter > 0 {
