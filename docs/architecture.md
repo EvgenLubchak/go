@@ -13,7 +13,8 @@
 | `brain_stack.go` | Шлях памʼяті **frame-stacking** (`useGRU=false`): `forwardQ`, `tdUpdate`, `stepStack` |
 | `brain_gru.go` | Шлях памʼяті **GRU** (`useGRU=true`): `forwardGRU`, `tdUpdateSeq` (BPTT), `stepGRU` |
 | `flowfield.go` | **Pathfinding**: BFS-хвиля від гравця, поле напрямків, `dirAt`/`distAt`, візуалізація (`V`) |
-| `metrics.go` | Панель метрик навчання (`G`): reward/TD/maxQ, blind-chase, catch-rate |
+| `metrics.go` | Панель метрик навчання (`G`): reward/TD/maxQ по вуликах, частка часу наосліп, blind-chase (котлова й по агентах), catch-rate, ярлик конфігурації |
+| `bench_test.go` | Безголовий стенд замірів: цикл гри без графіки, скриптований гравець, десятки прогонів на конфіг (`BOIDS_BENCH=1`) |
 | `level.go` | Тайлова мапа рівня, спавни, `isWallAt`/`isWallRect` |
 | `combat.go` | AABB collision, **[БІЙ] `resolveImpacts`** (шкода від closing speed + атрибуція), SPACE attack, смерть гравця, dead enemy removal |
 | `render.go` | Малювання виду ЗВЕРХУ: pixels, HP bars, HUD, game over |

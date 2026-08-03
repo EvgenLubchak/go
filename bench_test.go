@@ -45,10 +45,11 @@ import (
 // benchCfg — одна конфігурація памʼяті для порівняння.
 type benchCfg struct {
 	name   string
-	gru    bool // useGRU
-	frames int  // memFrames: скільки слотів стеку несуть історію
-	skip   int  // stackSkip: кадрів між семплами
-	units  int  // скільки учнів на полі (1 перевіряє гіпотезу «рій замінює памʼять»)
+	gru    bool    // useGRU
+	frames int     // memFrames: скільки слотів стеку несуть історію
+	skip   int     // stackSkip: кадрів між семплами
+	units  int     // скільки учнів на полі (1 перевіряє гіпотезу «рій замінює памʼять»)
+	gruLR  float32 // gruLearnRate; 0 = лишити поточний
 }
 
 // benchOut — те, що знімаємо з одного вікна заміру.
@@ -100,6 +101,22 @@ func TestMemoryBench(t *testing.T) {
 			{name: "4/60   (1.5с)", frames: 4, skip: 60, units: 1},
 			{name: "4/120  (3.0с)", frames: 4, skip: 120, units: 1},
 			{name: "2/180  (1.5с, рідко)", frames: 2, skip: 180, units: 1},
+		}
+	}
+	if os.Getenv("BENCH_SET") == "gru" {
+		// [GRU НА ОДИНАКУ] Дірка, яку лишили попередні заміри: GRU перевірявся
+		// ЛИШЕ при восьми юнітах, де рій сам вирішує задачу й памʼять не потрібна
+		// нікому. Там він дав 54.8% проти 59.8% у конфігу без памʼяті — але з
+		// Q ≈ 0, тобто не навчившись. Судити з цього про рекурентність не можна.
+		//
+		// Два темпи навчання розділяють дві причини: якщо 0.005 підтягне GRU до
+		// стека — винне було наше гальмування; якщо ні — рекурентний шлях у цій
+		// задачі справді слабший за стек.
+		cfgs = []benchCfg{
+			{name: "стек 1/–   ×1 (база)", frames: 1, skip: 10, units: 1},
+			{name: "стек 2/180 ×1 (кращий)", frames: 2, skip: 180, units: 1},
+			{name: "GRU lr 0.002 ×1", gru: true, frames: 4, skip: 10, units: 1, gruLR: 0.002},
+			{name: "GRU lr 0.005 ×1", gru: true, frames: 4, skip: 10, units: 1, gruLR: 0.005},
 		}
 	}
 
@@ -193,12 +210,17 @@ func benchList(v []float32) string {
 func runBenchTrial(c benchCfg, warmup, measure int, moving bool) (live, frozen benchOut) {
 	savedRoster, savedGRU := unitRoster, useGRU
 	savedSkip, savedFrames, savedFrozen := stackSkip, memFrames, frozenPolicy
+	savedLR := gruLearnRate
 	defer func() {
 		unitRoster, useGRU = savedRoster, savedGRU
 		stackSkip, memFrames, frozenPolicy = savedSkip, savedFrames, savedFrozen
+		gruLearnRate = savedLR
 	}()
 
 	useGRU, stackSkip, memFrames, frozenPolicy = c.gru, c.skip, c.frames, false
+	if c.gruLR > 0 {
+		gruLearnRate = c.gruLR
+	}
 
 	learner := ConfigLearner
 	learner.Count = c.units
