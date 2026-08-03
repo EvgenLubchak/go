@@ -44,6 +44,30 @@ func drawTextL(screen *ebiten.Image, str string, size, x, y float64, clr color.R
 	etext.Draw(screen, str, face, op)
 }
 
+// drawFur — [ВОРС] хутро юніта: 2 сегменти на ворсинку (корінь→середина→кінчик).
+// Малюємо ПЕРЕД тілом, щоб корені ховались під квадратом.
+//
+// [GO/EBITEN: ПРЕМНОЖЕНА АЛЬФА] color.RGBA тут трактується як premultiplied:
+// щоб отримати напівпрозорий колір, RGB треба помножити на частку альфи, а не
+// просто зменшити A — інакше вийде перепалений відтінок.
+func drawFur(screen *ebiten.Image, p *Pixel) {
+	const a = 165
+	col := color.RGBA{
+		R: uint8(int(p.Color.R) * a / 255),
+		G: uint8(int(p.Color.G) * a / 255),
+		B: uint8(int(p.Color.B) * a / 255),
+		A: a,
+	}
+	cx := p.X + pixelSize/2
+	cy := p.Y + pixelSize/2
+	for i := 0; i < furStrands; i++ {
+		mx, my := p.Fur[i][0][0], p.Fur[i][0][1]
+		tx, ty := p.Fur[i][1][0], p.Fur[i][1][1]
+		vector.StrokeLine(screen, cx, cy, mx, my, 2, col, false)
+		vector.StrokeLine(screen, mx, my, tx, ty, 1, col, false)
+	}
+}
+
 // drawPixel малює квадрат з flash-ефектом, HP bar і міткою.
 func drawPixel(screen *ebiten.Image, p Pixel) {
 	// Flash: поки HitTimer > 0 — малюємо білим
@@ -149,7 +173,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			g.drawFlowField(screen)
 		}
 
-		for _, e := range g.units {
+		for i, e := range g.units {
 			// Радіус огляду — дуже прозоре кільце навколо ворога
 			cx := e.X + pixelSize/2
 			cy := e.Y + pixelSize/2
@@ -159,8 +183,10 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			if showWhiskers && e.Brain != nil {
 				drawBrainSensors(screen, e, cx, cy)
 			}
+			drawFur(screen, &g.units[i])
 			drawPixel(screen, e)
 		}
+		drawFur(screen, &g.player)
 		drawPixel(screen, g.player)
 
 		// Кільце атаки — StrokeCircle (контур) замість DrawFilledCircle (заповнене).
@@ -191,6 +217,19 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	drawText(screen, fmt.Sprintf("SPD %.1f", playerSpeed), 10, screenWidth-32, 10, cyan)
 	drawText(screen, fmt.Sprintf("DIF %.1f", g.difficulty), 10, screenWidth-32, 25, color.RGBA{255, 140, 50, 255})
 	drawText(screen, fmt.Sprintf("FPS %.0f", fps), 10, screenWidth/2, 10, color.RGBA{150, 150, 150, 255})
+
+	// [ЗАМІРИ] TPS окремо від FPS — це РІЗНІ речі, і плутанина між ними вже раз
+	// зіпсувала висновок. FPS = частота МАЛЮВАННЯ (Draw, темп монітора), TPS =
+	// частота ЛОГІКИ (Update, наші тіки). Коли важчає обчислення (наприклад BPTT
+	// у GRU), просідає TPS, а FPS лишається 120 — і на скріні все «нормально».
+	// Червоний = логіка не встигає за цільовим темпом: годинниковий час на скріні
+	// більше не перекладається в тіки один в один.
+	tps := ebiten.ActualTPS()
+	tpsCol := color.RGBA{150, 150, 150, 255}
+	if tps < float64(ebiten.TPS())*0.9 {
+		tpsCol = color.RGBA{240, 120, 60, 255}
+	}
+	drawText(screen, fmt.Sprintf("TPS %.0f", tps), 10, screenWidth/2, 25, tpsCol)
 
 	if g.gameOver {
 		cx := float64(screenWidth) / 2

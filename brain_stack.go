@@ -9,10 +9,11 @@ import "math"
 // тобто вікно історії фіксованої довжини, яке задали МИ. Мережа звичайна
 // feedforward: brainInputs(64) → hidden1 → hidden2 → Q(8).
 //
-// Це історично перший підхід до памʼяті в цьому стенді. Він лишається як:
-//   • BASELINE для порівняння (blind-chase ~55% проти ~61% у GRU),
-//   • FALLBACK, якщо рекурентна політика попливе,
-//   • предмет тестів ядра Q-learning (TestQLearningTDUpdate / ChasesNoWalls).
+// Історично перший підхід до памʼяті — і за підсумком замірів ДЕФОЛТНИЙ. Старе
+// твердження «blind-chase ~55% проти ~61% у GRU» знято: воно спиралось на метрику,
+// забруднену рухом гравця, і на два прогони. На безголовому стенді (bench_test.go,
+// 10–24 прогони на конфіг) стек виявився не гіршим за GRU в жодному режимі, а GRU
+// ще й тримав Q ≈ 0 — тобто просто не встигав навчитись при gruLearnRate 0.002.
 //
 // Рекурентний шлях — у brain_gru.go. Спільне ядро — у brain.go.
 // ==========================================================================
@@ -31,7 +32,10 @@ type transition struct {
 func (b *Brain) buildStacked(cur [baseInputs]float32) [brainInputs]float32 {
 	var s [brainInputs]float32
 	copy(s[0:baseInputs], cur[:])
-	for f := 0; f < stackFrames-1; f++ {
+	// Лише memFrames-1 історичних слотів; решта лишається НУЛЯМИ. Так глибина
+	// памʼяті регулюється в рантаймі без зміни розміру мережі — мережа просто
+	// вчиться ігнорувати мертві входи.
+	for f := 0; f < memFrames-1 && f < stackFrames-1; f++ {
 		copy(s[(f+1)*baseInputs:(f+2)*baseInputs], b.frames[f][:])
 	}
 	return s
@@ -41,7 +45,10 @@ func (b *Brain) buildStacked(cur [baseInputs]float32) [brainInputs]float32 {
 // для проб/тестів, коли історія не важлива.
 func stackSteady(cur [baseInputs]float32) [brainInputs]float32 {
 	var s [brainInputs]float32
-	for f := 0; f < stackFrames; f++ {
+	// Ті самі memFrames, що й у buildStacked: проба мусить мати ту саму форму
+	// входу, що й жива політика, інакше вона зондує мережу в режимі, якого та
+	// ніколи не бачила.
+	for f := 0; f < memFrames && f < stackFrames; f++ {
 		copy(s[f*baseInputs:(f+1)*baseInputs], cur[:])
 	}
 	return s

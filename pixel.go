@@ -162,7 +162,7 @@ var (
 		Count:           1, // мало: вони сильніші за рій
 		Faction:         factionEnemy,
 		WeightsFile:     killerFile,
-		MaxHP:           3,                            // витримує на удар більше за рій
+		MaxHP:           4,                            // витримує на удар більше за рій
 		Color:           color.RGBA{255, 90, 60, 255}, // червоний — щоб одразу вирізняти
 		Label:           "",
 		IsLearner:       true,
@@ -218,7 +218,7 @@ var (
 		Count:           3,
 		Faction:         factionPlayer,
 		WeightsFile:     allyKillerFile,
-		MaxHP:           50,
+		MaxHP:           10,
 		Color:           color.RGBA{140, 100, 255, 255}, // фіолетовий — твій вбивця
 		Label:           "",
 		IsLearner:       true,
@@ -280,10 +280,28 @@ type Pixel struct {
 	// [БІЙ] Кадри невразливості після отриманого удару. Без цього агенти, що
 	// перекриваються, отримували б шкоду КОЖЕН кадр (миттєва смерть у купі).
 	InvulnTimer int
-	Color       color.RGBA
-	Label       string
-	Cfg         UnitConfig // конфіг типу (порожній для гравця)
-	Brain       *Brain     // нейронна мережа (nil для звичайних ворогів, не nil для Learner)
+	// [ВОРС] Позиції суглобів кожної ворсинки у СВІТОВИХ координатах:
+	// Fur[ворсинка][суглоб][x,y], суглоб 0 = середина, 1 = кінчик.
+	// Світові (а не локальні) саме тому, що відставання має бути від РУХУ юніта.
+	Fur [furStrands][2][2]float32
+
+	Color color.RGBA
+	Label string
+	Cfg   UnitConfig // конфіг типу (порожній для гравця)
+	Brain *Brain     // нейронна мережа (nil для звичайних ворогів, не nil для Learner)
+}
+
+// resetFur миттєво ставить ворс у спокійне положення навколо юніта.
+// Потрібно при спавні/респавні/рестарті — інакше ворс «прилетів» би через пів
+// карти з попередньої позиції (лаг чесно відпрацював би телепорт).
+func (p *Pixel) resetFur() {
+	cx := p.X + pixelSize/2
+	cy := p.Y + pixelSize/2
+	for i := 0; i < furStrands; i++ {
+		dx, dy := dirs8[i][0], dirs8[i][1]
+		p.Fur[i][0][0], p.Fur[i][0][1] = cx+dx*furLen*0.5, cy+dy*furLen*0.5
+		p.Fur[i][1][0], p.Fur[i][1][1] = cx+dx*furLen, cy+dy*furLen
+	}
 }
 
 // aggressionColor повертає колір від синього (пасивний) до червоного (агресивний).
@@ -385,6 +403,7 @@ func newUnits() []Pixel {
 				Cfg:        cfg,
 				Brain:      brain,
 			})
+			units[len(units)-1].resetFur()
 		}
 	}
 	return units

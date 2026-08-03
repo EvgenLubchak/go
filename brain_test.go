@@ -447,3 +447,55 @@ func TestRosterConfigsAreComplete(t *testing.T) {
 		t.Log("увага: одна зі сторін порожня — командного бою не буде")
 	}
 }
+
+// TestFrozenPolicyStopsLearning перевіряє заморозку політики (клавіша L):
+// навчання зупинене, ε=0. Без цього замір іде по РУХОМІЙ цілі — ваги повзуть
+// прямо під час вимірювання, а 1% дій ще й випадкові.
+//
+// Тест навмисно перевіряє й ЗВОРОТНЕ (розморожені ваги таки змінюються) —
+// інакше він проходив би і тоді, коли тренування зламане й не робить нічого.
+func TestFrozenPolicyStopsLearning(t *testing.T) {
+	savedRoster, savedFrozen, savedGRU := unitRoster, frozenPolicy, useGRU
+	defer func() { unitRoster, frozenPolicy, useGRU = savedRoster, savedFrozen, savedGRU }()
+	useGRU = false // перевіряємо стек-шлях: у нього детермінований поріг qMinReplay
+	chaser := ConfigLearner
+	chaser.Count = 1
+	unitRoster = []UnitConfig{chaser}
+
+	g := &Game{units: newUnits()}
+	b := g.units[0].Brain
+	if b == nil || b.net == nil {
+		t.Fatal("юніт без мозку")
+	}
+
+	// Наповнюємо буфер, щоб train() мав на чому вчитись (інакше вийде з нього одразу).
+	var s, s2 [brainInputs]float32
+	for i := range s {
+		s[i], s2[i] = 0.1*float32(i%3), 0.05*float32((i+1)%3)
+	}
+	for i := 0; i < qMinReplay*2; i++ {
+		b.net.remember(transition{s: s, a: i % brainActions, r: 1, s2: s2})
+	}
+
+	frozenPolicy = true
+	if eps := b.epsilon(); eps != 0 {
+		t.Errorf("замороженій політиці потрібна ε=0, отримали %.4f", eps)
+	}
+	before, _, _ := b.net.forwardQ(s)
+	for i := 0; i < 50; i++ {
+		g.trainBrains()
+	}
+	after, _, _ := b.net.forwardQ(s)
+	if before != after {
+		t.Errorf("ваги зрушили при замороженій політиці: %v → %v", before, after)
+	}
+
+	frozenPolicy = false
+	for i := 0; i < 50; i++ {
+		g.trainBrains()
+	}
+	thawed, _, _ := b.net.forwardQ(s)
+	if thawed == after {
+		t.Error("після розморозки ваги не змінились — тренування не працює, тест був би пустим")
+	}
+}

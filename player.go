@@ -78,6 +78,7 @@ func (g *Game) respawnPlayer() {
 	}
 	g.player.VelX, g.player.VelY = 0, 0
 	g.player.HP = playerMaxHP // [БІЙ] новий «епізод» → повне здоровʼя
+	g.player.resetFur()       // [ВОРС] інакше хутро «прилетіло б» зі старого місця
 	g.player.InvulnTimer = 0
 	if g.player.Brain != nil {
 		g.player.Brain.hasPrev = false
@@ -153,4 +154,9 @@ func (g *Game) updatePlayer() {
 		g.player.VelY = 0
 		g.player.HitWall = true
 	}
+
+	// [ВОРС] Гравець НЕ входить у g.units, тож updateUnits його не чіпає —
+	// оновлюємо хутро тут, у самому кінці (позиція вже остаточна). Без цього
+	// ворс завис би на місці спавну, а смуги розтяглись би через пів карти.
+	updateFur(&g.player)
 }

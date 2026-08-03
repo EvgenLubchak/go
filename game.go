@@ -66,6 +66,7 @@ func (g *Game) restart() {
 	g.player.VelX = 0
 	g.player.VelY = 0
 	g.player.HP = playerMaxHP // [БІЙ] відновлюємо здоровʼя
+	g.player.resetFur()
 	g.player.InvulnTimer = 0
 	g.attackCooldown = 0
 	g.attackTimer = 0
@@ -115,6 +116,17 @@ func (g *Game) Update() error {
 		g.metrics.resetCounters()
 	}
 
+	// L — [ЗАМІР] заморозити/розморозити політику: навчання off, ε=0.
+	// Скидання лічильників вшите СЮДИ навмисно: у протоколі заморозка й скидання
+	// завжди йдуть разом, а забути друге — найдешевший спосіб зіпсувати прогін
+	// (вибірка тоді містила б хвіст ще-навчальних кадрів).
+	if inpututil.IsKeyJustPressed(ebiten.KeyL) {
+		frozenPolicy = !frozenPolicy
+		if frozenPolicy {
+			g.metrics.resetCounters()
+		}
+	}
+
 	// V — [FLOW-FIELD] циклює: вимк → поле до сторони гравця → поле до ворогів
 	if inpututil.IsKeyJustPressed(ebiten.KeyV) {
 		showFlowField = (showFlowField + 1) % 3
@@ -152,7 +164,7 @@ func (g *Game) Update() error {
 	g.updateBoidMap()
 	g.calcAcceleration()
 	g.trainBrains() // [SHARED BRAIN] навчання мереж хижаків раз/кадр, ОДНОПОТОКОВО
-	if aiPlayer && g.player.Brain != nil {
+	if aiPlayer && !frozenPolicy && g.player.Brain != nil {
 		g.player.Brain.net.train(qBatch) // [SELF-PLAY] тренуємо мозок-жертву
 	}
 	g.metrics.collect(g) // [МЕТРИКИ] збір показників навчання (однопотоково)
@@ -171,6 +183,9 @@ func (g *Game) Update() error {
 // воркер-пулу вже завершились (wg.Wait у calcAcceleration) — це та сама схема
 // «всі читають паралельно → один пише однопотоково», що й для boidMap/феромонів.
 func (g *Game) trainBrains() {
+	if frozenPolicy {
+		return // [ЗАМІР] політика заморожена — ваги не рухаються
+	}
 	seen := map[*Net]bool{}
 	for i := range g.units {
 		b := g.units[i].Brain

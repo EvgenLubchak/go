@@ -38,6 +38,11 @@ const (
 	metricBaseRowH   = 14  // висота рядка вулика
 	metricBaseGraphH = 80  // висота області графіка
 	metricBaseFont   = 9   // кегль тексту
+
+	// [ПАМʼЯТЬ] Мінімум сліпих кадрів, щоб агента врахувати в по-агентному
+	// відсотку. Без порогу юніт із трьома кадрами дав би 0% або 100% і смикав
+	// би середнє нарівні з тим, хто набрав тисячі.
+	blindAgentMin = 100
 )
 
 // curve — кільцевий буфер значень для лінійного графіка.
@@ -89,12 +94,37 @@ type Metrics struct {
 	blindClosed int // ...із них скоротили дистанцію → ознака памʼяті
 	catches     int // спіймань гравця
 	window      int // кадрів від моменту скидання (для catch-rate у хв)
+
+	// Знаменник для ЧАСТКИ часу наосліп: сума «агент × кадр» за період. Рахуємо
+	// саме так, а не як window×8, бо юніти можуть гинути — інакше після смерті
+	// частка занижувалась би без жодної зміни в поведінці.
+	unitFrames int
+
+	// [ПАМʼЯТЬ] Ті самі сліпі рішення, але НАРІЗНО по агентах — див. blindPerAgent.
+	agents map[*Brain]*blindAgent
+}
+
+// blindAgent — сліпі рішення ОДНОГО агента за період заміру.
+//
+// Навіщо окремо від blindN/blindClosed: котловий відсоток зважений ПО КАДРАХ, а
+// кадри розподілені між агентами вкрай нерівно. Юніт, що знайшов ціль і висить
+// біля неї, перестає давати сліпі кадри взагалі; юніт, застряглий за текстурою,
+// дає рівно один за тік до кінця прогону — і майже всі невдалі. За пʼять хвилин
+// при 120 TPS це ≈36000 кадрів з одного невдахи проти вибірки у 18000. Тобто
+// котловий відсоток здатен на дві третини складатися з одного застряглого юніта,
+// а скільки їх застрягне — випадковість прогону. Звідси і розкид 58/66 між
+// двома прогонами того самого конфігу.
+type blindAgent struct {
+	n      int // сліпих рішень цього агента
+	closed int // ...із них із прогресом до цілі
 }
 
 // resetCounters обнуляє кумулятивні лічильники заміру (клавіша M). Криві навчання
 // НЕ чіпаємо — вони показують динаміку, а лічильники — підсумок навченого рою.
 func (m *Metrics) resetCounters() {
 	m.blindN, m.blindClosed, m.catches, m.window = 0, 0, 0, 0
+	m.unitFrames = 0
+	m.agents = nil
 }
 
 // collect — раз/кадр (у Update, ПІСЛЯ trainBrains) збирає показники з мозків рою.
@@ -137,6 +167,19 @@ func (m *Metrics) collect(g *Game) {
 
 		// [ПАМʼЯТЬ] Забираємо «сліпі рішення» агента й скидаємо (однопотоково,
 		// паралельна фаза calcAcceleration уже завершена → без гонок).
+		m.unitFrames++ // знаменник частки наосліп: цей агент прожив цей кадр
+		if b.mBlindN > 0 {
+			if m.agents == nil {
+				m.agents = map[*Brain]*blindAgent{}
+			}
+			a := m.agents[b]
+			if a == nil {
+				a = &blindAgent{}
+				m.agents[b] = a
+			}
+			a.n += b.mBlindN
+			a.closed += b.mBlindClosed
+		}
 		m.blindN += b.mBlindN
 		m.blindClosed += b.mBlindClosed
 		b.mBlindN, b.mBlindClosed = 0, 0
@@ -180,6 +223,39 @@ func (m *Metrics) collect(g *Game) {
 	}
 }
 
+// blindPerAgent — відсоток «сліпих із прогресом», усереднений ПО АГЕНТАХ, а не
+// по кадрах. Кожен агент важить однаково, скільки б кадрів не набрав, тож один
+// застряглий за текстурою більше не визначає підсумок за всіх.
+//
+// Повертає ще й межі lo/hi — саме вони роблять забруднення видимим: якщо семеро
+// дають 70–85%, а восьмий 4%, то восьмий стоїть у стіні, і це видно з панелі, а
+// не з здогадок після прогону.
+//
+// Ключі — вказівники на Brain; мертві юніти лишаються в мапі назавжди. Так і
+// треба: їхні сліпі рішення були реальними, викидати їх заднім числом означало б
+// підганяти вибірку під тих, хто дожив.
+func (m *Metrics) blindPerAgent() (mean, lo, hi float32, agents int) {
+	lo = 1
+	for _, a := range m.agents {
+		if a.n < blindAgentMin {
+			continue
+		}
+		r := float32(a.closed) / float32(a.n)
+		mean += r
+		if r < lo {
+			lo = r
+		}
+		if r > hi {
+			hi = r
+		}
+		agents++
+	}
+	if agents == 0 {
+		return 0, 0, 0, 0
+	}
+	return mean / float32(agents), lo, hi, agents
+}
+
 // hiveLabel — коротка назва вулика з імені файлу ваг: "killer_weights.json" → "killer".
 func hiveLabel(file string) string {
 	name := strings.TrimSuffix(file, ".json")
@@ -204,7 +280,7 @@ func (m *Metrics) draw(screen *ebiten.Image) {
 		graphH = metricBaseGraphH * metricScale
 		font   = metricBaseFont * metricScale
 	)
-	ph := float32(pad*2+graphH+rowH) + float32(rowH)*float32(len(m.order)+1) // +1 рядок конфігу, +рядок підсумків
+	ph := float32(pad*2+graphH+rowH) + float32(rowH)*float32(len(m.order)+2) // +1 рядок конфігу, +2 рядки підсумків
 	px := float32(12)
 	py := float32(screenHeight) - ph - 12
 	vector.FillRect(screen, px, py, float32(pw), ph, color.RGBA{0, 0, 0, 190}, false)
@@ -219,9 +295,18 @@ func (m *Metrics) draw(screen *ebiten.Image) {
 		memMode = "gru"
 	}
 	y := float64(py) + pad + rowH*0.7
-	drawTextL(screen, fmt.Sprintf("mem:%s  stk%d  local:%s  shared:%s  ai:%s  eps %.3f",
-		memMode, stackFrames, onoff(localSight), onoff(sharedBrain), onoff(aiPlayer),
-		m.firstEps()), font*0.85, float64(px)+pad, y, cyan)
+	// stk<кадрів>/<крок>: САМЕ КРОК визначає, чи пам'ять суцільна, чи дірчаста, —
+	// а без нього два різні конфіги дають однаковий ярлик (stk4 при кроці 60 і
+	// при кроці 10). Один раз уже звіряли скріни навгад; більше не треба.
+	// frz — чи заморожена політика. Це найважливіший прапорець на скріні: замір із
+	// frz:off і frz:on відповідають на РІЗНІ питання, і сплутати їх не можна.
+	cfgCol := cyan
+	if frozenPolicy {
+		cfgCol = color.RGBA{120, 235, 140, 255} // заморожено → зелений, видно здалеку
+	}
+	drawTextL(screen, fmt.Sprintf("mem:%s  stk%d/%d  local:%s  shared:%s  ai:%s  frz:%s  eps %.3f",
+		memMode, memFrames, stackSkip, onoff(localSight), onoff(sharedBrain), onoff(aiPlayer),
+		onoff(frozenPolicy), m.firstEps()), font*0.85, float64(px)+pad, y, cfgCol)
 
 	// Рядок на КОЖЕН вулик — свої reward/TD/maxQ, кольором своїх юнітів.
 	for _, key := range m.order {
@@ -258,8 +343,28 @@ func (m *Metrics) draw(screen *ebiten.Image) {
 		rate = float32(m.catches) * (120 * 60) / float32(m.window) // TPS=120
 	}
 	fy := float64(py+ph) - pad - rowH*0.2
-	drawTextL(screen, fmt.Sprintf("blind-chase %s (n=%d)", bp, m.blindN), font, float64(px)+pad, fy, mem)
-	drawTextL(screen, fmt.Sprintf("catch %d (%.1f/min)", m.catches, rate), font, float64(px)+pw*0.5, fy, yellow)
+	// [ГОЛОВНА МЕТРИКА] Частка часу, коли агент НЕ бачив ціль.
+	//
+	// Вимірювання показало, що blind-chase — метрика УМОВНА: вона рахує лише
+	// сліпі кадри, тож конфіг, який майже не губить ціль, оцінюється по жменьці
+	// вироджених кадрів (мікрозатемнення в товкотнечі впритул) і виглядає
+	// посередньо. Частка ж наосліп безумовна й міряє саме здатність утримувати
+	// ціль. На стенді вона розвела конфіги в шість разів там, де blind-chase
+	// показував різницю в межах шуму.
+	bf := "—"
+	if m.unitFrames > 0 {
+		bf = fmt.Sprintf("%.1f%%", 100*float32(m.blindN)/float32(m.unitFrames))
+	}
+	drawTextL(screen, fmt.Sprintf("blind %s   chase %s (n=%d)", bf, bp, m.blindN), font, float64(px)+pad, fy-rowH, mem)
+	drawTextL(screen, fmt.Sprintf("catch %d (%.1f/min)", m.catches, rate), font, float64(px)+pw*0.5, fy-rowH, yellow)
+
+	// Другий рядок — ТОЙ САМИЙ показник, але зважений по агентах, і межі розкиду.
+	// Верхній рядок лишаємо, щоб уже зняті прогони мали з чим порівнюватись.
+	pa := "per-agent —"
+	if mean, lo, hi, k := m.blindPerAgent(); k > 0 {
+		pa = fmt.Sprintf("per-agent %.0f%%  (%d ag  %.0f..%.0f%%)", 100*mean, k, 100*lo, 100*hi)
+	}
+	drawTextL(screen, pa, font, float64(px)+pad, fy, color.RGBA{170, 120, 220, 255})
 }
 
 // firstEps — ε будь-якого вулика (у всіх однакова формула, показуємо як довідку).
