@@ -250,6 +250,7 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, hitWall bool) int {
 	b.prevVisible = visible
 	b.hasPrev = true
 	b.lastAction = action
+	b.lastQ = q // [ФОРМА] тіло витягнеться туди, куди мережа хоче
 	return action
 }
 

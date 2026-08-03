@@ -285,6 +285,11 @@ type Pixel struct {
 	// Світові (а не локальні) саме тому, що відставання має бути від РУХУ юніта.
 	Fur [furStrands][2][2]float32
 
+	// [ТІЛО] Стан пружини розміру: поточний масштаб і його швидкість. Пульс медузи
+	// виникає з перельоту цієї пружини, а не з намальованого циклу.
+	BodyScale float32
+	BodyVel   float32
+
 	Color color.RGBA
 	Label string
 	Cfg   UnitConfig // конфіг типу (порожній для гравця)
@@ -295,6 +300,7 @@ type Pixel struct {
 // Потрібно при спавні/респавні/рестарті — інакше ворс «прилетів» би через пів
 // карти з попередньої позиції (лаг чесно відпрацював би телепорт).
 func (p *Pixel) resetFur() {
+	p.BodyScale, p.BodyVel = 1, 0
 	cx := p.X + pixelSize/2
 	cy := p.Y + pixelSize/2
 	for i := 0; i < furStrands; i++ {

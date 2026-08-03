@@ -68,28 +68,126 @@ func drawFur(screen *ebiten.Image, p *Pixel) {
 	}
 }
 
-// drawPixel малює квадрат з flash-ефектом, HP bar і міткою.
+// bodyRestRadius — радіус «спокійного» контуру вздовж напрямку dirs8[i].
+//
+// Відстань від центра до контуру КВАДРАТА з півстороною R уздовж одиничного
+// напрямку (dx,dy) — це R / max(|dx|,|dy|): для осей виходить R, для діагоналей
+// R√2. Тобто вісім таких радіусів відтворюють наш квадрат ТОЧНО, до пікселя, — і
+// перехід на восьмикутник у спокої не змінює картинку взагалі. Змінюється лише те,
+// що тепер контур є що деформувати.
+func bodyRestRadius(i int) float32 {
+	dx, dy := dirs8[i][0], dirs8[i][1]
+	m := dx
+	if m < 0 {
+		m = -m
+	}
+	ady := dy
+	if ady < 0 {
+		ady = -ady
+	}
+	if ady > m {
+		m = ady
+	}
+	return (pixelSize / 2) / m
+}
+
+// drawBody малює тіло як восьмикутник, деформований НАМІРОМ мережі.
+//
+// Вісім Q-значень лягають на вісім радіусів: тіло тягнеться туди, куди агент хоче,
+// і підбирається з протилежного боку. tanh, а не лінійна нормалізація — навмисно:
+// нормалізація на розмах зробила б навіть мікроскопічну різницю в Q максимальною
+// деформацією і ЗАХОВАЛА б головний діагностичний випадок. З tanh пласка Q дає нуль
+// відхилення, тобто рівний квадрат: «мережа не розрізняє дій» видно оком.
+// Великий розмах Q (у вбивці нагороди більші) плавно насичується замість вибуху.
+//
+// Масштаб від пружини (updateBody) — скаляр, він не конфліктує з напрямком форми:
+// розмір говорить про рух, форма — про намір.
+func drawBody(screen *ebiten.Image, p Pixel, col color.RGBA) {
+	cx := p.X + pixelSize/2
+	cy := p.Y + pixelSize/2
+
+	scale := p.BodyScale
+	if scale <= 0 {
+		scale = 1 // юніт, створений в обхід resetFur (тести)
+	}
+
+	// Середнє Q — точка відліку: цікавить ПЕРЕВАГА дії над іншими, а не абсолют.
+	var mean float32
+	hasQ := p.Brain != nil
+	if hasQ {
+		for i := 0; i < brainActions; i++ {
+			mean += p.Brain.lastQ[i]
+		}
+		mean /= brainActions
+	}
+
+	// Вісім вершин контуру.
+	var vx, vy [brainActions]float32
+	for i := 0; i < brainActions; i++ {
+		r := bodyRestRadius(i) * scale
+		if hasQ {
+			r *= 1 + bodyQStretch*tanh((p.Brain.lastQ[i]-mean)/bodyQScale)
+		}
+		vx[i] = cx + dirs8[i][0]*r
+		vy[i] = cy + dirs8[i][1]*r
+	}
+
+	// [ОРГАНІКА] Зʼєднуємо вершини НЕ прямими, а квадратичними кривими: сама
+	// вершина стає контрольною точкою, а крива проходить через СЕРЕДИНИ ребер.
+	// Пряме зʼєднання давало гранчастий контур, і коли одна Q переважала сусідні,
+	// вилазив гострий шпиль — тіло читалось як «квадрат, від якого відкусили».
+	// Тепер сплеск Q дає плавну випуклість, а не колючку.
+	//
+	// Побічний ефект, який тут доречний: крива зрізає кути, тож у спокої контур
+	// стає не строгим квадратом, а квадратом зі скругленими кутами — саме те, що
+	// треба для істоти, а не для тайла.
+	mid := func(i, j int) (float32, float32) {
+		return (vx[i] + vx[j]) / 2, (vy[i] + vy[j]) / 2
+	}
+	path := &vector.Path{}
+	sx, sy := mid(brainActions-1, 0)
+	path.MoveTo(sx, sy)
+	for i := 0; i < brainActions; i++ {
+		nx, ny := mid(i, (i+1)%brainActions)
+		path.QuadTo(vx[i], vy[i], nx, ny) // вершина = контрольна точка
+	}
+	path.Close()
+
+	var op vector.DrawPathOptions
+	op.AntiAlias = true // контур органічний, без згладжування виглядав би рваним
+	op.ColorScale.ScaleWithColor(col)
+	vector.FillPath(screen, path, nil, &op)
+}
+
+// drawPixel малює тіло з flash-ефектом, HP bar і міткою.
 func drawPixel(screen *ebiten.Image, p Pixel) {
 	// Flash: поки HitTimer > 0 — малюємо білим
 	col := p.Color
 	if p.HitTimer > 0 {
 		col = color.RGBA{255, 255, 255, 255}
 	}
-	vector.FillRect(screen, p.X, p.Y, pixelSize, pixelSize, col, false)
+	drawBody(screen, p, col)
 
 	// HP bar — тільки для ворогів (MaxHP > 0)
 	if p.MaxHP > 0 {
 		const barH = 3
+		// Ширина смуги йде за пружиною тіла: інакше при стисканні вона стирчала б
+		// з боків ширшою за самого юніта.
+		bw := float32(pixelSize)
+		if p.BodyScale > 0 {
+			bw *= p.BodyScale
+		}
+		barX := p.X + (pixelSize-bw)/2
 		barY := p.Y - barH - 1
-		vector.FillRect(screen, p.X, barY, pixelSize, barH, color.RGBA{80, 0, 0, 200}, false)
+		vector.FillRect(screen, barX, barY, bw, barH, color.RGBA{80, 0, 0, 200}, false)
 		hpRatio := float32(p.HP) / float32(p.MaxHP)
-		filled := float32(pixelSize) * hpRatio
+		filled := bw * hpRatio
 		barColor := color.RGBA{
 			R: uint8(255 * (1 - hpRatio)),
 			G: uint8(220 * hpRatio),
 			B: 0, A: 255,
 		}
-		vector.FillRect(screen, p.X, barY, filled, barH, barColor, false)
+		vector.FillRect(screen, barX, barY, filled, barH, barColor, false)
 	}
 
 	if p.Label != "" {

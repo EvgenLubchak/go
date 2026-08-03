@@ -499,3 +499,29 @@ func TestFrozenPolicyStopsLearning(t *testing.T) {
 		t.Error("після розморозки ваги не змінились — тренування не працює, тест був би пустим")
 	}
 }
+
+// TestBodyRestShapeIsTheSquare закріплює головну обіцянку восьмикутного тіла:
+// у СПОКОЇ (без деформації) вісім радіусів дають рівно той самий квадрат, що ми
+// малювали раніше. Тобто перехід на полігон нічого не змінює візуально, поки
+// мережа не почне його гнути — а отже ідентичність «пікселя» не втрачена.
+//
+// Перевіряємо буквально: вершина вздовж кожного напрямку мусить лежати НА контурі
+// квадрата з півсторо́ною pixelSize/2, тобто max(|x|,|y|) == R.
+func TestBodyRestShapeIsTheSquare(t *testing.T) {
+	const R = pixelSize / 2
+	for i := 0; i < brainActions; i++ {
+		r := bodyRestRadius(i)
+		x := dirs8[i][0] * r
+		y := dirs8[i][1] * r
+		m := float32(math.Max(math.Abs(float64(x)), math.Abs(float64(y))))
+		if math.Abs(float64(m-R)) > 1e-4 {
+			t.Errorf("напрямок %d: вершина (%.3f, %.3f) не на контурі квадрата: max=%.4f, треба %.4f",
+				i, x, y, m, float32(R))
+		}
+	}
+	// Діагональні радіуси мусять бути довшими за осьові саме в √2 разів.
+	ratio := bodyRestRadius(1) / bodyRestRadius(0)
+	if math.Abs(float64(ratio)-math.Sqrt2) > 1e-4 {
+		t.Errorf("діагональ/вісь = %.5f, очікували √2 = %.5f", ratio, math.Sqrt2)
+	}
+}
