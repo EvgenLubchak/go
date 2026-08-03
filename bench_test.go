@@ -28,7 +28,8 @@ import (
 //
 // Параметри через середовище (усі необовʼязкові):
 //
-//	BENCH_SEEDS=10     скільки прогонів на конфіг
+//	BENCH_SEEDS=10     скільки прогонів на конфіг (незалежних, див. runBenchTrial)
+//	BENCH_SET=sweep    набір конфігів: main = архітектури, sweep = горизонт памʼяті
 //	BENCH_WARMUP=20000 тіків навчання перед заміром
 //	BENCH_MEASURE=6000 тіків у кожному вікні заміру
 //	BENCH_MOVING=1     1 = гравець рухається, 0 = стоїть
@@ -71,6 +72,7 @@ func TestMemoryBench(t *testing.T) {
 	measure := benchEnvInt("BENCH_MEASURE", 6000)
 	moving := benchEnvInt("BENCH_MOVING", 1) != 0
 
+	// BENCH_SET=main — порівняння архітектур; sweep — горизонт памʼяті одинака.
 	cfgs := []benchCfg{
 		{name: "стек 1/–   ×8", frames: 1, skip: 10, units: 8},
 		{name: "стек 4/10  ×8", frames: 4, skip: 10, units: 8},
@@ -80,6 +82,25 @@ func TestMemoryBench(t *testing.T) {
 		// різниці — вона не потрібна задачі; якщо дає — її ховало згуртування.
 		{name: "стек 1/–   ×1", frames: 1, skip: 10, units: 1},
 		{name: "стек 4/10  ×1", frames: 4, skip: 10, units: 1},
+	}
+	if os.Getenv("BENCH_SET") == "sweep" {
+		// [ГОРИЗОНТ] Скільки минулого цій задачі насправді потрібно.
+		//
+		// Вікно памʼяті ≈ (memFrames−1)×stackSkip тіків; при 120 TPS це секунди:
+		//   4/10 → 0.25с   4/30 → 0.75с   4/60 → 1.5с   4/120 → 3.0с
+		//
+		// Останній рядок — КОНТРОЛЬ НА ЩІЛЬНІСТЬ: 2/180 має те саме вікно 1.5с, що
+		// й 4/60, але лише ОДИН історичний семпл замість трьох. Якщо 4/60 і 2/180
+		// зійдуться — вирішує горизонт; якщо 4/60 виграє — вирішує щільність. Без
+		// цього рядка ці дві причини нерозрізненні, і я вже двічі сплутав їх.
+		cfgs = []benchCfg{
+			{name: "1/–    (без памʼяті)", frames: 1, skip: 10, units: 1},
+			{name: "4/10   (0.25с)", frames: 4, skip: 10, units: 1},
+			{name: "4/30   (0.75с)", frames: 4, skip: 30, units: 1},
+			{name: "4/60   (1.5с)", frames: 4, skip: 60, units: 1},
+			{name: "4/120  (3.0с)", frames: 4, skip: 120, units: 1},
+			{name: "2/180  (1.5с, рідко)", frames: 2, skip: 180, units: 1},
+		}
 	}
 
 	only := os.Getenv("BENCH_ONLY") // підрядок імені конфігу; порожньо = всі
@@ -97,7 +118,7 @@ func TestMemoryBench(t *testing.T) {
 		frozen := make([]float32, 0, seeds)
 		chase := make([]float32, 0, seeds)
 		for s := 0; s < seeds; s++ {
-			l, f := runBenchTrial(int64(1000+s), c, warmup, measure, moving)
+			l, f := runBenchTrial(c, warmup, measure, moving)
 			live = append(live, l.blind)
 			frozen = append(frozen, f.blind)
 			chase = append(chase, l.chase)
@@ -156,9 +177,20 @@ func benchList(v []float32) string {
 // runBenchTrial — один повний прогін: розігрів → вікно «живцем» → вікно заморожене.
 // Міряємо ОБИДВА режими в одному прогоні: живцем показник відтворюваний, але
 // слабо розрізняє конфіги; заморожений розрізняє сильно, але бістабільний.
-func runBenchTrial(seed int64, c benchCfg, warmup, measure int, moving bool) (live, frozen benchOut) {
-	rand.Seed(seed) //nolint:staticcheck // потрібна саме відтворювана глобальна послідовність
-
+// ПРОГОНИ НЕЗАЛЕЖНІ, А НЕ ПАРНІ. Тут стояв rand.Seed(seed), і я був певен, що
+// однакові сіди дають однакові стартові умови для різних конфігів — тобто що
+// порівнювати можна попарно. Це виявилось хибним: з Go 1.24 math/rand.Seed —
+// ПУСТИШКА за замовчуванням (детермінізм лише з GODEBUG=randseednop=0). Три
+// запуски однієї програми дали три різні числа.
+//
+// Наслідок для статистики: попарні тести недійсні, і мій висновок «+3.2 пункти,
+// p≈0.003» був отриманий паруванням непарованих даних. Порівнювати можна лише
+// незалежними методами — benchDominance і Манна-Вітні, чим і користуємось.
+//
+// Виклик прибрано, а не «полагоджено»: для оцінки РОЗПОДІЛУ незалежні вибірки —
+// саме те, що потрібно. Якщо колись знадобиться відтворити конкретний прогін для
+// відладки, запускай із GODEBUG=randseednop=0 і поверни сіди.
+func runBenchTrial(c benchCfg, warmup, measure int, moving bool) (live, frozen benchOut) {
 	savedRoster, savedGRU := unitRoster, useGRU
 	savedSkip, savedFrames, savedFrozen := stackSkip, memFrames, frozenPolicy
 	defer func() {
