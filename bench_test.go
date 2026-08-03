@@ -52,6 +52,8 @@ type benchCfg struct {
 	gruLR  float32 // gruLearnRate; 0 = лишити поточний
 	gamma  float32 // qGamma; 0 = лишити поточний. qClip масштабується автоматично
 	sight  float32 // sightRange; 0 = лишити поточний
+	indep  bool    // true = sharedBrain=false (у кожного юніта СВОЯ мережа)
+	wander float32 // WanderStrength; 0 = лишити конфігове (у учнів воно теж 0)
 }
 
 // benchOut — те, що знімаємо з одного вікна заміру.
@@ -103,6 +105,30 @@ func TestMemoryBench(t *testing.T) {
 			{name: "4/60   (1.5с)", frames: 4, skip: 60, units: 1},
 			{name: "4/120  (3.0с)", frames: 4, skip: 120, units: 1},
 			{name: "2/180  (1.5с, рідко)", frames: 2, skip: 180, units: 1},
+		}
+	}
+	if os.Getenv("BENCH_SET") == "flock" {
+		// [ЧОМУ РІЙ КРАЩИЙ] Перевірка пояснення, а не самого факту.
+		//
+		// Факт: вісім юнітів дали 59.8% проти 53.0% в одинака. Пояснення, яке я дав
+		// («агент, що загубив ціль, тримається сусідів»), виявилось ВИГАДАНИМ:
+		// AlignmentRate і CohesionRate в учнів = 0, триматись нікого.
+		//
+		// Найімовірніша справжня причина — СПІЛЬНИЙ БУФЕР ДОСВІДУ. При восьми юнітах
+		// у replay за кадр лягає вісім переходів із восьми різних місць карти.
+		// Кількість кроків навчання та сама (train раз на кадр на кожну УНІКАЛЬНУ
+		// мережу), але дані значно менш корельовані — а декорельованість це те,
+		// заради чого experience replay і придумали.
+		//
+		// Контроль: вісім тіл на карті, але в кожного СВОЯ мережа зі своїм буфером.
+		// Якщо перевага зникне — справа в даних, а не в кількості тіл.
+		//
+		// Четвертий рядок перевіряє, чи змінило щось прибирання блукання.
+		cfgs = []benchCfg{
+			{name: "×1  одинак", frames: 1, skip: 10, units: 1},
+			{name: "×8  спільний мозок", frames: 1, skip: 10, units: 8},
+			{name: "×8  СВОЯ мережа в кожного", frames: 1, skip: 10, units: 8, indep: true},
+			{name: "×8  спільний + старе блукання", frames: 1, skip: 10, units: 8, wander: 0.1},
 		}
 	}
 	if os.Getenv("BENCH_SET") == "sight" {
@@ -255,7 +281,9 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving bool) (live, frozen b
 	savedSkip, savedFrames, savedFrozen := stackSkip, memFrames, frozenPolicy
 	savedLR, savedGamma, savedClip := gruLearnRate, qGamma, qClip
 	savedSight := sightRange
+	savedShared := sharedBrain
 	defer func() {
+		sharedBrain = savedShared
 		unitRoster, useGRU = savedRoster, savedGRU
 		stackSkip, memFrames, frozenPolicy = savedSkip, savedFrames, savedFrozen
 		gruLearnRate, qGamma, qClip = savedLR, savedGamma, savedClip
@@ -278,9 +306,14 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving bool) (live, frozen b
 		qGamma = c.gamma
 	}
 
+	sharedBrain = !c.indep
+
 	learner := ConfigLearner
 	learner.Count = c.units
 	learner.WeightsFile = "" // ефемерні ваги: стенд не читає й не пише файли на диск
+	if c.wander > 0 {
+		learner.WanderStrength = c.wander
+	}
 	unitRoster = []UnitConfig{learner}
 
 	g := newBenchGame()
