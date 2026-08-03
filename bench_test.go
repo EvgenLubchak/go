@@ -50,6 +50,8 @@ type benchCfg struct {
 	skip   int     // stackSkip: кадрів між семплами
 	units  int     // скільки учнів на полі (1 перевіряє гіпотезу «рій замінює памʼять»)
 	gruLR  float32 // gruLearnRate; 0 = лишити поточний
+	gamma  float32 // qGamma; 0 = лишити поточний. qClip масштабується автоматично
+	sight  float32 // sightRange; 0 = лишити поточний
 }
 
 // benchOut — те, що знімаємо з одного вікна заміру.
@@ -101,6 +103,47 @@ func TestMemoryBench(t *testing.T) {
 			{name: "4/60   (1.5с)", frames: 4, skip: 60, units: 1},
 			{name: "4/120  (3.0с)", frames: 4, skip: 120, units: 1},
 			{name: "2/180  (1.5с, рідко)", frames: 2, skip: 180, units: 1},
+		}
+	}
+	if os.Getenv("BENCH_SET") == "sight" {
+		// [ВИДИМІСТЬ × ПАМʼЯТЬ] Передбачення, а не просто ще один свіп.
+		//
+		// Сліпий кадр у нас ПОРОЖНІЙ (слоти [0..4] і [13] = 0), тож памʼять несе
+		// інформацію лише коли запамʼятаний кадр був зрячим. При видимості ~10%
+		// це один кадр з десяти — ось і вся стеля +3 пункти.
+		//
+		// ЯКЩО пояснення правильне, то з ростом sightRange розрив між «без памʼяті»
+		// і «з памʼяттю» мусить РОСТИ: стане більше кадрів, у яких є що памʼятати.
+		// Якщо розрив не зміниться — пояснення хибне.
+		//
+		// Абсолютні значення тут порівнювати не можна (зростання видимості саме по
+		// собі полегшує задачу). Дивитись треба на РОЗРИВ у кожній парі.
+		cfgs = []benchCfg{
+			{name: "1/–    зір 260", frames: 1, skip: 10, units: 1, sight: 260},
+			{name: "2/180  зір 260", frames: 2, skip: 180, units: 1, sight: 260},
+			{name: "1/–    зір 400", frames: 1, skip: 10, units: 1, sight: 400},
+			{name: "2/180  зір 400", frames: 2, skip: 180, units: 1, sight: 400},
+			{name: "1/–    зір 600", frames: 1, skip: 10, units: 1, sight: 600},
+			{name: "2/180  зір 600", frames: 2, skip: 180, units: 1, sight: 600},
+		}
+	}
+	if os.Getenv("BENCH_SET") == "gamma" {
+		// [ГОРИЗОНТ] Памʼять і планування — ПАРА, а не дві незалежні речі.
+		//
+		// Найкорисніше вікно памʼяті виявилось 1.5с, а горизонт цінності при
+		// γ=0.95 і 120 TPS — 1/(1−γ) = 20 кадрів = 0.17с. Агент бачить півтори
+		// секунди минулого, але не може оцінити переслідування довше за одну шосту
+		// секунди. Гіпотеза: памʼять «не працює» саме тому, і при довшому горизонті
+		// її внесок мусить вирости.
+		//
+		// Сітка 2×2 (без памʼяті / з памʼяттю) × (0.17с / 0.83с) плюс 1.67с зверху:
+		// саме перетин відповідає на питання, а не окремі рядки.
+		cfgs = []benchCfg{
+			{name: "1/–    γ0.95  (0.17с)", frames: 1, skip: 10, units: 1, gamma: 0.95},
+			{name: "2/180  γ0.95  (0.17с)", frames: 2, skip: 180, units: 1, gamma: 0.95},
+			{name: "1/–    γ0.99  (0.83с)", frames: 1, skip: 10, units: 1, gamma: 0.99},
+			{name: "2/180  γ0.99  (0.83с)", frames: 2, skip: 180, units: 1, gamma: 0.99},
+			{name: "2/180  γ0.995 (1.67с)", frames: 2, skip: 180, units: 1, gamma: 0.995},
 		}
 	}
 	if os.Getenv("BENCH_SET") == "gru" {
@@ -210,16 +253,29 @@ func benchList(v []float32) string {
 func runBenchTrial(c benchCfg, warmup, measure int, moving bool) (live, frozen benchOut) {
 	savedRoster, savedGRU := unitRoster, useGRU
 	savedSkip, savedFrames, savedFrozen := stackSkip, memFrames, frozenPolicy
-	savedLR := gruLearnRate
+	savedLR, savedGamma, savedClip := gruLearnRate, qGamma, qClip
+	savedSight := sightRange
 	defer func() {
 		unitRoster, useGRU = savedRoster, savedGRU
 		stackSkip, memFrames, frozenPolicy = savedSkip, savedFrames, savedFrozen
-		gruLearnRate = savedLR
+		gruLearnRate, qGamma, qClip = savedLR, savedGamma, savedClip
+		sightRange = savedSight
 	}()
 
 	useGRU, stackSkip, memFrames, frozenPolicy = c.gru, c.skip, c.frames, false
 	if c.gruLR > 0 {
 		gruLearnRate = c.gruLR
+	}
+	if c.sight > 0 {
+		sightRange = c.sight
+	}
+	if c.gamma > 0 {
+		// Стеля цінності МУСИТЬ рости разом із горизонтом: рівноважна Q ≈ r/(1−γ).
+		// Інакше довший горизонт уріжеться в кліп, і замір показав би «різниці немає»
+		// з причини, яку ми самі й створили. Ця помилка вже раз коштувала нам вбивці
+		// (природна Q≈14.8 при стелі 10).
+		qClip = savedClip * (1 - savedGamma) / (1 - c.gamma)
+		qGamma = c.gamma
 	}
 
 	learner := ConfigLearner
