@@ -64,6 +64,13 @@ func (g *Game) drawInputDirs(screen *ebiten.Image) {
 	}
 }
 
+// [ПАЛІТРА] Кольори стін — в одному місці, а не магічними числами в циклі
+// малювання. Ними ж фарбується межа рівня: вона теж стіна.
+var (
+	wallFill = color.RGBA{55, 55, 75, 255}  // тіло тайла
+	wallEdge = color.RGBA{80, 80, 110, 255} // світліший контур — дає обʼєм
+)
+
 // drawSea малює фон-море: вертикальний градієнт від світлішого верху до темнішої
 // глибини. Смугами, а не пікселями — seaBands штук FillRect на кадр, тобто дешевше
 // за один намальований юніт.
@@ -311,16 +318,20 @@ func (g *Game) Draw(screen *ebiten.Image) {
 				if tileMap[row][col] {
 					x := float32(col * pixelSize)
 					y := float32(row * pixelSize)
-					vector.FillRect(screen, x, y, pixelSize, pixelSize, color.RGBA{55, 55, 75, 255}, false)
+					vector.FillRect(screen, x, y, pixelSize, pixelSize, wallFill, false)
 					// Тонкий контур стіни для об'єму
-					vector.StrokeRect(screen, x, y, pixelSize, pixelSize, 1, color.RGBA{80, 80, 110, 255}, false)
+					vector.StrokeRect(screen, x, y, pixelSize, pixelSize, 1, wallEdge, false)
 				}
 			}
 		}
 
-		// [МЕЖА РІВНЯ] Бурштинова рамка по краю поля — орієнтир для wrap-переходу
-		// (крізь ці межі гравець «протікає» на інший бік).
-		vector.StrokeRect(screen, 1, 1, screenWidth-2, screenHeight-2, 2, color.RGBA{170, 110, 40, 200}, false)
+		// [МЕЖА РІВНЯ] Рамка кольором СТІН — бо межа і є стіна: юніти від неї
+		// відбиваються, гравець упирається.
+		//
+		// Раніше вона була бурштиновою й позначала wrap-перехід («гравець протікає на
+		// інший бік»). Wrap-around прибрано давно, а колір лишився й читався як border
+		// з верстки — позначка механіки, якої вже немає.
+		vector.StrokeRect(screen, 1, 1, screenWidth-2, screenHeight-2, 2, wallEdge, false)
 
 		// [СТИГМЕРГІЯ] Теплова карта феромонів фрустрації (під ворогами).
 		// Чим яскравіше-червоніше — тим сильніший слід «тут застрягали».
@@ -408,6 +419,14 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 	if showInput {
 		g.drawInputDirs(screen)
+	}
+
+	// [ПАУЗА] Обовʼязково видимо: без підпису застиглий кадр не відрізнити від
+	// зависання гри.
+	if g.paused {
+		drawText(screen, "PAUSED  (P)", gameOverFontSize*0.8,
+			float64(screenWidth)/2, float64(screenHeight)/2,
+			color.RGBA{255, 220, 50, 255})
 	}
 
 	if g.gameOver {

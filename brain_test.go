@@ -797,3 +797,52 @@ func TestBossIsLoneAndSeparate(t *testing.T) {
 		t.Error("мережа боса збіглася з мережею рою — вулик його проглинув")
 	}
 }
+
+// TestRestartKeepsBrains — рестарт скидає СВІТ, але не мозки.
+//
+// Пастка, від якої страхує: restart викликає побудову юнітів, а звичайний newUnits
+// перечитує ваги з диска. Ваги ж пишуться лише на виході й на game over — тож без
+// перенесення мереж кожне натискання R відкидало б усе навчання від початку сесії.
+// Разом із вагами переноситься й БУФЕР ДОСВІДУ (він живе в Net), а він набирається
+// тисячі кадрів.
+func TestRestartKeepsBrains(t *testing.T) {
+	savedRoster, savedShared, savedMap := unitRoster, sharedBrain, tileMap
+	tileMap = [boidMapH][boidMapW]bool{}
+	sharedBrain = true
+	defer func() { unitRoster, sharedBrain, tileMap = savedRoster, savedShared, savedMap }()
+
+	// Файл неіснуючий: щоб тест не читав реальні ваги з робочої теки.
+	learner := ConfigLearner
+	learner.Count = 2
+	learner.WeightsFile = "test_restart_never_exists.json"
+	unitRoster = []UnitConfig{learner}
+
+	g := &Game{difficulty: 1.0, units: newUnits()}
+	before := g.units[0].Brain.net
+	if before == nil {
+		t.Fatal("юніт без мережі")
+	}
+
+	// Кладемо в буфер мітку, щоб побачити, чи він виживе.
+	var s, s2 [brainInputs]float32
+	s[0] = 0.4242
+	before.remember(transition{s: s, a: 1, r: 1, s2: s2})
+	lenBefore := before.replayLen()
+
+	g.restart()
+
+	after := g.units[0].Brain.net
+	if after != before {
+		t.Error("після рестарту мережа інша — навчання сесії втрачено")
+	}
+	if after.replayLen() != lenBefore {
+		t.Errorf("буфер досвіду скинувся: %d → %d", lenBefore, after.replayLen())
+	}
+	// Світ при цьому таки новий.
+	if g.tick != 0 {
+		t.Errorf("годинник не скинувся: tick %d", g.tick)
+	}
+	if g.paused {
+		t.Error("рестарт із паузи лишив світ застиглим")
+	}
+}

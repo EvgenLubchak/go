@@ -155,7 +155,7 @@ var (
 		DetectionRange:  300.0, // НЕ впливає на учня (лише debug-коло showDetectionCircle);
 		//                        зір мозку — це sightRange (POMDP) + whiskerRange (вуса)
 		PounceMulti: 0.0,
-		Count:       25, // скільки їх на полі
+		Count:       15, // скільки їх на полі
 		Faction:     factionEnemy,
 		WeightsFile: brainFile,
 		MaxHP:       2,                            // живучий — більше часу на навчання
@@ -182,12 +182,12 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0, // не впливає (лише debug-коло)
 		PounceMulti:     0.0,
-		Count:           5, // мало: вони сильніші за рій
+		Count:           3, // мало: вони сильніші за рій
 		Faction:         factionEnemy,
 		WeightsFile:     killerFile,
-		MaxHP:           5,                            // витримує на удар більше за рій
+		MaxHP:           4,                            // витримує на удар більше за рій
 		Color:           color.RGBA{255, 90, 60, 255}, // червоний — щоб одразу вирізняти
-		Label:           "≡_≡",
+		Label:           "",
 		IsLearner:       true,
 		UsesFlowField:   true, // ← окремий мозок + flow-field на вхід
 		CombatReward:    true, // ← вчиться БИТИ, а не лише наздоганяти
@@ -209,7 +209,7 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           5,
+		Count:           20,
 		Faction:         factionPlayer, // ← свій; рій його атакує, він рій
 		WeightsFile:     allyFile,
 		MaxHP:           3,
@@ -238,10 +238,10 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           3,
+		Count:           2,
 		Faction:         factionPlayer,
 		WeightsFile:     allyKillerFile,
-		MaxHP:           10,
+		MaxHP:           5,
 		Color:           color.RGBA{140, 100, 255, 255}, // фіолетовий — твій вбивця
 		Label:           "≡_≡",
 		IsLearner:       true,
@@ -285,6 +285,11 @@ var (
 	//
 	// Ваги в окремому файлі: рій ти скидаєш регулярно, а бос накопичується через усі
 	// сесії й ніколи не забуває. Він вчиться повільно — але назавжди.
+	//
+	// ПАМʼЯТЬ У БОСА ЗАРАЗ СТЕКОВА, НЕ GRU. Тип памʼяті задається глобальним useGRU
+	// (main.go) і діє на всіх однаково — окремо для типу його поставити неможливо.
+	// Плюс GRU на замірах не відрізнявся від відсутності памʼяті навіть на одинаку.
+	// Деталі й порядок робіт — у коментарі до useGRU.
 	ConfigBoss = UnitConfig{
 		WanderStrength:  0.0, // жодного некерованого руху (див. ConfigLearner)
 		AlignmentRate:   0.0, // одинак — з ким йому флокуватись
@@ -299,9 +304,9 @@ var (
 		Count:           1, // ОДИН. У цьому вся суть типу
 		Faction:         factionEnemy,
 		WeightsFile:     bossFile,                      // ← власний вулик виникає САМ (мапа по файлу)
-		MaxHP:           25,                            // умова навчання, не лише баланс
+		MaxHP:           45,                            // умова навчання, не лише баланс
 		Color:           color.RGBA{235, 70, 160, 255}, // малиновий — не сплутати ні з ким
-		Label:           "",
+		Label:           "$_$",
 		IsLearner:       true,
 		UsesFlowField:   false, // ← памʼять має на що працювати лише без поля
 		CombatReward:    true,  // бос мусить вчитись БИТИ, а не наздоганяти
@@ -396,14 +401,36 @@ func aggressionColor(a float32) color.RGBA {
 // [ДВА ВУЛИКИ] Типи мозку вчаться НЕЗАЛЕЖНО: у кожного своя спільна мережа і
 // свій файл ваг. Тому зміна reward/входів для вбивці не чіпає тонко налаштований
 // рій — і навпаки.
-func newUnits() []Pixel {
+func newUnits() []Pixel { return newUnitsWithHive(nil) }
+
+// newUnitsWithHive — те саме, але з можливістю ПЕРЕДАТИ вже наявні мережі.
+//
+// Навіщо: рестарт (клавіша R) мусить скидати СВІТ, а не мозки. Без цього кожне
+// натискання R відкидало б усе навчання від початку сесії, бо newNetFor перечитує
+// ваги з диска, а пишуться вони лише на виході й на game over. Для боса це було б
+// смертельно: він і так вчиться у вісім разів повільніше за вулик, бо в нього немає
+// спільного буфера досвіду.
+//
+// Передана мапа зберігає не лише ваги, а й БУФЕР ДОСВІДУ (він живе в Net) — а він
+// набирається тисячі кадрів, і губити його на кожен рестарт означало б обнуляти
+// найдорожче.
+//
+// nil = звичайний старт: мережі беруться з файлів.
+// У режимі sharedBrain=false мапа не задіяна — там мережа в кожного своя, а тіла
+// після рестарту нові.
+func newUnitsWithHive(hive map[string]*Net) []Pixel {
 	units := make([]Pixel, 0, unitTotal())
 
 	// [ВУЛИКИ] У режимі sharedBrain агенти одного ТИПУ мозку (= одного файлу ваг)
 	// ділять одну мережу. Мапа замість окремих змінних — щоб додати новий тип було
 	// достатньо вказати йому WeightsFile, не чіпаючи цей код.
-	hive := map[string]*Net{}
+	if hive == nil {
+		hive = map[string]*Net{}
+	}
 	hiveLoaded := map[string]bool{}
+	for file := range hive {
+		hiveLoaded[file] = true // передана мережа = вже навчена → ε-floor
+	}
 	netFor := func(file string) (*Net, bool) {
 		if !sharedBrain {
 			return newNetFor(file) // кожен агент — власна мережа

@@ -36,6 +36,11 @@ type Game struct {
 	tick       int     // лічильник кадрів
 	difficulty float32 // множник складності (1.0 = старт)
 
+	// [ПАУЗА] Клавіша P. Стан ГРИ, а не глобальний прапорець: як gameOver.
+	// НЕ плутати з frozenPolicy (клавіша L): та морозить НАВЧАННЯ, а світ живе;
+	// пауза морозить світ, а навчання просто не отримує нових кадрів.
+	paused bool
+
 	attackCooldown int // кадрів до наступного удару
 	attackTimer    int // кадрів до кінця анімації кола
 
@@ -59,8 +64,22 @@ type Game struct {
 // errors.New() створює унікальну помилку для порівняння: err == errExit.
 var errExit = errors.New("exit")
 
-// restart скидає стан гри до початкового.
+// restart скидає стан ГРИ до початкового — але НЕ мозки.
+//
+// Мережі (а з ними й буфери досвіду) переносяться в новий склад поля через
+// newUnitsWithHive. Інакше кожен рестарт відкидав би все навчання від початку сесії:
+// newUnits перечитує ваги з диска, а пишуться вони лише на виході й на game over.
+// На навчальному стенді це коштувало б дорожче за саму зручність рестарту.
 func (g *Game) restart() {
+	// Збираємо живі мережі ДО того, як переберемо units.
+	hive := map[string]*Net{}
+	for i := range g.units {
+		b := g.units[i].Brain
+		if b != nil && b.net != nil && b.net.file != "" {
+			hive[b.net.file] = b.net
+		}
+	}
+
 	g.player.X = playerSpawn.X
 	g.player.Y = playerSpawn.Y
 	g.player.VelX = 0
@@ -70,8 +89,9 @@ func (g *Game) restart() {
 	g.player.InvulnTimer = 0
 	g.attackCooldown = 0
 	g.attackTimer = 0
-	g.units = newUnits()
+	g.units = newUnitsWithHive(hive)
 	g.gameOver = false
+	g.paused = false // інакше рестарт із паузи давав би застиглий новий світ
 	g.tick = 0
 	g.difficulty = 1.0
 	currentPatternIdx = 0 // починаємо з першого патерну
@@ -95,8 +115,17 @@ func (g *Game) Update() error {
 		return errExit
 	}
 
-	// P — вручну переключити патерн (для експериментів з ритмом)
+	// P — [ПАУЗА] застиглий світ. Перемикачі виду нижче лишаються робочими: саме
+	// вони й роблять паузу корисною — можна розглянути метрики, вуса, flow-field і
+	// форму тіл у застиглому кадрі.
 	if inpututil.IsKeyJustPressed(ebiten.KeyP) {
+		g.paused = !g.paused
+	}
+
+	// B — вручну переключити музичний патерн (експерименти з ритмом). Раніше сиділа
+	// на P; перевішана, бо при soundEnabled=false вона все одно нічого не робить,
+	// а P потрібніша під паузу.
+	if inpututil.IsKeyJustPressed(ebiten.KeyB) {
 		startBeat(g.difficulty)
 	}
 
@@ -127,15 +156,25 @@ func (g *Game) Update() error {
 		}
 	}
 
+	// R — [РЕСТАРТ] новий світ, ТІ САМІ мозки (див. restart). Працює завжди, а не
+	// лише на game over: стенд переріс у гру, і перезапускати процес із консолі
+	// заради нового забігу означало б щоразу губити накопичене навчання.
+	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
+		g.restart()
+	}
+
 	// V — [FLOW-FIELD] циклює: вимк → поле до сторони гравця → поле до ворогів
 	if inpututil.IsKeyJustPressed(ebiten.KeyV) {
 		showFlowField = (showFlowField + 1) % 3
 	}
 
 	if g.gameOver {
-		if ebiten.IsKeyPressed(ebiten.KeyR) {
-			g.restart()
-		}
+		return nil // R обробляється вище — працює і тут, і в живій грі
+	}
+
+	// [ПАУЗА] Виходимо ДО g.tick++ — інакше час ішов би далі, і LVL (він же годинник
+	// замірів) та вікна метрик пливли б, поки світ стоїть.
+	if g.paused {
 		return nil
 	}
 
