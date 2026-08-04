@@ -159,7 +159,19 @@ const (
 	seaBotR, seaBotG, seaBotB = 12, 38, 56 // глибина
 	seaBands                  = 24         // смуг градієнта (більше = плавніше)
 
-	labelFontSize    = 6.0  // розмір шрифту мітки на пікселі
+	// [ВВЕДЕННЯ] Віджет натиснутих напрямків — правий низ екрану.
+	//
+	// Не біля FPS навмисно: там ДІАГНОСТИЧНИЙ куток (FPS/TPS/DIF), у нього дивишся,
+	// коли щось не так із продуктивністю. Натиснуті клавіші — стан ГРАВЦЯ, на нього
+	// дивишся під час гри, коли очі внизу біля свого юніта. Правий низ ще й
+	// діагонально протилежний панелі метрик, тож нічого не перекриває.
+	inputWidgetX    = screenWidth - 62 // центр віджета
+	inputWidgetY    = screenHeight - 62
+	inputStickLen   = 20 // довжина палички напрямку
+	inputStickGap   = 7  // відступ від центру (щоб палички не зросталися)
+	inputStickWidth = 3  // товщина
+
+	labelFontSize    = 10.0 // розмір шрифту мітки на пікселі
 	gameOverFontSize = 20.0 // розмір шрифту екрану GAME OVER
 
 	levelUpEvery   = 60 * 60 // кожні 10 секунд (60fps × 5)
@@ -190,6 +202,7 @@ var (
 	difficultyGrowth    = false // false — складність не росте (для тренування AI)
 	showWhiskers        = false // показувати сенсори стін і обрану дію Learner-а
 	showMetrics         = true  // показувати панель метрик навчання (крива reward/TD) — клавіша G
+	showInput           = true  // [ВВЕДЕННЯ] віджет натиснутих напрямків у правому низу
 	showFrustration     = false // показувати теплову карту феромонів фрустрації
 	pheromonesEnabled   = false // вмикає феромони фрустрації (стигмергію); false = чистий Q-learning без слідів
 	epsilonDecayEnabled = false // ε: false = постійна (qEpsilonConst); true = автоспад max→min
@@ -233,7 +246,7 @@ func main() {
 			MaxHP:   playerMaxHP,
 			Faction: factionPlayer,
 			Color:   color.RGBA{R: 0, G: 255, B: 180, A: 255},
-			Label:   "Y}{IJIEC",
+			Label:   "  -_ - ",
 		},
 		units: newUnits(),
 	}

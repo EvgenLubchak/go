@@ -892,6 +892,7 @@ const (
 	killerFile     = "killer_weights.json"      // ворог-вбивця з flow-field (ConfigKiller)
 	allyFile       = "ally_weights.json"        // [КОМАНДИ] переслідувач гравця
 	allyKillerFile = "ally_killer_weights.json" // [КОМАНДИ] вбивця гравця
+	bossFile       = "boss_weights.json"        // [БОС] одинак із власною мережею (ConfigBoss)
 )
 
 // BrainData — серіалізація ваг у JSON + розміри мережі для перевірки сумісності.

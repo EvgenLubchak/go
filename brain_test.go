@@ -742,3 +742,58 @@ func TestNarrowGapTolerance(t *testing.T) {
 		t.Errorf("допуск %d не відповідає wallInset=%d (очікували %d±1)", pass, wallInset, want)
 	}
 }
+
+// TestBossIsLoneAndSeparate — бос мусить бути ОДИНАКОМ із власною мережею, і саме це
+// робить його осмисленим типом. Виміряно, що вся перевага рою — спільний буфер
+// досвіду; якщо бос випадково почне ділити мережу з роєм, він отримає той самий
+// спільний досвід, і памʼять для нього знову перестане щось означати.
+//
+// Плюс перевіряємо UsesFlowField=false: із полем він завжди знає шлях до цілі, і
+// згадувати нічого — вийшов би ще один вбивця з декоративною памʼяттю.
+func TestBossIsLoneAndSeparate(t *testing.T) {
+	savedRoster, savedShared := unitRoster, sharedBrain
+	defer func() { unitRoster, sharedBrain = savedRoster, savedShared }()
+	sharedBrain = true // найгірший випадок: вулики ввімкнені, бос не має в них потрапити
+
+	// Файли ваг ПІДМІНЯЄМО на неіснуючі: інакше newNetFor читав би реальні
+	// brain_weights.json / boss_weights.json із робочої теки, і результат тесту
+	// залежав би від того, що щойно записала гра. Нам тут важлива лише РІЗНІСТЬ
+	// файлів, а не їхній вміст.
+	swarm, boss := ConfigLearner, ConfigBoss
+	swarm.Count = 3
+	swarm.WeightsFile = "test_swarm_never_exists.json"
+	bossFileForTest := "test_boss_never_exists.json"
+	boss.WeightsFile = bossFileForTest
+	unitRoster = []UnitConfig{swarm, boss}
+
+	if boss.Count != 1 {
+		t.Errorf("бос має бути один, а не %d — на цьому тримається весь сенс типу", boss.Count)
+	}
+	if boss.UsesFlowField {
+		t.Error("бос із flow-field завжди знає шлях → памʼяті нічого робити")
+	}
+	if ConfigBoss.WeightsFile == ConfigLearner.WeightsFile {
+		t.Error("бос ділить файл ваг із роєм → отримає спільний досвід, і памʼять знову не важитиме")
+	}
+
+	units := newUnits()
+	var bossNet *Net
+	swarmNets := map[*Net]bool{}
+	for i := range units {
+		b := units[i].Brain
+		if b == nil || b.net == nil {
+			t.Fatalf("юніт %d без мозку", i)
+		}
+		if units[i].Cfg.WeightsFile == bossFileForTest {
+			bossNet = b.net
+		} else {
+			swarmNets[b.net] = true
+		}
+	}
+	if bossNet == nil {
+		t.Fatal("боса немає на полі — не потрапив у ростер")
+	}
+	if swarmNets[bossNet] {
+		t.Error("мережа боса збіглася з мережею рою — вулик його проглинув")
+	}
+}

@@ -10,6 +10,60 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
+// drawInputDirs малює, які напрямки руху зараз задіяні: чотири палички від центру,
+// яскрава = задіяна, тьмяна = ні.
+//
+// ТЬМЯНІ МАЛЮЄМО НАВМИСНО. Якби показувались лише натиснуті, відсутність палички була
+// б неоднозначною: «не тисну» чи «віджет узагалі не працює». З постійним хрестом
+// зрозуміло завжди.
+//
+// Читаємо НЕ сиру клавіатуру, а обраний напрямок руху — тому в режимі aiPlayer той
+// самий віджет показує, що робить мозок-жертва. Це прилад того ж роду, що форма тіла,
+// а не дзеркало клавіш.
+//
+// У виді від першої особи клавіші означають інше (вліво/вправо — поворот камери,
+// вгору/вниз — хід уперед/назад), і віджет це чесно відображає: він показує НАТИСНУТЕ,
+// а не «куди полетить».
+func (g *Game) drawInputDirs(screen *ebiten.Image) {
+	// up, down, left, right
+	var on [4]bool
+
+	if aiPlayer && g.player.Brain != nil {
+		// [SELF-PLAY] Напрямок з дії мережі: розкладаємо вектор dirs8 на осі.
+		d := dirs8[g.player.Brain.lastAction]
+		on[0] = d[1] < -0.01
+		on[1] = d[1] > 0.01
+		on[2] = d[0] < -0.01
+		on[3] = d[0] > 0.01
+	} else {
+		on[0] = ebiten.IsKeyPressed(ebiten.KeyArrowUp) || ebiten.IsKeyPressed(ebiten.KeyW)
+		on[1] = ebiten.IsKeyPressed(ebiten.KeyArrowDown) || ebiten.IsKeyPressed(ebiten.KeyS)
+		on[2] = ebiten.IsKeyPressed(ebiten.KeyArrowLeft) || ebiten.IsKeyPressed(ebiten.KeyA)
+		on[3] = ebiten.IsKeyPressed(ebiten.KeyArrowRight) || ebiten.IsKeyPressed(ebiten.KeyD)
+	}
+
+	// Порядок збігається з on[]: up, down, left, right.
+	dirs := [4][2]float32{{0, -1}, {0, 1}, {-1, 0}, {1, 0}}
+
+	active := color.RGBA{240, 200, 90, 255} // бурштиновий — як рамка рівня
+	idle := color.RGBA{62, 92, 110, 255}    // тьмяний, у тон води (без альфи: RGBA тут
+	//                                          премножена, і напівпрозорість давала б
+	//                                          перепалений відтінок — див. drawFur)
+
+	cx, cy := float32(inputWidgetX), float32(inputWidgetY)
+	for i, d := range dirs {
+		col := idle
+		if on[i] {
+			col = active
+		}
+		x0 := cx + d[0]*inputStickGap
+		y0 := cy + d[1]*inputStickGap
+		x1 := cx + d[0]*(inputStickGap+inputStickLen)
+		y1 := cy + d[1]*(inputStickGap+inputStickLen)
+		vector.StrokeLine(screen, x0, y0, x1, y1, inputStickWidth, col, true)
+	}
+}
+
 // drawSea малює фон-море: вертикальний градієнт від світлішого верху до темнішої
 // глибини. Смугами, а не пікселями — seaBands штук FillRect на кадр, тобто дешевше
 // за один намальований юніт.
@@ -351,6 +405,10 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		tpsCol = color.RGBA{240, 120, 60, 255}
 	}
 	drawText(screen, fmt.Sprintf("TPS %.0f", tps), 10, screenWidth/2, 25, tpsCol)
+
+	if showInput {
+		g.drawInputDirs(screen)
+	}
 
 	if g.gameOver {
 		cx := float64(screenWidth) / 2
