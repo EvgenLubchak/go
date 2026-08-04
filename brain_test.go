@@ -525,3 +525,220 @@ func TestBodyRestShapeIsTheSquare(t *testing.T) {
 		t.Errorf("діагональ/вісь = %.5f, очікували √2 = %.5f", ratio, math.Sqrt2)
 	}
 }
+
+// TestChargeHurtsHugDoesNot закріплює правило бою й ПОРЯДОК його обчислення.
+//
+// Механіка задумана так: «повільно зіштовхнулись = нічого; налетів = вкусив».
+// Але гравець не бере участі в separation (його немає в boidMap), тож юніт міг
+// стояти всередині нього, безперервно прискорюючись, і формально «налітати на
+// повній» щокадру — смерть від обіймів за ~4 секунди.
+//
+// Лікування — pushOffPlayer, який гасить швидкість У бік гравця. Пастка в тому, що
+// він МУСИТЬ викликатись ПІСЛЯ resolveImpacts: інакше на кадрі прильоту шкода
+// рахувалася б по вже обнуленій швидкості й жоден удар не зараховувався б ніколи.
+// Тест ловить обидва боки — і що кидок works, і що обійми ні.
+func TestChargeHurtsHugDoesNot(t *testing.T) {
+	savedMap := tileMap
+	tileMap = [boidMapH][boidMapW]bool{} // без стін: перевіряємо саме зіткнення тіл
+	defer func() { tileMap = savedMap }()
+
+	newCase := func(velX float32) *Game {
+		g := &Game{difficulty: 1.0}
+		g.player = Pixel{X: 500, Y: 500, HP: 10, MaxHP: 10, Faction: factionPlayer}
+		g.units = []Pixel{{
+			X: 510, Y: 500, // перекриття 15px при pixelSize=25
+			VelX: velX,
+			HP:   2, MaxHP: 2,
+			Faction: factionEnemy,
+			Cfg:     ConfigLearner,
+		}}
+		return g
+	}
+
+	// Поріг удару для рою: max(MaxSpeed×impactSpeedFrac, impactMinSpeed).
+	thr := impactThreshold(ConfigLearner.MaxSpeed)
+
+	// 1) КИДОК: юніт праворуч від гравця летить УЛІВО на повній швидкості.
+	g := newCase(-ConfigLearner.MaxSpeed)
+	g.resolveImpacts()
+	if g.player.HP != 9 {
+		t.Errorf("кидок на швидкості %.2f (поріг %.2f) не завдав шкоди: HP %d, очікували 9",
+			ConfigLearner.MaxSpeed, thr, g.player.HP)
+	}
+
+	// 2) ОБІЙМИ: той самий контакт, але швидкості зближення немає.
+	g = newCase(0)
+	g.resolveImpacts()
+	if g.player.HP != 10 {
+		t.Errorf("нерухомий контакт завдав шкоди: HP %d, очікували 10", g.player.HP)
+	}
+
+	// 3) pushOffPlayer розводить тіла й ВІДБИВАЄ юніта назовні.
+	//    Саме відбивання, а не гасіння: із гасінням юніт застрягав на поверхні
+	//    назавжди (за кадр мозок додає 0.3 при порозі 0.72) і удари зникали зовсім.
+	g = newCase(-ConfigLearner.MaxSpeed)
+	g.pushOffPlayer(&g.units[0])
+	if g.units[0].VelX <= 0 {
+		t.Errorf("юніт не відбився від гравця: VelX %.3f, очікували > 0", g.units[0].VelX)
+	}
+	if collides(g.player.X, g.player.Y, g.units[0].X, g.units[0].Y) {
+		t.Errorf("юніт лишився всередині гравця: X %.1f проти %.1f", g.units[0].X, g.player.X)
+	}
+
+	// 4) Ключове: після відскоку юніт має ЗМОГУ знову набрати поріг. Перевіряємо
+	//    напряму — розбігу треба лише кілька кадрів, і саме цього бракувало.
+	frames := 0
+	v := float32(0) // швидкість у бік гравця з нуля
+	for v < thr && frames < 30 {
+		v += brainForce
+		if v > ConfigLearner.MaxSpeed {
+			v = ConfigLearner.MaxSpeed
+		}
+		frames++
+	}
+	if v < thr {
+		t.Errorf("юніт не може набрати поріг удару навіть за 30 кадрів: %.2f < %.2f", v, thr)
+	}
+}
+
+// TestUnitsSeparateRegardlessOfFaction — фізика тіл діє МІЖ УСІМА юнітами, а шкода
+// лише між ворожими. Це дві різні речі, і в resolveImpacts їх легко переплутати:
+// раніше перевірка фракції стояла перед усім тілом циклу, тож додавання розштовхування
+// туди ж мовчки лишило б своїх проникними одне для одного.
+func TestUnitsSeparateRegardlessOfFaction(t *testing.T) {
+	savedMap, savedFF := tileMap, friendlyFire
+	tileMap = [boidMapH][boidMapW]bool{}
+	friendlyFire = false
+	defer func() { tileMap, friendlyFire = savedMap, savedFF }()
+
+	pair := func(fa, fb int) *Game {
+		g := &Game{difficulty: 1.0}
+		g.player = Pixel{X: 50, Y: 50, HP: 10, MaxHP: 10, Faction: factionPlayer} // осторонь
+		g.units = []Pixel{
+			{X: 500, Y: 500, VelX: ConfigLearner.MaxSpeed, HP: 2, MaxHP: 2, Faction: fa, Cfg: ConfigLearner},
+			{X: 510, Y: 500, HP: 2, MaxHP: 2, Faction: fb, Cfg: ConfigLearner},
+		}
+		return g
+	}
+
+	// Свої: шкоди немає, але тіла все одно розходяться.
+	g := pair(factionEnemy, factionEnemy)
+	g.resolveImpacts()
+	if g.units[0].HP != 2 || g.units[1].HP != 2 {
+		t.Errorf("свої завдали шкоди при friendlyFire=false: HP %d/%d", g.units[0].HP, g.units[1].HP)
+	}
+	if collides(g.units[0].X, g.units[0].Y, g.units[1].X, g.units[1].Y) {
+		t.Error("свої лишились у перекритті — фізика не спрацювала")
+	}
+
+	// Чужі: і шкода, і розведення.
+	g = pair(factionEnemy, factionPlayer)
+	g.resolveImpacts()
+	if g.units[1].HP != 1 {
+		t.Errorf("кидок по ворогові не завдав шкоди: HP %d, очікували 1", g.units[1].HP)
+	}
+	if collides(g.units[0].X, g.units[0].Y, g.units[1].X, g.units[1].Y) {
+		t.Error("вороги лишились у перекритті — фізика не спрацювала")
+	}
+
+	// Розходяться ОБИДВА (рівні маси), на відміну від випадку з гравцем.
+	if g.units[0].X >= 500 {
+		t.Errorf("нападник не відсунувся: X %.1f, очікували < 500", g.units[0].X)
+	}
+	if g.units[1].X <= 510 {
+		t.Errorf("ціль не відсунулась: X %.1f, очікували > 510", g.units[1].X)
+	}
+}
+
+// TestKnockbackOnlyOnLandedHit — віддача належить УДАРУ, а не дотику.
+//
+// Два різні механізми легко злити в один і отримати те, від чого йшли: bodyBounce
+// пропорційний швидкості зіткнення (тиснуться на 0.3 — відскакують на 0.3, мікрорух),
+// а knockback фіксований і великий, але лише коли шкода реально зарахувалась.
+// Плюс перевіряємо, що імпульс ПЕРЕВИЩУЄ звичайну стелю швидкості: без піднятої
+// стелі (knockSpeedMulti) кліп у updateUnits зʼїв би віддачу за перший же кадр.
+func TestKnockbackOnlyOnLandedHit(t *testing.T) {
+	savedMap := tileMap
+	tileMap = [boidMapH][boidMapW]bool{}
+	defer func() { tileMap = savedMap }()
+
+	setup := func(velX float32) *Game {
+		g := &Game{difficulty: 1.0}
+		g.player = Pixel{X: 50, Y: 50, HP: 10, MaxHP: 10, Faction: factionPlayer}
+		g.units = []Pixel{
+			{X: 500, Y: 500, VelX: velX, HP: 2, MaxHP: 2, Faction: factionEnemy, Cfg: ConfigLearner},
+			{X: 510, Y: 500, HP: 2, MaxHP: 2, Faction: factionPlayer, Cfg: ConfigLearner},
+		}
+		return g
+	}
+
+	// Зарахований удар: ціль відлітає ШВИДШЕ за власну стелю, обом виставлено таймер.
+	g := setup(ConfigLearner.MaxSpeed)
+	g.resolveImpacts()
+	victim, striker := g.units[1], g.units[0]
+	if victim.VelX <= ConfigLearner.MaxSpeed {
+		t.Errorf("віддача не перевищила стелю: VelX %.2f, MaxSpeed %.2f — кліп зʼїсть її за кадр",
+			victim.VelX, ConfigLearner.MaxSpeed)
+	}
+	if victim.KnockTimer == 0 || striker.KnockTimer == 0 {
+		t.Errorf("таймер відльоту не виставлено: ціль %d, нападник %d",
+			victim.KnockTimer, striker.KnockTimer)
+	}
+	if striker.VelX >= 0 {
+		t.Errorf("нападника не відсікло назад: VelX %.2f, очікували < 0", striker.VelX)
+	}
+
+	// Дотик без удару: жодної віддачі, лише дрібне розведення тіл.
+	g = setup(0)
+	g.resolveImpacts()
+	if g.units[1].KnockTimer != 0 {
+		t.Error("віддача спрацювала від простого дотику — це має робити лише удар")
+	}
+	if g.units[1].VelX > ConfigLearner.MaxSpeed {
+		t.Errorf("дотик розігнав ціль понад стелю: VelX %.2f", g.units[1].VelX)
+	}
+}
+
+// TestNarrowGapTolerance міряє, скільки позицій із 25 дозволяють пройти в прохід
+// шириною в ОДИН тайл. Без вставки колайдера відповідь — рівно 1 піксель: тіло
+// точно дорівнює дірці, і пройти можна лише потрапивши піксель-у-піксель. Саме це
+// відчувалось як «застрягання на гострих кутах», хоч кути ні до чого.
+//
+// Тест числовий навмисно: «стало легше проходити» на око не перевіряється, а це
+// число зникне при першій же правці геометрії, якщо його не пінити.
+func TestNarrowGapTolerance(t *testing.T) {
+	savedMap := tileMap
+	tileMap = [boidMapH][boidMapW]bool{}
+	defer func() { tileMap = savedMap }()
+
+	// Вільна лише колонка col; з боків — ТОВСТІ стіни на всю висоту.
+	// Товсті навмисно: з однією колонкою стіни діапазон сканування виходив у
+	// відкрите поле за нею, і воно зараховувалось як «прохід» (моя перша версія
+	// тесту так і завищила допуск із 7 до 10).
+	const col = 20
+	for row := 0; row < boidMapH; row++ {
+		for d := 1; d <= 3; d++ {
+			tileMap[row][col-d] = true
+			tileMap[row][col+d] = true
+		}
+	}
+
+	y := float32(10 * pixelSize) // рядок усередині коридору
+	pass := 0
+	for x := (col - 1) * pixelSize; x < (col+2)*pixelSize; x++ {
+		if !isWallRect(float32(x), y) {
+			pass++
+		}
+	}
+
+	want := 1 + 2*wallInset
+	t.Logf("проходимих позицій: %d із %d (очікували ~%d при wallInset=%d)",
+		pass, pixelSize, want, wallInset)
+
+	if pass <= 1 {
+		t.Errorf("допуск не зріс: %d позиція(ї) — тіло досі точно дорівнює дірці", pass)
+	}
+	if pass < want-1 || pass > want+1 {
+		t.Errorf("допуск %d не відповідає wallInset=%d (очікували %d±1)", pass, wallInset, want)
+	}
+}

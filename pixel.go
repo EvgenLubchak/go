@@ -182,10 +182,10 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0, // не впливає (лише debug-коло)
 		PounceMulti:     0.0,
-		Count:           4, // мало: вони сильніші за рій
+		Count:           5, // мало: вони сильніші за рій
 		Faction:         factionEnemy,
 		WeightsFile:     killerFile,
-		MaxHP:           4,                            // витримує на удар більше за рій
+		MaxHP:           5,                            // витримує на удар більше за рій
 		Color:           color.RGBA{255, 90, 60, 255}, // червоний — щоб одразу вирізняти
 		Label:           "",
 		IsLearner:       true,
@@ -209,7 +209,7 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           4,
+		Count:           5,
 		Faction:         factionPlayer, // ← свій; рій його атакує, він рій
 		WeightsFile:     allyFile,
 		MaxHP:           3,
@@ -238,7 +238,7 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           1,
+		Count:           3,
 		Faction:         factionPlayer,
 		WeightsFile:     allyKillerFile,
 		MaxHP:           10,
@@ -303,6 +303,10 @@ type Pixel struct {
 	// [БІЙ] Кадри невразливості після отриманого удару. Без цього агенти, що
 	// перекриваються, отримували б шкоду КОЖЕН кадр (миттєва смерть у купі).
 	InvulnTimer int
+
+	// [БІЙ] Кадри «відльоту» після зарахованого удару: поки > 0, стеля швидкості
+	// піднята (knockSpeedMulti), інакше кліп MaxSpeed зʼїв би віддачу за один кадр.
+	KnockTimer int
 	// [ВОРС] Позиції суглобів кожної ворсинки у СВІТОВИХ координатах:
 	// Fur[ворсинка][суглоб][x,y], суглоб 0 = середина, 1 = кінчик.
 	// Світові (а не локальні) саме тому, що відставання має бути від РУХУ юніта.

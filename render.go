@@ -10,6 +10,29 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
+// drawSea малює фон-море: вертикальний градієнт від світлішого верху до темнішої
+// глибини. Смугами, а не пікселями — seaBands штук FillRect на кадр, тобто дешевше
+// за один намальований юніт.
+//
+// Чому градієнт, а не screen.Fill одним кольором: плоска заливка читається як
+// «пофарбоване тло», а вертикальний перехід — як ГЛИБИНА, і цього досить, щоб поле
+// перестало бути абстрактним аркушем. Текстуру можна буде покласти згори пізніше,
+// нічого тут не переписуючи.
+func drawSea(screen *ebiten.Image) {
+	h := float32(screenHeight) / seaBands
+	for i := 0; i < seaBands; i++ {
+		t := float32(i) / (seaBands - 1) // 0 = верх, 1 = глибина
+		col := color.RGBA{
+			R: uint8(float32(seaTopR) + (seaBotR-seaTopR)*t),
+			G: uint8(float32(seaTopG) + (seaBotG-seaTopG)*t),
+			B: uint8(float32(seaTopB) + (seaBotB-seaTopB)*t),
+			A: 255,
+		}
+		// +1 до висоти: щоб між смугами не лишалось волосяних щілин через округлення.
+		vector.FillRect(screen, 0, float32(i)*h, screenWidth, h+1, col, false)
+	}
+}
+
 // drawText малює текст відцентровано відносно точки (cx, cy).
 // [GO: ColorScale] — гліфи шрифту білі за замовчуванням.
 // Scale(r,g,b,a) множить кольори: Scale(0,0,0,1) → чорний текст.
@@ -225,7 +248,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		// [RAYCASTER] Вид від першої особи замість топ-дауну (клавіша F).
 		g.drawFirstPerson(screen)
 	} else {
-		screen.Fill(color.RGBA{15, 15, 25, 255}) // темно-синій фон замість чистого чорного
+		drawSea(screen) // [ФОН] море: вертикальний градієнт замість плоскої заливки
 
 		// Малюємо тайли рівня.
 		// Стіни — темно-сірі, підлога — не малюється (фон і є підлогою).

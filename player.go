@@ -107,6 +107,13 @@ func (g *Game) updatePlayer() {
 
 	// sqrt робить ріст плавнішим: 1→1.41→1.73→2.0 замість 1→2→3→4
 	maxSpeed := float32(playerBaseSpeed) * float32(math.Sqrt(float64(g.difficulty)))
+	// [БІЙ] Гравця теж відкидає ударом — інакше удар по ньому не відчувався б.
+	// Тертя гравця (0.90) гасить віддачу швидше, ніж у юнітів (0.95), тож контроль
+	// повертається за кілька кадрів.
+	if g.player.KnockTimer > 0 {
+		g.player.KnockTimer--
+		maxSpeed *= knockSpeedMulti
+	}
 	speed := float32(math.Sqrt(float64(g.player.VelX*g.player.VelX + g.player.VelY*g.player.VelY)))
 	if speed > maxSpeed {
 		g.player.VelX = g.player.VelX / speed * maxSpeed

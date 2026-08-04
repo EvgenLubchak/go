@@ -119,12 +119,35 @@ func isWallAt(col, row int) bool {
 	return tileMap[row][col]
 }
 
-// isWallRect перевіряє 4 кути пікселя на стіну.
+// [ГЕОМЕТРІЯ] wallInset — на скільки пікселів колайдер ВУЖЧИЙ за тіло.
+//
+// Стіни й тіла в нас однакового розміру (pixelSize), а колайдер перевіряв повний
+// прямокутник [x, x+pixelSize-1]. Щоб пройти в прохід шириною в один тайл, обидва
+// краї мусили потрапити в ту саму колонку:
+//
+//	int(x)/25    == c  →  x ∈ [25c,    25c+25)
+//	int(x+24)/25 == c  →  x ∈ [25c−24, 25c+1)
+//	                        перетин:  x ∈ [25c, 25c+1)
+//
+// Тобто ОДИН піксель допуску з двадцяти п'яти — тіло точно дорівнює дірці, і пройти
+// можна лише потрапивши піксель-у-піксель. Це і є «застрягання на гострих кутах»:
+// кути тут ні до чого, справа в розмірі.
+//
+// Із вставкою допуск стає (1 + 2×wallInset) пікселів. Ціна — тіло може зайти в стіну
+// на wallInset пікселів; на скруглених кутах (drawBody) це майже не видно, бо крива
+// й так проходить усередині квадрата.
+const wallInset = 3
+
+// isWallRect перевіряє 4 кути колайдера на стіну.
 // Out-of-bounds = стіна → вороги відбиваються від країв поля.
 func isWallRect(x, y float32) bool {
+	lo := x + wallInset
+	hi := x + pixelSize - 1 - wallInset
+	loY := y + wallInset
+	hiY := y + pixelSize - 1 - wallInset
 	corners := [4][2]float32{
-		{x, y}, {x + pixelSize - 1, y},
-		{x, y + pixelSize - 1}, {x + pixelSize - 1, y + pixelSize - 1},
+		{lo, loY}, {hi, loY},
+		{lo, hiY}, {hi, hiY},
 	}
 	for _, c := range corners {
 		if isWallAt(int(c[0])/pixelSize, int(c[1])/pixelSize) {
@@ -137,9 +160,13 @@ func isWallRect(x, y float32) bool {
 // isInteriorWallRect — тільки внутрішні тайли, ігнорує межі екрану.
 // Для гравця: дозволяє wrap-around через краї, але блокує стіни всередині мапи.
 func isInteriorWallRect(x, y float32) bool {
+	lo := x + wallInset
+	hi := x + pixelSize - 1 - wallInset
+	loY := y + wallInset
+	hiY := y + pixelSize - 1 - wallInset
 	corners := [4][2]float32{
-		{x, y}, {x + pixelSize - 1, y},
-		{x, y + pixelSize - 1}, {x + pixelSize - 1, y + pixelSize - 1},
+		{lo, loY}, {hi, loY},
+		{lo, hiY}, {hi, hiY},
 	}
 	for _, c := range corners {
 		col := int(c[0]) / pixelSize

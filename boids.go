@@ -238,8 +238,14 @@ func (g *Game) updateUnits() {
 		e.VelX *= damping
 		e.VelY *= damping
 
-		// [GO: e.Cfg.MaxSpeed] — стеля швидкості своя у кожного типу
+		// [GO: e.Cfg.MaxSpeed] — стеля швидкості своя у кожного типу.
+		// [БІЙ] Поки триває відліт після удару, стеля піднята: інакше кліп зʼїв би
+		// віддачу за перший же кадр і «кидок кобри» лишився б мікрорухом.
 		currentMaxSpeed := e.Cfg.MaxSpeed * g.difficulty
+		if e.KnockTimer > 0 {
+			e.KnockTimer--
+			currentMaxSpeed *= knockSpeedMulti
+		}
 		speed := float32(math.Sqrt(float64(e.VelX*e.VelX + e.VelY*e.VelY)))
 		if speed > currentMaxSpeed {
 			e.VelX = e.VelX / speed * currentMaxSpeed

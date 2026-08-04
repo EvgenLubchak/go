@@ -15,6 +15,153 @@ func collides(ax, ay, bx, by float32) bool {
 		ay+pixelSize > by
 }
 
+// pushOffPlayer — юніт не може стояти ВСЕРЕДИНІ гравця.
+//
+// [ЧОМУ ЦЕ ПОТРІБНО] Separation рахується з boidMap (updateBoidMap), а туди
+// потрапляють ЛИШЕ g.units — гравця там немає. Тобто юніти ніколи не відштовхувались
+// від гравця й могли стояти буквально в ньому. Уп'яте вилізла та сама асиметрія
+// «гравець живе поза g.units» (до цього: ворс, нагорода, вибір цілі, метрики).
+//
+// Поки не було тертя, дірка не проявлялась: юніт пролітав повз і контакт був
+// миттєвим. З damping=0.95 він навчився паркуватись — і почав завдавати шкоди
+// ОБІЙМАМИ. Механіка ж задумувалась протилежною: «повільно зіштовхнулись = нічого;
+// налетів = вкусив». А юніт усередині гравця продовжує прискорюватись на brainForce
+// щокадру, тримає швидкість 1.2 при порозі 0.72 — і формально «налітає на повній»
+// постійно. Смерть за ~4 секунди обіймів.
+//
+// Лікування — те саме, що для стін в updateUnits: юніт ВІДБИВАЄТЬСЯ. Спершу я тут
+// швидкість гасив, і вийшло гірше за початкову ваду: юніт застрягав на поверхні
+// назавжди, бо за кадр мозок додає лише brainForce 0.3, а поріг удару 0.72 (у вбивці
+// 0.96) — розігнатись повторно він не встигав ніколи, і удари зникли зовсім.
+//
+// Відбивання дає задуманий ритм: налетів → вкусив → відскочив → заходить знову.
+// А коли юніт просто тиснеться, він відскакує зі своєю ж мізерною швидкістю й
+// порогу не досягає — обійми так само не кусають.
+//
+// Виштовхуємо ЛИШЕ юніта, не гравця: інакше рій зміг би затовкти тебе крізь стіну.
+// Якщо виштовхувати нікуди (там стіна) — позицію лишаємо, але швидкість гасимо
+// однаково: саме вона визначає шкоду.
+//
+// Діє на юнітів БУДЬ-ЯКОЇ фракції — це фізика тіл, а не бойове правило.
+// nudgeX/nudgeY — зсув тіла з перевіркою стіни. Якщо там стіна, зсув не робимо:
+// краще лишити перекриття на кадр, ніж заштовхнути юніта в геометрію.
+func nudgeX(u *Pixel, d float32) {
+	if !isWallRect(u.X+d, u.Y) {
+		u.X += d
+	}
+}
+
+func nudgeY(u *Pixel, d float32) {
+	if !isWallRect(u.X, u.Y+d) {
+		u.Y += d
+	}
+}
+
+// separateUnits — те саме, що pushOffPlayer, але для ДВОХ РУХОМИХ тіл.
+//
+// Різниця з гравцем одна: маси рівні, тож розходяться обидва — кожен на половину
+// перекриття, і кожен відбивається своєю складовою швидкості. Гравця ж ми не рухаємо
+// зовсім, інакше рій міг би затовкти його крізь стіну.
+//
+// Діє МІЖ УСІМА юнітами, незалежно від фракції: це фізика тіл, а не бойове правило.
+// Наслідок, який варто знати: щільна купа більше неможлива — рій утворює передній
+// ряд, і задні фізично не дістають до цілі, поки передні її не звільнять.
+func separateUnits(a, b *Pixel) {
+	dx := a.X - b.X
+	dy := a.Y - b.Y
+	ox := pixelSize - float32(math.Abs(float64(dx)))
+	oy := pixelSize - float32(math.Abs(float64(dy)))
+	if ox <= 0 || oy <= 0 {
+		return
+	}
+
+	if ox < oy { // вісь меншого занурення
+		half := ox / 2
+		if dx >= 0 {
+			nudgeX(a, half)
+			nudgeX(b, -half)
+			if a.VelX < 0 {
+				a.VelX *= -bodyBounce
+			}
+			if b.VelX > 0 {
+				b.VelX *= -bodyBounce
+			}
+			return
+		}
+		nudgeX(a, -half)
+		nudgeX(b, half)
+		if a.VelX > 0 {
+			a.VelX *= -bodyBounce
+		}
+		if b.VelX < 0 {
+			b.VelX *= -bodyBounce
+		}
+		return
+	}
+
+	half := oy / 2
+	if dy >= 0 {
+		nudgeY(a, half)
+		nudgeY(b, -half)
+		if a.VelY < 0 {
+			a.VelY *= -bodyBounce
+		}
+		if b.VelY > 0 {
+			b.VelY *= -bodyBounce
+		}
+		return
+	}
+	nudgeY(a, -half)
+	nudgeY(b, half)
+	if a.VelY > 0 {
+		a.VelY *= -bodyBounce
+	}
+	if b.VelY < 0 {
+		b.VelY *= -bodyBounce
+	}
+}
+
+func (g *Game) pushOffPlayer(u *Pixel) {
+	if g.player.HP <= 0 || !collides(g.player.X, g.player.Y, u.X, u.Y) {
+		return
+	}
+	dx := u.X - g.player.X
+	dy := u.Y - g.player.Y
+	ox := pixelSize - float32(math.Abs(float64(dx))) // глибина перекриття по X
+	oy := pixelSize - float32(math.Abs(float64(dy)))
+	if ox <= 0 || oy <= 0 {
+		return
+	}
+
+	// Виштовхуємо по осі МЕНШОГО занурення — так юніт ковзає вздовж грані гравця,
+	// а не телепортується через нього.
+	if ox < oy {
+		if dx >= 0 {
+			nudgeX(u, ox)
+			if u.VelX < 0 {
+				u.VelX *= -bodyBounce
+			}
+		} else {
+			nudgeX(u, -ox)
+			if u.VelX > 0 {
+				u.VelX *= -bodyBounce
+			}
+		}
+		return
+	}
+	if dy >= 0 {
+		nudgeY(u, oy)
+		if u.VelY < 0 {
+			u.VelY *= -bodyBounce
+		}
+	} else {
+		nudgeY(u, -oy)
+		if u.VelY > 0 {
+			u.VelY *= -bodyBounce
+		}
+	}
+}
+
 // ==========================================================================
 // [БІЙ] ШКОДА ВІД УДАРУ НА ШВИДКОСТІ («кидок кобри»)
 //
@@ -71,6 +218,21 @@ func applyImpactDamage(attacker, target *Pixel) {
 	target.HitTimer = hitFlashDuration // біле блимання (вже було для удару гравця)
 	target.InvulnTimer = impactInvuln
 
+	// [ВІДДАЧА] Ціль відлітає, нападник відсікається назад. Саме ТУТ, а не в
+	// separateUnits: віддача належить УДАРУ, а не дотику. Дотик дає дрібний
+	// пропорційний відскок (bodyBounce), удар — фіксований великий імпульс.
+	if attacker != nil {
+		if nx, ny, ok := unitTo(attacker.X, attacker.Y, target.X, target.Y); ok {
+			target.VelX += nx * knockbackImpulse
+			target.VelY += ny * knockbackImpulse
+			target.KnockTimer = knockFrames
+
+			attacker.VelX -= nx * knockbackImpulse * knockbackRecoil
+			attacker.VelY -= ny * knockbackImpulse * knockbackRecoil
+			attacker.KnockTimer = knockFrames
+		}
+	}
+
 	if attacker != nil && attacker.Brain != nil {
 		attacker.Brain.dmgDealt += impactDamage
 		if target.HP <= 0 {
@@ -124,21 +286,24 @@ func (g *Game) resolveImpacts() {
 			if b.HP <= 0 || !collides(a.X, a.Y, b.X, b.Y) {
 				continue
 			}
-			if !friendlyFire && a.Faction == b.Faction {
-				continue
+
+			// ШКОДА — лише між ворожими (або за friendlyFire). Фізика нижче — для всіх.
+			if friendlyFire || a.Faction != b.Faction {
+				if nx, ny, ok := unitTo(a.X, a.Y, b.X, b.Y); ok {
+					aMax := a.Cfg.MaxSpeed * g.difficulty
+					bMax := b.Cfg.MaxSpeed * g.difficulty
+					if aMax > 0 && closingSpeed(a.VelX, a.VelY, nx, ny) >= impactThreshold(aMax) {
+						applyImpactDamage(a, b)
+					}
+					if bMax > 0 && closingSpeed(b.VelX, b.VelY, -nx, -ny) >= impactThreshold(bMax) {
+						applyImpactDamage(b, a)
+					}
+				}
 			}
-			nx, ny, ok := unitTo(a.X, a.Y, b.X, b.Y)
-			if !ok {
-				continue
-			}
-			aMax := a.Cfg.MaxSpeed * g.difficulty
-			bMax := b.Cfg.MaxSpeed * g.difficulty
-			if aMax > 0 && closingSpeed(a.VelX, a.VelY, nx, ny) >= impactThreshold(aMax) {
-				applyImpactDamage(a, b)
-			}
-			if bMax > 0 && closingSpeed(b.VelX, b.VelY, -nx, -ny) >= impactThreshold(bMax) {
-				applyImpactDamage(b, a)
-			}
+
+			// ФІЗИКА — незалежно від фракції, і ОБОВʼЯЗКОВО після шкоди: інакше удар
+			// рахувався б по вже відбитій швидкості (та сама пастка, що з гравцем).
+			separateUnits(a, b)
 		}
 	}
 }
