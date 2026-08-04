@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand"
 	"os"
@@ -220,6 +221,72 @@ var (
 	gruGradClip  = float32(0.5) // кліп градієнта по часу — тугіший = спокійніший BPTT
 )
 
+// ==========================================================================
+// [ПАМʼЯТЬ] КОНТРАКТ ПАМʼЯТІ — властивість МЕРЕЖІ, а не глобальний прапорець.
+//
+// Глобалі useGRU/memFrames/stackSkip лишаються, але тепер вони ДЕФОЛТИ, а не істина.
+// Причина: ваги навчені під ОДИН контракт входу, і всі мозки одного вулика
+// зобовʼязані його шанувати. А вулик ключується по WeightsFile, тож
+// ОДИН ФАЙЛ = ОДНА МЕРЕЖА = ОДИН КОНТРАКТ. Поняття вже існувало — глобальні
+// прапорці просто його порушували, і через це можна було мовчки завантажити
+// GRU-навчену мережу на стек-шлях і отримати випадкові ваги без попередження.
+// ==========================================================================
+
+// MemoryKind — ЯКИЙ шлях памʼяті використовує тип юніта.
+//
+// Тристан навмисно: із простим bool неможливо відрізнити «явно стек» від «не
+// задано», а треба вміти і те, й те — інакше кожен конфіг мусив би повторювати
+// глобальний вибір, і глобаль перестала б працювати як дефолт.
+type MemoryKind int
+
+const (
+	MemoryDefault MemoryKind = iota // бери глобальний useGRU
+	MemoryStack                     // frame-stacking незалежно від глобалі
+	MemoryGRU                       // рекурентна памʼять незалежно від глобалі
+)
+
+// memContract — форма входу й шлях навчання ОДНІЄЇ мережі.
+type memContract struct {
+	gru       bool
+	memFrames int
+	stackSkip int
+}
+
+// resolveMemContract — контракт типу юніта: що вказано в конфізі, решта з глобалей.
+func resolveMemContract(kind MemoryKind, frames, skip int) memContract {
+	c := memContract{gru: useGRU, memFrames: memFrames, stackSkip: stackSkip}
+	switch kind {
+	case MemoryStack:
+		c.gru = false
+	case MemoryGRU:
+		c.gru = true
+	}
+	if frames > 0 {
+		c.memFrames = frames
+	}
+	if skip > 0 {
+		c.stackSkip = skip
+	}
+	if c.memFrames > stackFrames {
+		c.memFrames = stackFrames // місткість стеку — константа (розмір входу мережі)
+	}
+	if c.memFrames < 1 {
+		c.memFrames = 1
+	}
+	if c.stackSkip < 1 {
+		c.stackSkip = 1
+	}
+	return c
+}
+
+// label — підпис контракту для панелі метрик: «gru» або «stk4/10».
+func (c memContract) label() string {
+	if c.gru {
+		return "gru"
+	}
+	return fmt.Sprintf("stk%d/%d", c.memFrames, c.stackSkip)
+}
+
 // sqrt2inv = 1/√2 — для діагональних напрямків (щоб були одиничної довжини).
 const sqrt2inv = 0.70710678
 
@@ -285,7 +352,11 @@ type Net struct {
 	mQSum  float32 // сума max Q(s) — канарка розбіжності (росте безмежно = біда)
 	mTDN   int     // кількість оновлень за період
 
-	// [RNN/GRU] Ваги рекурентної клітини (вживаються лише коли useGRU=true).
+	// [ПАМʼЯТЬ] Контракт цієї мережі: шлях навчання й форма входу. Задається при
+	// створенні з UnitConfig і НЕ міняється — під нього навчені ваги.
+	mem memContract
+
+	// [RNN/GRU] Ваги рекурентної клітини (вживаються лише коли mem.gru).
 	// GRU-клітина: вхід x(baseInputs) + попередній стан h(gruHidden) → новий h.
 	//   z — update gate (скільки нового пускати в памʼять)
 	//   r — reset gate (скільки старого забути перед оновленням)
@@ -417,7 +488,9 @@ func sigmoid(x float32) float32 {
 // NewNet створює мережу з Xavier-ініціалізацією (масштаб ~1/√fan_in),
 // щоб tanh не входив у насичення і градієнт не зникав.
 func NewNet() *Net {
-	n := &Net{}
+	// Дефолтний контракт — із глобалей. Так поводяться мережі без конфігу:
+	// мозок-жертва в self-play і всі тести, що створюють Net напряму.
+	n := &Net{mem: resolveMemContract(MemoryDefault, 0, 0)}
 	s1 := float32(math.Sqrt(1.0 / brainInputs))
 	for j := range n.W1 {
 		for i := range n.W1[j] {
@@ -611,7 +684,7 @@ func (b *Brain) rewardFor(hitWall bool, prevWhisker float32) float32 {
 // frame-stacking (brain_stack.go). Усе інше в них — незалежне.
 func (b *Brain) Step(cur [baseInputs]float32, hitWall bool) int {
 	b.age++ // [3] для автоспаду ε
-	if useGRU {
+	if b.net.mem.gru {
 		return b.stepGRU(cur, hitWall)
 	}
 	return b.stepStack(cur, hitWall)
@@ -625,7 +698,7 @@ func (b *Brain) Step(cur [baseInputs]float32, hitWall bool) int {
 //
 // [ДИСПЕТЧЕР] Той самий поділ шляхів, що й у Step.
 func (n *Net) train(k int) {
-	if useGRU {
+	if n.mem.gru {
 		n.trainSeq(seqBatch) // [RNN] рекурентний шлях — навчання на відрізках (BPTT)
 		return
 	}
@@ -902,6 +975,13 @@ type BrainData struct {
 	Hidden2 int `json:"hidden2"`
 	Actions int `json:"actions"`
 
+	// [КОНТРАКТ ПАМʼЯТІ] Під ЯКУ форму входу навчені ці ваги. Без цих полів можна
+	// було завантажити GRU-навчену мережу на стек-шлях і отримати випадкові ваги
+	// без жодного попередження. Файли без них (MemFrames == 0) — старі, приймаються.
+	Gru       bool `json:"gru"`
+	MemFrames int  `json:"memFrames"`
+	StackSkip int  `json:"stackSkip"`
+
 	W1 [brainHidden1][brainInputs]float32  `json:"w1"`
 	B1 [brainHidden1]float32               `json:"b1"`
 	W2 [brainHidden2][brainHidden1]float32 `json:"w2"`
@@ -937,11 +1017,12 @@ func SaveNet(n *Net) error {
 
 // newNetFor — нова або завантажена мережа для конкретного ТИПУ мозку.
 // Повертає також loaded: чи ваги реально прийшли з файлу (навчена → ε на floor).
-func newNetFor(path string) (n *Net, loaded bool) {
-	if n = loadNetFrom(path); n != nil {
+func newNetFor(path string, mem memContract) (n *Net, loaded bool) {
+	if n = loadNetFrom(path, mem); n != nil {
 		return n, true
 	}
 	n = NewNet()
+	n.mem = mem
 	n.file = path
 	return n, false
 }
@@ -950,6 +1031,7 @@ func newNetFor(path string) (n *Net, loaded bool) {
 func saveNetTo(n *Net, path string) error {
 	data := BrainData{
 		Inputs: brainInputs, Hidden1: brainHidden1, Hidden2: brainHidden2, Actions: brainActions,
+		Gru: n.mem.gru, MemFrames: n.mem.memFrames, StackSkip: n.mem.stackSkip,
 		W1: n.W1, B1: n.B1, W2: n.W2, B2: n.B2, W3: n.W3, B3: n.B3,
 		// [RNN] і рекурентні ваги — щоб gru-рій не вчився з нуля щоразу.
 		HasGRU: true, GruHidden: gruHidden,
@@ -966,13 +1048,13 @@ func saveNetTo(n *Net, path string) error {
 }
 
 // LoadNet завантажує мережу з файлу за замовчуванням (brainFile).
-func LoadNet() *Net { return loadNetFrom(brainFile) }
+func LoadNet() *Net { return loadNetFrom(brainFile, resolveMemContract(MemoryDefault, 0, 0)) }
 
 // loadNetFrom завантажує мережу з файлу. Повертає nil (→ caller створить NewNet),
 // якщо файлу немає, він пошкоджений, або РОЗМІРИ стек-мережі не збігаються.
 // GRU-ваги вантажимо, ЛИШЕ якщо файл їх містить і розмір h збігається; інакше —
 // initGRU (стара збірка чи інший gruHidden → рекурентна памʼять з нуля, стек цілий).
-func loadNetFrom(path string) *Net {
+func loadNetFrom(path string, want memContract) *Net {
 	bytes, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -985,7 +1067,26 @@ func loadNetFrom(path string) *Net {
 		data.Hidden2 != brainHidden2 || data.Actions != brainActions {
 		return nil // несумісна архітектура → почнемо з нуля
 	}
-	n := &Net{W1: data.W1, B1: data.B1, W2: data.W2, B2: data.B2, W3: data.W3, B3: data.B3}
+
+	// [КОНТРАКТ ПАМʼЯТІ] Валідація, якої раніше НЕ БУЛО — і це був справжній баг.
+	//
+	// Ваги навчені під конкретну форму входу. Без цієї перевірки можна було мовчки
+	// завантажити GRU-навчену мережу на стек-шлях: файл проходив валідацію (у ньому
+	// є обидва набори ваг), але W1/W2/W3 лежали на випадковій ініціалізації, бо
+	// GRU-навчання їх не торкалось. Ніякого попередження — просто випадкова політика.
+	// Те саме зі stackSkip: мережа, навчена на 4/10, спокійно вантажилась при 60 і
+	// далі вчилась на іншому розподілі входів.
+	//
+	// Файли БЕЗ записаного контракту (MemFrames == 0) — старі, приймаємо як є:
+	// інакше рефакторинг знецінив би вже накопичені ваги.
+	if data.MemFrames != 0 {
+		got := memContract{gru: data.Gru, memFrames: data.MemFrames, stackSkip: data.StackSkip}
+		if got != want {
+			return nil // навчена під інший контракт → чесніше почати з нуля
+		}
+	}
+
+	n := &Net{mem: want, W1: data.W1, B1: data.B1, W2: data.W2, B2: data.B2, W3: data.W3, B3: data.B3}
 	n.file = path // мережа памʼятає, звідки прийшла → туди ж і збережеться
 	if data.HasGRU && data.GruHidden == gruHidden {
 		n.Wz, n.Uz, n.Bz = data.Wz, data.Uz, data.Bz

@@ -72,6 +72,7 @@ func (c *curve) at(i int) float32 {
 // стало б зовсім нечитабельно.
 type hiveStat struct {
 	label  string     // «brain» / «killer» / «ally» — з імені файлу ваг
+	mem    string     // контракт памʼяті ЦЬОГО вулика: «gru» або «stk4/10»
 	color  color.RGBA // колір юнітів цього типу → лінія збігається з тим, що на полі
 	reward float32    // згладжені (EMA) поточні значення
 	tdErr  float32
@@ -154,7 +155,7 @@ func (m *Metrics) collect(g *Game) {
 		}
 		h := m.hives[key]
 		if h == nil {
-			h = &hiveStat{label: hiveLabel(key), color: u.Cfg.Color}
+			h = &hiveStat{label: hiveLabel(key), mem: b.net.mem.label(), color: u.Cfg.Color}
 			m.hives[key] = h
 			m.order = append(m.order, key)
 		}
@@ -290,30 +291,31 @@ func (m *Metrics) draw(screen *ebiten.Image) {
 	yellow := color.RGBA{230, 215, 95, 255}
 
 	// Рядок 0: ЯРЛИК КОНФІГУРАЦІЇ — щоб скріншоти A/B самі себе документували.
-	memMode := "stk"
-	if useGRU {
-		memMode = "gru"
-	}
 	y := float64(py) + pad + rowH*0.7
 	// stk<кадрів>/<крок>: САМЕ КРОК визначає, чи пам'ять суцільна, чи дірчаста, —
 	// а без нього два різні конфіги дають однаковий ярлик (stk4 при кроці 60 і
 	// при кроці 10). Один раз уже звіряли скріни навгад; більше не треба.
 	// frz — чи заморожена політика. Це найважливіший прапорець на скріні: замір із
 	// frz:off і frz:on відповідають на РІЗНІ питання, і сплутати їх не можна.
+	//
+	// Контракту памʼяті тут БІЛЬШЕ НЕМА: він переїхав у рядок кожного вулика, бо став
+	// властивістю мережі. Раніше «mem:stk stk4/10» малювалось раз на всю панель — і це
+	// був видимий слід глобального прапорця: різні типи фізично не могли мати різну
+	// памʼять. Тут лишилось тільки справді спільне для всіх.
 	cfgCol := cyan
 	if frozenPolicy {
 		cfgCol = color.RGBA{120, 235, 140, 255} // заморожено → зелений, видно здалеку
 	}
-	drawTextL(screen, fmt.Sprintf("mem:%s  stk%d/%d  local:%s  shared:%s  ai:%s  frz:%s  eps %.3f",
-		memMode, memFrames, stackSkip, onoff(localSight), onoff(sharedBrain), onoff(aiPlayer),
+	drawTextL(screen, fmt.Sprintf("local:%s  shared:%s  ai:%s  frz:%s  eps %.3f",
+		onoff(localSight), onoff(sharedBrain), onoff(aiPlayer),
 		onoff(frozenPolicy), m.firstEps()), font*0.85, float64(px)+pad, y, cfgCol)
 
 	// Рядок на КОЖЕН вулик — свої reward/TD/maxQ, кольором своїх юнітів.
 	for _, key := range m.order {
 		h := m.hives[key]
 		y += rowH
-		drawTextL(screen, fmt.Sprintf("%-11s r %+.3f    TD %.3f    Q %.2f",
-			h.label, h.reward, h.tdErr, h.maxQ), font, float64(px)+pad, y, h.color)
+		drawTextL(screen, fmt.Sprintf("%-7s %-9s r %+.3f  TD %.3f  Q %.2f",
+			h.label, h.mem, h.reward, h.tdErr, h.maxQ), font, float64(px)+pad, y, h.color)
 	}
 
 	// Криві reward — по одній на вулик, тим самим кольором, у СПІЛЬНОМУ масштабі

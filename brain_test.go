@@ -47,6 +47,8 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 	localSight = false // тест переслідування — з ПОВНОЮ спостережуваністю
 	defer func() { localSight = saved }()
 
+	// Контракт памʼяті тепер живе в Net, але глобаль лишилась ДЕФОЛТОМ для мереж,
+	// створених без конфігу (як NewBrain нижче) — тож пінимо саме її.
 	savedGRU := useGRU
 	useGRU = false // цей тест перевіряє СТЕК-шлях (Step/train/forwardQ)
 	defer func() { useGRU = savedGRU }()
@@ -104,7 +106,7 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 	for _, off := range offsets {
 		player.X, player.Y = enemy.X+off[0], enemy.Y+off[1]
 		state := GatherInputs(enemy, player)
-		q, _, _ := b.net.forwardQ(stackSteady(state)) // [ПАМ'ЯТЬ] проба усталеним стеком
+		q, _, _ := b.net.forwardQ(b.net.stackSteady(state)) // [ПАМ'ЯТЬ] проба усталеним стеком
 		a := argmaxQ(q)
 		n := float32(math.Sqrt(float64(off[0]*off[0] + off[1]*off[1])))
 		sumDot += dirs8[a][0]*off[0]/n + dirs8[a][1]*off[1]/n
@@ -216,7 +218,7 @@ func TestSaveLoadGRURoundTrip(t *testing.T) {
 	if err := saveNetTo(n, path); err != nil {
 		t.Fatal(err)
 	}
-	m := loadNetFrom(path)
+	m := loadNetFrom(path, n.mem) // той самий контракт, під який зберігали
 	if m == nil {
 		t.Fatal("loadNetFrom повернув nil")
 	}
@@ -240,7 +242,9 @@ func TestSaveLoadGRURoundTrip(t *testing.T) {
 	if err := os.WriteFile(oldPath, b, 0644); err != nil {
 		t.Fatal(err)
 	}
-	m2 := loadNetFrom(oldPath)
+	// Старий файл БЕЗ контракту (MemFrames == 0) мусить прийматись як є — інакше
+	// рефакторинг знецінив би вже накопичені ваги.
+	m2 := loadNetFrom(oldPath, n.mem)
 	if m2 == nil {
 		t.Fatal("старий файл: loadNetFrom повернув nil")
 	}
@@ -844,5 +848,95 @@ func TestRestartKeepsBrains(t *testing.T) {
 	}
 	if g.paused {
 		t.Error("рестарт із паузи лишив світ застиглим")
+	}
+}
+
+// TestMemoryContractIsPerNetwork — головна обіцянка рефакторингу: два типи юнітів
+// можуть мати РІЗНУ памʼять одночасно. Доти це було неможливо — Step і train
+// дивились на глобальний useGRU, тобто «усе або ніщо».
+//
+// Заразом перевіряємо, що глобаль лишилась ДЕФОЛТОМ: тип, який нічого не вказав,
+// мусить її успадкувати, інакше кожен конфіг був би змушений повторювати вибір.
+func TestMemoryContractIsPerNetwork(t *testing.T) {
+	savedRoster, savedShared := unitRoster, sharedBrain
+	savedGRU, savedFrames, savedSkip := useGRU, memFrames, stackSkip
+	defer func() {
+		unitRoster, sharedBrain = savedRoster, savedShared
+		useGRU, memFrames, stackSkip = savedGRU, savedFrames, savedSkip
+	}()
+	sharedBrain = true
+	useGRU, memFrames, stackSkip = false, 4, 10 // глобаль = стек 4/10
+
+	// Файли неіснуючі: тест не має читати реальні ваги з робочої теки.
+	mk := func(file string, kind MemoryKind, frames, skip int) UnitConfig {
+		c := ConfigLearner
+		c.Count, c.WeightsFile = 1, file
+		c.Memory, c.MemFrames, c.StackSkip = kind, frames, skip
+		return c
+	}
+	unitRoster = []UnitConfig{
+		mk("test_mem_stack.json", MemoryStack, 1, 0),     // явно стек, без історії
+		mk("test_mem_gru.json", MemoryGRU, 0, 0),         // явно GRU
+		mk("test_mem_default.json", MemoryDefault, 0, 0), // успадковує глобаль
+	}
+
+	got := map[string]memContract{}
+	for _, u := range newUnits() {
+		if u.Brain == nil || u.Brain.net == nil {
+			t.Fatal("юніт без мережі")
+		}
+		got[u.Cfg.WeightsFile] = u.Brain.net.mem
+	}
+
+	if c := got["test_mem_stack.json"]; c.gru || c.memFrames != 1 || c.stackSkip != 10 {
+		t.Errorf("явний стек: отримали gru=%v frames=%d skip=%d", c.gru, c.memFrames, c.stackSkip)
+	}
+	if c := got["test_mem_gru.json"]; !c.gru {
+		t.Error("явний GRU не застосувався — памʼять досі керується глобаллю")
+	}
+	if c := got["test_mem_default.json"]; c.gru || c.memFrames != 4 || c.stackSkip != 10 {
+		t.Errorf("дефолт не успадкував глобаль: gru=%v frames=%d skip=%d", c.gru, c.memFrames, c.stackSkip)
+	}
+
+	// Найважливіше: стек і GRU СПІВІСНУЮТЬ на одному полі.
+	if got["test_mem_stack.json"].gru == got["test_mem_gru.json"].gru {
+		t.Error("два типи отримали однаковий шлях памʼяті — рефакторинг не працює")
+	}
+}
+
+// TestLoadRejectsWrongMemoryContract — ваги навчені під конкретну форму входу, і
+// завантажувати їх під іншу не можна.
+//
+// Це закриття СПРАВЖНЬОГО бага: раніше можна було мовчки завантажити GRU-навчену
+// мережу на стек-шлях. Файл проходив валідацію (у ньому є обидва набори ваг), але
+// W1/W2/W3 лежали на випадковій ініціалізації — GRU-навчання їх не торкалось. Ніякого
+// попередження, просто випадкова політика. Ми робили саме це під час GRU-експериментів.
+func TestLoadRejectsWrongMemoryContract(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/w.json"
+
+	trained := memContract{gru: true, memFrames: 4, stackSkip: 10}
+	n := NewNet()
+	n.mem = trained
+	if err := saveNetTo(n, path); err != nil {
+		t.Fatal(err)
+	}
+
+	if loadNetFrom(path, trained) == nil {
+		t.Fatal("той самий контракт мусить вантажитись")
+	}
+
+	cases := []struct {
+		name string
+		want memContract
+	}{
+		{"інший ШЛЯХ памʼяті (GRU-ваги на стек)", memContract{gru: false, memFrames: 4, stackSkip: 10}},
+		{"інший КРОК семплів", memContract{gru: true, memFrames: 4, stackSkip: 60}},
+		{"інша ГЛИБИНА памʼяті", memContract{gru: true, memFrames: 1, stackSkip: 10}},
+	}
+	for _, c := range cases {
+		if loadNetFrom(path, c.want) != nil {
+			t.Errorf("%s: мережа завантажилась, хоч навчена під інший контракт", c.name)
+		}
 	}
 }

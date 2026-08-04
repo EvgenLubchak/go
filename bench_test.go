@@ -277,20 +277,18 @@ func benchList(v []float32) string {
 // саме те, що потрібно. Якщо колись знадобиться відтворити конкретний прогін для
 // відладки, запускай із GODEBUG=randseednop=0 і поверни сіди.
 func runBenchTrial(c benchCfg, warmup, measure int, moving bool) (live, frozen benchOut) {
-	savedRoster, savedGRU := unitRoster, useGRU
-	savedSkip, savedFrames, savedFrozen := stackSkip, memFrames, frozenPolicy
+	savedRoster, savedFrozen := unitRoster, frozenPolicy
 	savedLR, savedGamma, savedClip := gruLearnRate, qGamma, qClip
 	savedSight := sightRange
 	savedShared := sharedBrain
 	defer func() {
 		sharedBrain = savedShared
-		unitRoster, useGRU = savedRoster, savedGRU
-		stackSkip, memFrames, frozenPolicy = savedSkip, savedFrames, savedFrozen
+		unitRoster, frozenPolicy = savedRoster, savedFrozen
 		gruLearnRate, qGamma, qClip = savedLR, savedGamma, savedClip
 		sightRange = savedSight
 	}()
 
-	useGRU, stackSkip, memFrames, frozenPolicy = c.gru, c.skip, c.frames, false
+	frozenPolicy = false
 	if c.gruLR > 0 {
 		gruLearnRate = c.gruLR
 	}
@@ -308,9 +306,18 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving bool) (live, frozen b
 
 	sharedBrain = !c.indep
 
+	// [КОНТРАКТ ПАМʼЯТІ] Тепер задається через КОНФІГ, а не через глобалі: памʼять
+	// стала властивістю мережі. Стенд від цього тільки чистіший — конфіг прогону
+	// описується в одному місці й не тече в глобальний стан процесу.
 	learner := ConfigLearner
 	learner.Count = c.units
 	learner.WeightsFile = "" // ефемерні ваги: стенд не читає й не пише файли на диск
+	learner.Memory = MemoryStack
+	if c.gru {
+		learner.Memory = MemoryGRU
+	}
+	learner.MemFrames = c.frames
+	learner.StackSkip = c.skip
 	if c.wander > 0 {
 		learner.WanderStrength = c.wander
 	}

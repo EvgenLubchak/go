@@ -45,6 +45,19 @@ type UnitConfig struct {
 	// − за отриману, ++ за вбивство). Окремий прапорець від UsesFlowField, щоб
 	// можна було вмикати їх незалежно (напр. дати бойову нагороду і рою — для A/B).
 	CombatReward bool
+
+	// [ПАМʼЯТЬ] Контракт памʼяті ЦЬОГО типу. Нуль/MemoryDefault = взяти глобаль
+	// (useGRU / memFrames / stackSkip у main.go і brain.go).
+	//
+	// Тристан у Memory навмисно: із простим bool неможливо відрізнити «явно стек» від
+	// «не задано», і глобаль перестала б працювати як дефолт.
+	//
+	// Контракт стає властивістю МЕРЕЖІ, тож два типи з різною памʼяттю обовʼязково
+	// мусять мати різні WeightsFile — інакше вони поділили б одну мережу з одним
+	// контрактом, і другий тип тихо отримав би чужу форму входу.
+	Memory    MemoryKind
+	MemFrames int // 0 = глобальний memFrames
+	StackSkip int // 0 = глобальний stackSkip
 }
 
 // [GO: PACKAGE-LEVEL VAR]
@@ -286,10 +299,16 @@ var (
 	// Ваги в окремому файлі: рій ти скидаєш регулярно, а бос накопичується через усі
 	// сесії й ніколи не забуває. Він вчиться повільно — але назавжди.
 	//
-	// ПАМʼЯТЬ У БОСА ЗАРАЗ СТЕКОВА, НЕ GRU. Тип памʼяті задається глобальним useGRU
-	// (main.go) і діє на всіх однаково — окремо для типу його поставити неможливо.
-	// Плюс GRU на замірах не відрізнявся від відсутності памʼяті навіть на одинаку.
-	// Деталі й порядок робіт — у коментарі до useGRU.
+	// ПАМʼЯТЬ ЗАДАНА ЯВНО (Memory: MemoryStack), а не успадкована з глобалі.
+	//
+	// Це рішення, а не дефолт: GRU на замірах виявився нерозрізненним від ВІДСУТНОСТІ
+	// памʼяті навіть на одинаку (52% і 44% домінування при двох темпах навчання,
+	// p = 0.76 і 0.37), тож бос на GRU вийшов би гіршим за звичайного юніта рою.
+	// Стек — єдина конфігурація памʼяті, доведена на одинаку (65%, p = 0.004).
+	//
+	// Явно ще й тому, що тепер глобальний useGRU — лише ДЕФОЛТ: перемикаючи його для
+	// експериментів, ти більше не зачепиш боса випадково. Коли важіль BPTT буде
+	// полагоджено (див. коментар до useGRU), тут зміниться одне слово на MemoryGRU.
 	ConfigBoss = UnitConfig{
 		WanderStrength:  0.0, // жодного некерованого руху (див. ConfigLearner)
 		AlignmentRate:   0.0, // одинак — з ким йому флокуватись
@@ -308,8 +327,9 @@ var (
 		Color:           color.RGBA{235, 70, 160, 255}, // малиновий — не сплутати ні з ким
 		Label:           "$_$",
 		IsLearner:       true,
-		UsesFlowField:   false, // ← памʼять має на що працювати лише без поля
-		CombatReward:    true,  // бос мусить вчитись БИТИ, а не наздоганяти
+		UsesFlowField:   false,       // ← памʼять має на що працювати лише без поля
+		CombatReward:    true,        // бос мусить вчитись БИТИ, а не наздоганяти
+		Memory:          MemoryStack, // ← ЯВНО, не з глобалі (див. вище)
 	}
 )
 
@@ -431,14 +451,14 @@ func newUnitsWithHive(hive map[string]*Net) []Pixel {
 	for file := range hive {
 		hiveLoaded[file] = true // передана мережа = вже навчена → ε-floor
 	}
-	netFor := func(file string) (*Net, bool) {
+	netFor := func(file string, mem memContract) (*Net, bool) {
 		if !sharedBrain {
-			return newNetFor(file) // кожен агент — власна мережа
+			return newNetFor(file, mem) // кожен агент — власна мережа
 		}
 		if n, ok := hive[file]; ok {
 			return n, hiveLoaded[file]
 		}
-		n, loaded := newNetFor(file)
+		n, loaded := newNetFor(file, mem)
 		hive[file], hiveLoaded[file] = n, loaded
 		return n, loaded
 	}
@@ -484,7 +504,8 @@ func newUnitsWithHive(hive map[string]*Net) []Pixel {
 			// кожен має власну (завантажену з файлу або нову).
 			var brain *Brain
 			if cfg.IsLearner {
-				net, loaded := netFor(cfg.WeightsFile)
+				mem := resolveMemContract(cfg.Memory, cfg.MemFrames, cfg.StackSkip)
+				net, loaded := netFor(cfg.WeightsFile, mem)
 				brain = NewBrainWith(net)
 				brain.combat = cfg.CombatReward   // [БІЙ] бойові члени нагороди
 				brain.flowNav = cfg.UsesFlowField // [ВБИВЦЯ] прогрес міряємо вздовж коридору

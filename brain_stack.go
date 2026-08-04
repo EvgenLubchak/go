@@ -35,7 +35,7 @@ func (b *Brain) buildStacked(cur [baseInputs]float32) [brainInputs]float32 {
 	// Лише memFrames-1 історичних слотів; решта лишається НУЛЯМИ. Так глибина
 	// памʼяті регулюється в рантаймі без зміни розміру мережі — мережа просто
 	// вчиться ігнорувати мертві входи.
-	for f := 0; f < memFrames-1 && f < stackFrames-1; f++ {
+	for f := 0; f < b.net.mem.memFrames-1 && f < stackFrames-1; f++ {
 		copy(s[(f+1)*baseInputs:(f+2)*baseInputs], b.frames[f][:])
 	}
 	return s
@@ -43,12 +43,13 @@ func (b *Brain) buildStacked(cur [baseInputs]float32) [brainInputs]float32 {
 
 // stackSteady будує стек, повторюючи ОДИН кадр (усталене сприйняття) — зручно
 // для проб/тестів, коли історія не важлива.
-func stackSteady(cur [baseInputs]float32) [brainInputs]float32 {
+func (n *Net) stackSteady(cur [baseInputs]float32) [brainInputs]float32 {
 	var s [brainInputs]float32
-	// Ті самі memFrames, що й у buildStacked: проба мусить мати ту саму форму
+	// Той самий memFrames, що й у buildStacked: проба мусить мати ту саму форму
 	// входу, що й жива політика, інакше вона зондує мережу в режимі, якого та
-	// ніколи не бачила.
-	for f := 0; f < memFrames && f < stackFrames; f++ {
+	// ніколи не бачила. Тепер беремо його з КОНТРАКТУ мережі, а не з глобалі —
+	// інакше проба могла б не збігтися з тим, під що навчені ваги.
+	for f := 0; f < n.mem.memFrames && f < stackFrames; f++ {
 		copy(s[f*baseInputs:(f+1)*baseInputs], cur[:])
 	}
 	return s
@@ -225,7 +226,7 @@ func (b *Brain) stepStack(cur [baseInputs]float32, hitWall bool) int {
 	// Індекс СКРІЗЬ змінна i (не літерал 0) — інакше при stackFrames=1 масив frames
 	// має тип [0] і Go бракує константний frames[0] ще на компіляції.
 	b.frameTick++
-	if b.frameTick >= stackSkip {
+	if b.frameTick >= b.net.mem.stackSkip {
 		b.frameTick = 0
 		for i := stackFrames - 2; i >= 0; i-- {
 			if i > 0 {
