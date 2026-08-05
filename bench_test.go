@@ -67,12 +67,21 @@ type benchCfg struct {
 	// [БІЙ] Вимикання бойових ознак. Не «увімкнути», а саме ВИМКНУТИ: у грі вони
 	// обидві є, тож нульове значення поля = поведінка гри, і комірку описує лише те,
 	// чим вона від гри ВІДРІЗНЯЄТЬСЯ.
-	offDashOpen bool    // слот 14: вікно покарання
-	offDashAtMe bool    // слот 15: телеграф замаху
-	speed       float32 // MaxSpeed типу. qClip масштабується автоматично
-	sight       float32 // sightRange; 0 = лишити поточний
-	indep       bool    // true = sharedBrain=false (у кожного юніта СВОЯ мережа)
-	wander      float32 // WanderStrength; 0 = лишити конфігове (у учнів воно теж 0)
+	offDashOpen bool // слот 14: вікно покарання
+	offDashAtMe bool // слот 15: телеграф замаху
+
+	// [РОЗІГРІВ] Покомірково, 0 = глобальний BENCH_WARMUP.
+	//
+	// Потрібен саме покомірковий, а не окремі прогони: різниця між двома НОМІНАЛЬНО
+	// ОДНАКОВИМИ комірками в різних прогонах становить ~1.2 пункту (зміряно), і на цій
+	// шумовій підлозі я вже спіймався, оголосивши ефект у +2.4 пункту. Порівняння
+	// всередині одного прогону цієї підлоги не має.
+	warmup int
+
+	speed  float32 // MaxSpeed типу. qClip масштабується автоматично
+	sight  float32 // sightRange; 0 = лишити поточний
+	indep  bool    // true = sharedBrain=false (у кожного юніта СВОЯ мережа)
+	wander float32 // WanderStrength; 0 = лишити конфігове (у учнів воно теж 0)
 }
 
 // benchOut — те, що знімаємо з одного вікна заміру.
@@ -268,6 +277,25 @@ func TestMemoryBench(t *testing.T) {
 			// УВАГА: поріг удару = max(0.6×MaxSpeed, 0.4), тож піднявши швидкість, ми
 			// піднімаємо і планку. Влучати НЕ стане легше — виграш лише в ІНІЦІАТИВІ.
 			{name: "швидкість 1.2 (ініціатива)", base: &w, units: 1, speed: 1.2},
+		}
+	}
+	if os.Getenv("BENCH_SET") == "soak" {
+		// [ЧАС НАВЧАННЯ] Чи стражник просто не ДОЖИВАЄ до поведінки?
+		//
+		// Гравець каже, що в грі стражник помітно ухиляється, а стенд цього не бачить.
+		// Одна різниця досі не перевірена: у грі ваги ЗБЕРІГАЮТЬСЯ між сесіями
+		// (wardenFile), тобто накопичують сотні тисяч кадрів, а стенд щоразу вчиться з
+		// нуля за 60000. Можливо, ми міряємо агента, який ще не встиг.
+		//
+		// Конфіг у всіх комірках ОДНАКОВИЙ — як у грі. Змінюється лише розігрів.
+		if !combat || !benchDriveSeek || !benchArena {
+			t.Fatal("набір soak вимагає BENCH_COMBAT=1 BENCH_SEEK=1 BENCH_ARENA=1")
+		}
+		w := ConfigWarden
+		cfgs = []benchCfg{
+			{name: "розігрів 60k (як досі)", base: &w, units: 1, warmup: 60000},
+			{name: "розігрів 180k", base: &w, units: 1, warmup: 180000},
+			{name: "розігрів 360k", base: &w, units: 1, warmup: 360000},
 		}
 	}
 	if os.Getenv("BENCH_SET") == "horizon2" {
@@ -555,6 +583,9 @@ func benchList(v []float32) string {
 // саме те, що потрібно. Якщо колись знадобиться відтворити конкретний прогін для
 // відладки, запускай із GODEBUG=randseednop=0 і поверни сіди.
 func runBenchTrial(c benchCfg, warmup, measure int, moving, combat bool) (live, frozen benchOut) {
+	if c.warmup > 0 {
+		warmup = c.warmup
+	}
 	savedRoster, savedFrozen := unitRoster, frozenPolicy
 	savedLR, savedGamma, savedClip := gruLearnRate, qGamma, qClip
 	savedSight := sightRange
