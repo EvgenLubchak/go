@@ -1016,3 +1016,83 @@ func TestGammaStepMatchesSkip(t *testing.T) {
 		t.Errorf("γ^20 = %.3f — поза очікуваним діапазоном 0.30..0.40", g)
 	}
 }
+
+// TestCombatOnlyRewardHasNoChaseTerm — головна ручка експерименту зі стражником.
+//
+// Наша щільна нагорода фактично ПІДКАЗУЄ напрямок: progressToward рахує прогрес від
+// істинного напрямку навіть коли ціль не видно. Саме через це памʼять у нас нічого не
+// дала. CombatOnly прибирає цей член — і тест пінить, що прибирає САМЕ його, а не
+// заодно штрафи за стіни (вони походять від вусів, тобто від того, що агент бачить, і
+// експерименту не псують).
+func TestCombatOnlyRewardHasNoChaseTerm(t *testing.T) {
+	mk := func(combatOnly bool) *Brain {
+		b := NewBrain()
+		b.combat, b.combatOnly = true, combatOnly
+		b.progress = 1.0 // сильний «прогрес до цілі»
+		return b
+	}
+
+	// 1) Щільний член: у звичайного є, у combatOnly немає.
+	normal := mk(false).rewardFor(false, 0)
+	only := mk(true).rewardFor(false, 0)
+	if normal <= 0 {
+		t.Fatalf("звичайна нагорода не побачила прогрес: %.4f", normal)
+	}
+	if only != 0 {
+		t.Errorf("combatOnly отримав %.4f за прогрес — щільний член не прибрано", only)
+	}
+
+	// 2) Штрафи за стіни МУСЯТЬ лишитись: вони не підказують, де ціль.
+	wall := mk(true)
+	if r := wall.rewardFor(true, 0.5); r >= 0 {
+		t.Errorf("combatOnly не отримав штрафу за стіну: %.4f", r)
+	}
+
+	// 3) Бойові члени працюють — інакше в нього не лишилось би сигналу зовсім.
+	hit := mk(true)
+	hit.dmgDealt = 1
+	if r := hit.rewardFor(false, 0); r <= 0 {
+		t.Errorf("combatOnly не отримав нагороди за влучання: %.4f — сигналу немає взагалі", r)
+	}
+	hurt := mk(true)
+	hurt.dmgTaken = 1
+	if r := hurt.rewardFor(false, 0); r >= 0 {
+		t.Errorf("combatOnly не отримав штрафу за пропущений удар: %.4f", r)
+	}
+}
+
+// TestPlayerMeleeCreditsBrain — удар пробілом мусить доходити до мозку цілі.
+//
+// Був справжній пропуск: playerAttack міняв HP напряму, обходячи applyImpactDamage,
+// тож dmgTaken не реєструвався НІКОЛИ. Отже всі агенти з CombatReward учились не
+// відчуваючи головної зброї гравця. Для стражника, у якого бойова нагорода — ЄДИНЕ
+// джерело сигналу, це зробило б навчання беззмістовним.
+func TestPlayerMeleeCreditsBrain(t *testing.T) {
+	savedRoster, savedMap := unitRoster, tileMap
+	tileMap = [boidMapH][boidMapW]bool{}
+	defer func() { unitRoster, tileMap = savedRoster, savedMap }()
+
+	w := ConfigWarden
+	w.Count, w.WeightsFile = 1, "test_warden_never_exists.json"
+	unitRoster = []UnitConfig{w}
+
+	g := &Game{difficulty: 1.0, units: newUnits()}
+	g.player = Pixel{X: g.units[0].X, Y: g.units[0].Y, HP: 10, MaxHP: 10, Faction: factionPlayer}
+
+	b := g.units[0].Brain
+	if b == nil {
+		t.Fatal("стражник без мозку")
+	}
+	hpBefore := g.units[0].HP
+
+	// Викликаємо тіло атаки напряму: сама playerAttack читає клавіатуру (ebiten),
+	// якої в тесті немає. Перевіряємо саме нарахування, а не введення.
+	g.applyPlayerMelee()
+
+	if g.units[0].HP != hpBefore-attackDamage {
+		t.Errorf("HP не зменшилось: %d → %d", hpBefore, g.units[0].HP)
+	}
+	if b.dmgTaken != attackDamage {
+		t.Errorf("шкода не зарахована в мозок: dmgTaken %d, очікували %d", b.dmgTaken, attackDamage)
+	}
+}

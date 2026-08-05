@@ -223,12 +223,18 @@ func applyImpactDamage(attacker, target *Pixel) {
 	// пропорційний відскок (bodyBounce), удар — фіксований великий імпульс.
 	if attacker != nil {
 		if nx, ny, ok := unitTo(attacker.X, attacker.Y, target.X, target.Y); ok {
-			target.VelX += nx * knockbackImpulse
-			target.VelY += ny * knockbackImpulse
+			// [ВАГА] KnockResist: 0 = відлітає повністю, 1 = не рухається зовсім.
+			// Потрібен для «важких» типів: стражник, який відлітає на три корпуси від
+			// кожного удару, перестає бути стражником — його задача тримати місце.
+			tImp := knockbackImpulse * (1 - target.KnockResist)
+			aImp := knockbackImpulse * knockbackRecoil * (1 - attacker.KnockResist)
+
+			target.VelX += nx * tImp
+			target.VelY += ny * tImp
 			target.KnockTimer = knockFrames
 
-			attacker.VelX -= nx * knockbackImpulse * knockbackRecoil
-			attacker.VelY -= ny * knockbackImpulse * knockbackRecoil
+			attacker.VelX -= nx * aImp
+			attacker.VelY -= ny * aImp
 			attacker.KnockTimer = knockFrames
 		}
 	}
@@ -333,7 +339,12 @@ func (g *Game) playerAttack() {
 	}
 	g.attackCooldown = attackCooldownMax
 	g.attackTimer = attackDuration
+	g.applyPlayerMelee()
+}
 
+// applyPlayerMelee — саме НАРАХУВАННЯ удару, окремо від читання клавіатури.
+// Розділено, щоб це можна було перевірити тестом: ebiten у тесті недоступний.
+func (g *Game) applyPlayerMelee() {
 	px := g.player.X + pixelSize/2
 	py := g.player.Y + pixelSize/2
 
@@ -347,6 +358,24 @@ func (g *Game) playerAttack() {
 		if dist <= attackRadius {
 			e.HP -= attackDamage
 			e.HitTimer = hitFlashDuration
+
+			// [БІЙ: АТРИБУЦІЯ] Зараховуємо шкоду в мозок ЦІЛІ.
+			//
+			// Раніше цього не було, і це був справжній пропуск: удар пробілом міняв HP
+			// напряму, обходячи applyImpactDamage, тож dmgTaken не реєструвався НІКОЛИ.
+			// Отже всі агенти з CombatReward (вбивці, союзники) вчились не відчуваючи
+			// ГОЛОВНОЇ зброї гравця — їхній rewardDamageTaken = −2 спрацьовував лише
+			// від зіткнень. Для боса з ОДНОЮ бойовою нагородою це зробило б навчання
+			// беззмістовним: половина подій, на які він мусить реагувати, була невидима.
+			if e.Brain != nil {
+				e.Brain.dmgTaken += attackDamage
+				if e.HP <= 0 && g.player.Brain != nil {
+					g.player.Brain.kills++ // [SELF-PLAY] жертві теж треба знати результат
+				}
+			}
+			if g.player.Brain != nil {
+				g.player.Brain.dmgDealt += attackDamage
+			}
 		}
 	}
 }
