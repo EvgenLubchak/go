@@ -33,6 +33,9 @@ import (
 //	BENCH_WARMUP=20000 тіків навчання перед заміром
 //	BENCH_MEASURE=6000 тіків у кожному вікні заміру
 //	BENCH_MOVING=1     1 = гравець рухається, 0 = стоїть
+//	BENCH_COMBAT=0     1 = увімкнути бій (респаун стенд ставить безкінечний сам).
+//	                   Вимкнений за замовчуванням: усі записані базові лінії зняті
+//	                   без бою, і тихо ввімкнути його означало б їх знецінити
 //
 // ЧОМУ ГРАВЕЦЬ РУХАЄТЬСЯ ЗА ЗАМОВЧУВАННЯМ. Ручний протокол вимагав стояти
 // нерухомо — і це виявилось найгіршим можливим вибором: рій злипався на цілі,
@@ -77,6 +80,11 @@ func TestMemoryBench(t *testing.T) {
 	warmup := benchEnvInt("BENCH_WARMUP", 20000)
 	measure := benchEnvInt("BENCH_MEASURE", 6000)
 	moving := benchEnvInt("BENCH_MOVING", 1) != 0
+	// [БІЙ] Вимкнений ЗА ЗАМОВЧУВАННЯМ навмисно: усі вже записані базові лінії
+	// (пул «без памʼяті» на 72 прогони, свіпи горизонту й зору) зняті без бою, і
+	// увімкнути його тихо означало б знецінити їх — нові числа перестали б із ними
+	// порівнюватись. Вмикати свідомо, для тих замірів, де бій і є предметом.
+	combat := benchEnvInt("BENCH_COMBAT", 0) != 0
 
 	// BENCH_SET=main — порівняння архітектур; sweep — горизонт памʼяті одинака.
 	cfgs := []benchCfg{
@@ -232,7 +240,7 @@ func TestMemoryBench(t *testing.T) {
 		frozen := make([]float32, 0, seeds)
 		chase := make([]float32, 0, seeds)
 		for s := 0; s < seeds; s++ {
-			l, f := runBenchTrial(c, warmup, measure, moving)
+			l, f := runBenchTrial(c, warmup, measure, moving, combat)
 			live = append(live, l.blind)
 			frozen = append(frozen, f.blind)
 			chase = append(chase, l.chase)
@@ -304,7 +312,7 @@ func benchList(v []float32) string {
 // Виклик прибрано, а не «полагоджено»: для оцінки РОЗПОДІЛУ незалежні вибірки —
 // саме те, що потрібно. Якщо колись знадобиться відтворити конкретний прогін для
 // відладки, запускай із GODEBUG=randseednop=0 і поверни сіди.
-func runBenchTrial(c benchCfg, warmup, measure int, moving bool) (live, frozen benchOut) {
+func runBenchTrial(c benchCfg, warmup, measure int, moving, combat bool) (live, frozen benchOut) {
 	savedRoster, savedFrozen := unitRoster, frozenPolicy
 	savedLR, savedGamma, savedClip := gruLearnRate, qGamma, qClip
 	savedSight := sightRange
@@ -340,6 +348,10 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving bool) (live, frozen b
 	learner := ConfigLearner
 	learner.Count = c.units
 	learner.WeightsFile = "" // ефемерні ваги: стенд не читає й не пише файли на диск
+	// [РЕСПАУН] Стенд ЗАВЖДИ ставить безкінечний респаун, хоч би що стояло в конфізі
+	// типу: стала популяція означає, що знаменник метрик не пливе. Без цього прогін,
+	// у якому пощастило вижити, не порівнювався б із прогоном, де юнітів вибили.
+	learner.Respawns = -1
 	learner.Memory = MemoryStack
 	if c.gru {
 		learner.Memory = MemoryGRU
@@ -353,21 +365,21 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving bool) (live, frozen b
 	unitRoster = []UnitConfig{learner}
 
 	g := newBenchGame()
-	drive := benchDriver(moving)
+	drive := benchDriver(moving, combat)
 
 	for i := 0; i < warmup; i++ {
-		g.tickHeadless(drive)
+		g.tickHeadless(drive, combat)
 	}
 	g.metrics.resetCounters()
 	for i := 0; i < measure; i++ {
-		g.tickHeadless(drive)
+		g.tickHeadless(drive, combat)
 	}
 	live = readBench(&g.metrics)
 
 	frozenPolicy = true
 	g.metrics.resetCounters()
 	for i := 0; i < measure; i++ {
-		g.tickHeadless(drive)
+		g.tickHeadless(drive, combat)
 	}
 	frozen = readBench(&g.metrics)
 	return live, frozen
@@ -393,13 +405,18 @@ func newBenchGame() *Game {
 // Повторює Game.Update, окрім двох речей, що читають клавіатуру: handlePlayerInput
 // (замінений на drive) і playerAttack (у замірі гравець не бʼється).
 //
-// БОЮ ТУТ НЕМАЄ НАВМИСНО (немає resolveImpacts/removeDeadUnits/checkCollisions).
-// Гравець рухається на 5 px/кадр, тож удари на швидкості вибивають учнів, а
-// респауну в нас поки немає. На калібруванні це вже з'їло цілий прогін: конфіг
-// з одним юнітом втратив його ще на розігріві й видав рівні нулі. До памʼяті
-// бій стосунку не має, тому просто не запускаємо його — так кількість агентів
-// стала сталою, і знаменник метрики більше не залежить від везіння.
-func (g *Game) tickHeadless(drive func(*Game)) {
+// БІЙ — ЗА ПРАПОРЦЕМ. Спершу його тут не було зовсім: удари на швидкості вибивали
+// учнів, а респауну не існувало, і на калібруванні це з'їло цілий прогін (конфіг з
+// одним юнітом втратив його на розігріві й видав рівні нулі).
+//
+// Тепер респаун є, і бій можна вмикати — але лише свідомо. Причина в порівнянності:
+// усі записані базові лінії зняті БЕЗ бою, тож тихо його ввімкнути означало б їх
+// знецінити. Стенд при цьому завжди ставить безкінечний респаун, щоб населення не
+// пливло.
+//
+// checkCollisions не викликаємо й у бойовому режимі: playerMaxHP такий, що гравець не
+// гине, а смерть перезапустила б рівень посеред вікна заміру.
+func (g *Game) tickHeadless(drive func(*Game), combat bool) {
 	g.tick++
 	drive(g)
 	g.updatePlayer()
@@ -409,19 +426,42 @@ func (g *Game) tickHeadless(drive func(*Game)) {
 	g.trainBrains()
 	g.metrics.collect(g)
 	g.updateUnits()
+	if combat {
+		g.resolveImpacts()
+		for i := range g.units {
+			g.pushOffPlayer(&g.units[i])
+		}
+		g.handleDeadUnits()
+	}
 }
 
 // benchDriver — скриптований гравець. Не намагається бути розумним: тримає
 // випадковий напрямок benchTurnEvery тіків, тоді бере новий. Об стіни не думає —
 // updatePlayer сам зупиняє відповідну вісь, і виходить ковзання вздовж стін,
 // схоже на живу гру. Головне, що це РУХ: рій мусить шукати ціль, а не висіти на ній.
-func benchDriver(moving bool) func(*Game) {
+func benchDriver(moving, combat bool) func(*Game) {
+	// [БІЙ] Скриптований гравець ще й АТАКУЄ — інакше агенти з бойовою нагородою
+	// (стражник, у якого вона єдина) не отримали б жодної нагородної події, і замір
+	// був би про ніщо. Ритм той самий, що дозволяє гра: раз на attackCooldownMax.
+	attackTick := 0
+	melee := func(g *Game) {
+		if !combat {
+			return
+		}
+		attackTick++
+		if attackTick >= attackCooldownMax {
+			attackTick = 0
+			g.applyPlayerMelee()
+		}
+	}
+
 	if !moving {
-		return func(*Game) {}
+		return func(g *Game) { melee(g) }
 	}
 	var dx, dy float32
 	left := 0
 	return func(g *Game) {
+		melee(g)
 		if left <= 0 {
 			a := rand.Float64() * 2 * math.Pi
 			dx, dy = float32(math.Cos(a)), float32(math.Sin(a))

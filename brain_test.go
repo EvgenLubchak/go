@@ -28,7 +28,7 @@ func TestQLearningTDUpdate(t *testing.T) {
 	target := clamp(reward+qGamma*q2[argmaxQ(q2)], -qClip, qClip)
 
 	qBefore, _, _ := b.net.forwardQ(s)
-	b.net.tdUpdate(s, a, reward, s2)
+	b.net.tdUpdate(s, a, reward, s2, false)
 	qAfter, _, _ := b.net.forwardQ(s)
 
 	distBefore := float32(math.Abs(float64(target - qBefore[a])))
@@ -1191,5 +1191,136 @@ func TestLoadRejectsWrongGamma(t *testing.T) {
 	}
 	if loadNetFrom(path, n.mem, qGamma, qClip) != nil {
 		t.Error("ваги, навчені при γ=0.99, завантажились під γ=0.95 — калібровка Q не та")
+	}
+}
+
+// TestRespawnRevivesSameBrain — респаун мусить ОЖИВЛЯТИ той самий юніт, а не створювати
+// нового.
+//
+// Це не оптимізація. m.agents у метриках ключується вказівником на Brain, тож новий
+// Brain на кожну смерть роздував би «ag» до кількості СМЕРТЕЙ замість кількості юнітів.
+// Ми вже ловили це на рестартах: один стражник після трьох смертей читався як «4 ag».
+//
+// Плюс перевіряємо hasPrev=false: без цього наступна нагорода порівняла б стан ПІСЛЯ
+// відродження зі станом ПЕРЕД смертю, і в буфер ліг би перехід через межу смерті.
+func TestRespawnRevivesSameBrain(t *testing.T) {
+	savedRoster, savedMap := unitRoster, tileMap
+	tileMap = [boidMapH][boidMapW]bool{}
+	defer func() { unitRoster, tileMap = savedRoster, savedMap }()
+
+	cfg := ConfigLearner
+	cfg.Count, cfg.WeightsFile, cfg.Respawns = 1, "test_respawn_never_exists.json", 2
+	unitRoster = []UnitConfig{cfg}
+
+	g := &Game{difficulty: 1.0, units: newUnits()}
+	brainBefore := g.units[0].Brain
+	netBefore := brainBefore.net
+	postX, postY := g.units[0].SpawnX, g.units[0].SpawnY
+
+	// Відносимо юніта від поста й «вбиваємо».
+	g.units[0].X, g.units[0].Y = postX+300, postY+300
+	g.units[0].HP = 0
+	g.units[0].Brain.hasPrev = true
+
+	g.handleDeadUnits()
+
+	if len(g.units) != 1 {
+		t.Fatalf("юніт зник, хоч мав %d повернень: лишилось %d", cfg.Respawns, len(g.units))
+	}
+	if g.units[0].Brain != brainBefore {
+		t.Error("створено НОВИЙ Brain — метрики почнуть рахувати смерті замість юнітів")
+	}
+	if g.units[0].Brain.net != netBefore {
+		t.Error("мережа підмінилась — навчання втрачено")
+	}
+	if g.units[0].HP != g.units[0].MaxHP {
+		t.Errorf("HP не відновлено: %d з %d", g.units[0].HP, g.units[0].MaxHP)
+	}
+	if g.units[0].X != postX || g.units[0].Y != postY {
+		t.Errorf("не повернувся на пост: (%.0f,%.0f) замість (%.0f,%.0f)",
+			g.units[0].X, g.units[0].Y, postX, postY)
+	}
+	if g.units[0].Brain.hasPrev {
+		t.Error("hasPrev не скинуто → наступна нагорода зшила б стани через межу смерті")
+	}
+	if g.units[0].RespawnsLeft != cfg.Respawns-1 {
+		t.Errorf("лічильник повернень: %d, очікували %d", g.units[0].RespawnsLeft, cfg.Respawns-1)
+	}
+
+	// Повернення закінчуються → юніт зникає.
+	for i := 0; i < 5; i++ {
+		g.units[0].HP = 0
+		g.handleDeadUnits()
+		if len(g.units) == 0 {
+			break
+		}
+	}
+	if len(g.units) != 0 {
+		t.Error("юніт не зник після витрачених повернень")
+	}
+}
+
+// TestInfiniteRespawnKeepsPopulation — негативне значення = безкінечно.
+// Потрібно не для гри, а для ЗАМІРІВ: стала популяція означає, що знаменник метрик не
+// пливе, і прогін, де пощастило вижити, порівнюється з прогоном, де юнітів вибили.
+func TestInfiniteRespawnKeepsPopulation(t *testing.T) {
+	savedRoster, savedMap := unitRoster, tileMap
+	tileMap = [boidMapH][boidMapW]bool{}
+	defer func() { unitRoster, tileMap = savedRoster, savedMap }()
+
+	cfg := ConfigLearner
+	cfg.Count, cfg.WeightsFile, cfg.Respawns = 3, "test_inf_never_exists.json", -1
+	unitRoster = []UnitConfig{cfg}
+
+	g := &Game{difficulty: 1.0, units: newUnits()}
+	for round := 0; round < 20; round++ {
+		for i := range g.units {
+			g.units[i].HP = 0
+		}
+		g.handleDeadUnits()
+		if len(g.units) != 3 {
+			t.Fatalf("раунд %d: населення %d замість 3 — безкінечний респаун не працює",
+				round, len(g.units))
+		}
+	}
+}
+
+// TestDeathCostsReward — смерть мусить доходити до нагороди.
+//
+// Була безкоштовною: юніта видаляли одразу, наступного Step він не отримував, і
+// dmgTaken від фатального удару ніколи не ставав −2. Тобто в нагороді не існувало
+// причини не вмирати — а для стражника, у якого бойова нагорода ЄДИНЕ джерело сигналу,
+// це означало, що половина уроку зникала.
+func TestDeathCostsReward(t *testing.T) {
+	savedRoster, savedMap := unitRoster, tileMap
+	tileMap = [boidMapH][boidMapW]bool{}
+	defer func() { unitRoster, tileMap = savedRoster, savedMap }()
+
+	cfg := ConfigWarden
+	cfg.Count, cfg.WeightsFile, cfg.Respawns = 1, "test_death_never_exists.json", 1
+	unitRoster = []UnitConfig{cfg}
+
+	g := &Game{difficulty: 1.0, units: newUnits()}
+	b := g.units[0].Brain
+	before := b.net.replayLen()
+
+	// Стан «жив і щойно діяв», фатальний удар уже зарахований у dmgTaken.
+	b.hasPrev = true
+	b.prevAction = 2
+	b.dmgTaken = impactDamage
+	g.units[0].HP = 0
+
+	g.handleDeadUnits()
+
+	if b.net.replayLen() != before+1 {
+		t.Fatalf("термінальний перехід не потрапив у буфер: %d → %d", before, b.net.replayLen())
+	}
+	// Останній записаний перехід — саме термінальний і з відʼємною нагородою.
+	last := b.net.replay[(b.net.replayHead-1+qReplaySize)%qReplaySize]
+	if !last.terminal {
+		t.Error("перехід не позначено terminal → ціль Беллмана додасть γ·maxQ майбутнього, якого немає")
+	}
+	if last.r >= 0 {
+		t.Errorf("смерть не коштувала нагороди: r %.3f", last.r)
 	}
 }

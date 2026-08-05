@@ -25,6 +25,14 @@ type transition struct {
 	a  int
 	r  float32
 	s2 [brainInputs]float32
+
+	// [ТЕРМІНАЛЬНИЙ ПЕРЕХІД] Смерть агента. Тоді майбутнього немає, і ціль Беллмана
+	// це ЛИШЕ нагорода, без γ·maxQ(s2): «після цього не буде нічого».
+	//
+	// Без цього поля смерть була БЕЗКОШТОВНОЮ. Юніта видаляли одразу, отже наступного
+	// Step він не отримував — і dmgTaken від фатального удару ніколи не ставав −2.
+	// Агент не мав жодної причини уникати смерті.
+	terminal bool
 }
 
 // buildStacked склеює поточний (свіжий) кадр + історичні семпли в повний вхід
@@ -249,11 +257,14 @@ func (b *Brain) stepStack(cur [baseInputs]float32, hitWall bool) int {
 // Далі — backprop цієї помилки. ВАЖЛИВО: помилку має ЛИШЕ дія, яку реально
 // зробили. "Semi-gradient": target вважаємо КОНСТАНТОЮ (по target-мережі).
 // Пише ваги → викликається лише з train() (однопотокова фаза).
-func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainInputs]float32) {
+func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainInputs]float32, terminal bool) {
 	// Ціль за Беллманом по TARGET-мережі (max Q наступного стану — як константа).
 	q2 := n.forwardQTarget(s2)
 	maxNext := q2[argmaxQ(q2)]
 	target := clamp(reward+n.gamma*maxNext, -n.clip, n.clip)
+	if terminal {
+		target = clamp(reward, -n.clip, n.clip) // після смерті майбутнього немає
+	}
 
 	// Поточна оцінка + активації прихованого шару (для backprop) — по ЖИВІЙ мережі.
 	q1, h1, h2 := n.forwardQ(s)

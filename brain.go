@@ -611,6 +611,24 @@ func NewBrain() *Brain { return &Brain{net: NewNet(), gruAccPow: 1} }
 // NewBrainWith — голова агента, що ДІЛИТЬ передану мережу (режим sharedBrain).
 func NewBrainWith(net *Net) *Brain { return &Brain{net: net, gruAccPow: 1} }
 
+// resetForNewLife скидає ОСОБИСТУ памʼять агента після відродження. Мережу (спільну
+// або власну) не чіпаємо — вона й далі вчиться.
+//
+// hasPrev=false тут найважливіше: інакше наступна нагорода порівняла б стан ПІСЛЯ
+// відродження зі станом ПЕРЕД смертю — і в буфер досвіду ліг би перехід через межу
+// смерті, якого у світі не існувало.
+func (b *Brain) resetForNewLife() {
+	b.hasPrev = false
+	b.frames = [stackFrames - 1][baseInputs]float32{}
+	b.frameTick = 0
+	b.h = [gruHidden]float32{} // [RNN] нове життя — чистий рекурентний стан
+	b.seqN = 0
+	b.gruHasDec = false
+	b.gruAcc, b.gruAccPow, b.gruTick = 0, 1, 0
+	b.stuckCounter, b.frustration = 0, 0
+	b.dmgDealt, b.dmgTaken, b.kills = 0, 0, 0
+}
+
 // syncTarget копіює живі ваги в target-мережу.
 // [GO: масиви — значимі типи] присвоєння масиву копіює його повністю.
 func (n *Net) syncTarget() {
@@ -819,7 +837,7 @@ func (n *Net) train(k int) {
 	}
 	for i := 0; i < k; i++ {
 		t := n.replay[rand.Intn(m)]
-		n.tdUpdate(t.s, t.a, t.r, t.s2)
+		n.tdUpdate(t.s, t.a, t.r, t.s2, t.terminal)
 	}
 }
 

@@ -380,16 +380,53 @@ func (g *Game) applyPlayerMelee() {
 	}
 }
 
-// removeDeadUnits видаляє ворогів з HP <= 0.
+// deathTransition — [RL] доставляє агентові нагороду за ФАТАЛЬНИЙ удар.
+//
+// Без цього смерть була безкоштовною: юніта видаляли, наступного Step він не
+// отримував, і dmgTaken від останнього удару ніколи не ставав −2. Тобто в нагороді не
+// існувало причини не вмирати.
+//
+// Перехід позначаємо terminal: після смерті майбутнього немає, тож ціль Беллмана — це
+// лише нагорода, без γ·maxQ(наступний стан).
+//
+// Лише СТЕК-шлях. У GRU нагорода живе у відрізках, і встромити термінальний крок
+// посеред відрізка складніше: там частковий відрізок просто відкидається
+// (resetForNewLife скидає seqN). Наразі всі наші учні на стеку, тож це покриває всіх;
+// для GRU це лишається боргом.
+func (g *Game) deathTransition(e *Pixel) {
+	b := e.Brain
+	if b == nil || b.net == nil || !b.hasPrev || b.net.mem.gru {
+		return
+	}
+	reward := b.rewardFor(false, b.prevState[inWhisker0+b.prevAction])
+	b.net.remember(transition{s: b.prevState, a: b.prevAction, r: reward, terminal: true})
+}
+
+// handleDeadUnits — [РЕСПАУН] оживляє тих, у кого лишились повернення, решту видаляє.
 // [GO: FILTER SLICE in-place]
 // g.units[:0] — той самий масив у пам'яті, але довжина 0.
 // append пише поверх — без нової алокації пам'яті.
-func (g *Game) removeDeadUnits() {
+func (g *Game) handleDeadUnits() {
 	alive := g.units[:0]
-	for _, e := range g.units {
+	for i := range g.units {
+		e := &g.units[i]
 		if e.HP > 0 {
-			alive = append(alive, e)
+			alive = append(alive, *e)
+			continue
 		}
+
+		// Спершу ДОСТАВИТИ нагороду за смерть — до будь-якого скидання стану.
+		g.deathTransition(e)
+
+		if e.RespawnsLeft == 0 {
+			continue // повернень немає → зникає назавжди
+		}
+		if e.RespawnsLeft > 0 {
+			e.RespawnsLeft--
+		} // негативне = безкінечно, не зменшуємо
+
+		e.reviveAt(e.SpawnX, e.SpawnY)
+		alive = append(alive, *e)
 	}
 	g.units = alive
 }

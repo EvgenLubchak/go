@@ -234,7 +234,7 @@ func (g *Game) Update() error {
 	for i := range g.units {
 		g.pushOffPlayer(&g.units[i])
 	}
-	g.removeDeadUnits()
+	g.handleDeadUnits()
 	g.checkCollisions()
 	return nil
 }
