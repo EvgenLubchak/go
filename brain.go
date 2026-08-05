@@ -311,11 +311,29 @@ func resolveMemContract(kind MemoryKind, frames, skip, gskip int) memContract {
 //
 // Рівноважна Q при цьому НЕ змінюється: сума γ^k·r по кадрах — та сама величина,
 // просто перегрупована. Тож qClip підбирати заново не треба.
-func (c memContract) gammaStep() float32 {
+func (c memContract) gammaStep(gamma float32) float32 {
 	if c.gruSkip <= 1 {
-		return qGamma
+		return gamma
 	}
-	return float32(math.Pow(float64(qGamma), float64(c.gruSkip)))
+	return float32(math.Pow(float64(gamma), float64(c.gruSkip)))
+}
+
+// resolveHorizon — γ і стеля цінності для типу юніта.
+//
+// СТЕЛЯ МАСШТАБУЄТЬСЯ РАЗОМ ІЗ γ автоматично, і це не зручність, а страховка:
+// рівноважна Q ≈ r/(1−γ), тож підняти горизонт і лишити стелю означає обрізати цілі
+// кліпом і не побачити жодної зміни — з причини, яку створив сам. Ця помилка вже раз
+// коштувала нам вбивці (природна Q ≈ 14.8 при стелі 10).
+func resolveHorizon(gamma, clip float32) (float32, float32) {
+	g := qGamma
+	if gamma > 0 {
+		g = gamma
+	}
+	c := qClip * (1 - qGamma) / (1 - g) // масштаб від глобального дефолту
+	if clip > 0 {
+		c = clip // явне значення перебиває автомасштаб
+	}
+	return g, c
 }
 
 // label — підпис контракту для панелі метрик: «gru» або «stk4/10».
@@ -394,6 +412,24 @@ type Net struct {
 	// [ПАМʼЯТЬ] Контракт цієї мережі: шлях навчання й форма входу. Задається при
 	// створенні з UnitConfig і НЕ міняється — під нього навчені ваги.
 	mem memContract
+
+	// [ГОРИЗОНТ] Дискаунт і стеля цінності — теж властивість МЕРЕЖІ, не глобаль.
+	//
+	// Причина стала очевидною на стражнику. При ЩІЛЬНІЙ нагороді горизонт майже не
+	// важить: сигнал є щокадру, зазирати вперед не треба — це ми й виміряли (свіп
+	// γ 0.95/0.99/0.995 не дав різниці). При РОЗРІДЖЕНІЙ нагороді все навпаки, і це
+	// вже не статистика, а арифметика: сигнал є лише в момент події, тож дискаунт
+	// напряму визначає, наскільки далеко назад дотягнеться кредит.
+	//
+	//	γ=0.95 при 120 TPS → горизонт 20 кадрів = 0.167с
+	//	  подія через  60 кадрів → γ⁶⁰  = 0.046  майже не видно
+	//	  подія через 120 кадрів → γ¹²⁰ = 0.002  не видно взагалі
+	//
+	// Тобто агент із розрідженою нагородою і γ=0.95 фізично не бачить, що удар
+	// наближається, і ГАРАНТОВАНО осідає у вироджений розв'язок «усе варте нуля».
+	// Різні нагороди → різні потрібні горизонти, отже це не може бути глобаллю.
+	gamma float32
+	clip  float32
 
 	// [RNN/GRU] Ваги рекурентної клітини (вживаються лише коли mem.gru).
 	// GRU-клітина: вхід x(baseInputs) + попередній стан h(gruHidden) → новий h.
@@ -544,6 +580,7 @@ func NewNet() *Net {
 	// Дефолтний контракт — із глобалей. Так поводяться мережі без конфігу:
 	// мозок-жертва в self-play і всі тести, що створюють Net напряму.
 	n := &Net{mem: resolveMemContract(MemoryDefault, 0, 0, 0)}
+	n.gamma, n.clip = resolveHorizon(0, 0) // дефолт із глобалей
 	s1 := float32(math.Sqrt(1.0 / brainInputs))
 	for j := range n.W1 {
 		for i := range n.W1[j] {
@@ -1058,6 +1095,11 @@ type BrainData struct {
 	StackSkip int  `json:"stackSkip"`
 	GruSkip   int  `json:"gruSkip"`
 
+	// [ГОРИЗОНТ] Під яку γ навчені ці ваги. Масштаб Q прямо залежить від γ
+	// (рівноважна ≈ r/(1−γ)), тож продовжувати навчання з іншим горизонтом означає
+	// мати систематично не ту калібровку. Файли без цього поля — старі, приймаються.
+	Gamma float32 `json:"gamma"`
+
 	W1 [brainHidden1][brainInputs]float32  `json:"w1"`
 	B1 [brainHidden1]float32               `json:"b1"`
 	W2 [brainHidden2][brainHidden1]float32 `json:"w2"`
@@ -1093,12 +1135,13 @@ func SaveNet(n *Net) error {
 
 // newNetFor — нова або завантажена мережа для конкретного ТИПУ мозку.
 // Повертає також loaded: чи ваги реально прийшли з файлу (навчена → ε на floor).
-func newNetFor(path string, mem memContract) (n *Net, loaded bool) {
-	if n = loadNetFrom(path, mem); n != nil {
+func newNetFor(path string, mem memContract, gamma, clip float32) (n *Net, loaded bool) {
+	if n = loadNetFrom(path, mem, gamma, clip); n != nil {
 		return n, true
 	}
 	n = NewNet()
 	n.mem = mem
+	n.gamma, n.clip = gamma, clip
 	n.file = path
 	return n, false
 }
@@ -1108,8 +1151,8 @@ func saveNetTo(n *Net, path string) error {
 	data := BrainData{
 		Inputs: brainInputs, Hidden1: brainHidden1, Hidden2: brainHidden2, Actions: brainActions,
 		Gru: n.mem.gru, MemFrames: n.mem.memFrames, StackSkip: n.mem.stackSkip,
-		GruSkip: n.mem.gruSkip,
-		W1:      n.W1, B1: n.B1, W2: n.W2, B2: n.B2, W3: n.W3, B3: n.B3,
+		GruSkip: n.mem.gruSkip, Gamma: n.gamma,
+		W1: n.W1, B1: n.B1, W2: n.W2, B2: n.B2, W3: n.W3, B3: n.B3,
 		// [RNN] і рекурентні ваги — щоб gru-рій не вчився з нуля щоразу.
 		HasGRU: true, GruHidden: gruHidden,
 		Wz: n.Wz, Uz: n.Uz, Bz: n.Bz,
@@ -1125,13 +1168,16 @@ func saveNetTo(n *Net, path string) error {
 }
 
 // LoadNet завантажує мережу з файлу за замовчуванням (brainFile).
-func LoadNet() *Net { return loadNetFrom(brainFile, resolveMemContract(MemoryDefault, 0, 0, 0)) }
+func LoadNet() *Net {
+	g, c := resolveHorizon(0, 0)
+	return loadNetFrom(brainFile, resolveMemContract(MemoryDefault, 0, 0, 0), g, c)
+}
 
 // loadNetFrom завантажує мережу з файлу. Повертає nil (→ caller створить NewNet),
 // якщо файлу немає, він пошкоджений, або РОЗМІРИ стек-мережі не збігаються.
 // GRU-ваги вантажимо, ЛИШЕ якщо файл їх містить і розмір h збігається; інакше —
 // initGRU (стара збірка чи інший gruHidden → рекурентна памʼять з нуля, стек цілий).
-func loadNetFrom(path string, want memContract) *Net {
+func loadNetFrom(path string, want memContract, wantGamma, wantClip float32) *Net {
 	bytes, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -1166,8 +1212,13 @@ func loadNetFrom(path string, want memContract) *Net {
 			return nil // навчена під інший контракт → чесніше почати з нуля
 		}
 	}
+	// [ГОРИЗОНТ] Те саме для γ: масштаб Q від неї прямо залежить.
+	if data.Gamma != 0 && math.Abs(float64(data.Gamma-wantGamma)) > 1e-6 {
+		return nil
+	}
 
 	n := &Net{mem: want, W1: data.W1, B1: data.B1, W2: data.W2, B2: data.B2, W3: data.W3, B3: data.B3}
+	n.gamma, n.clip = wantGamma, wantClip
 	n.file = path // мережа памʼятає, звідки прийшла → туди ж і збережеться
 	if data.HasGRU && data.GruHidden == gruHidden {
 		n.Wz, n.Uz, n.Bz = data.Wz, data.Uz, data.Bz

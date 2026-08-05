@@ -64,6 +64,15 @@ type UnitConfig struct {
 	// Для «важких» типів, чия задача — тримати місце.
 	KnockResist float32
 
+	// [ГОРИЗОНТ] γ для цього типу; 0 = глобальний qGamma. Стеля цінності (QClip)
+	// масштабується автоматично, бо рівноважна Q ≈ r/(1−γ) — забути це означає
+	// обрізати цілі кліпом і не побачити зміни з власної вини.
+	//
+	// Різні нагороди потребують різних горизонтів: щільній достатньо 0.95, розрідженій
+	// (стражник) 0.95 ГАРАНТУЄ вироджений розвʼязок. Див. Net.gamma у brain.go.
+	Gamma float32
+	QClip float32 // 0 = автомасштаб від Gamma
+
 	Memory    MemoryKind
 	MemFrames int // 0 = глобальний memFrames
 	StackSkip int // 0 = глобальний stackSkip
@@ -178,7 +187,7 @@ var (
 		DetectionRange:  300.0, // НЕ впливає на учня (лише debug-коло showDetectionCircle);
 		//                        зір мозку — це sightRange (POMDP) + whiskerRange (вуса)
 		PounceMulti: 0.0,
-		Count:       15, // скільки їх на полі
+		Count:       0, // скільки їх на полі
 		Faction:     factionEnemy,
 		WeightsFile: brainFile,
 		MaxHP:       2,                            // живучий — більше часу на навчання
@@ -205,7 +214,7 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0, // не впливає (лише debug-коло)
 		PounceMulti:     0.0,
-		Count:           3, // мало: вони сильніші за рій
+		Count:           0, // мало: вони сильніші за рій
 		Faction:         factionEnemy,
 		WeightsFile:     killerFile,
 		MaxHP:           4,                            // витримує на удар більше за рій
@@ -232,7 +241,7 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           20,
+		Count:           0,
 		Faction:         factionPlayer, // ← свій; рій його атакує, він рій
 		WeightsFile:     allyFile,
 		MaxHP:           3,
@@ -261,10 +270,10 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           2,
+		Count:           0,
 		Faction:         factionPlayer,
 		WeightsFile:     allyKillerFile,
-		MaxHP:           5,
+		MaxHP:           15,
 		Color:           color.RGBA{140, 100, 255, 255}, // фіолетовий — твій вбивця
 		Label:           "≡_≡",
 		IsLearner:       true,
@@ -330,7 +339,7 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           1, // ОДИН. У цьому вся суть типу
+		Count:           0, // ОДИН. У цьому вся суть типу
 		Faction:         factionEnemy,
 		WeightsFile:     bossFile,                      // ← власний вулик виникає САМ (мапа по файлу)
 		MaxHP:           45,                            // умова навчання, не лише баланс
@@ -392,6 +401,15 @@ var (
 		CombatOnly:    true,  // ← власне експеримент: жодного щільного «наближайся»
 		KnockResist:   0.85,  // тримає місце: інакше відлітав би на три корпуси від удару
 		Memory:        MemoryStack,
+
+		// ← КЛЮЧОВА ручка експерименту. При γ=0.95 горизонт це 20 кадрів = 0.167с, і
+		// стражник ФІЗИЧНО не бачить, що удар наближається: подія через 120 кадрів
+		// дисконтується до 0.002. Він гарантовано осідає у «все варте нуля» — саме це
+		// ми й спостерігали (TD 0.012, Q 0.08 при рівному нулі між подіями).
+		// γ=0.99 дає горизонт 100 кадрів ≈ 0.83с: досить, щоб приписати заслугу
+		// позиціюванню й вибору моменту, а не лише останнім двадцяти кадрам.
+		// Стеля цінності масштабується автоматично (×5).
+		Gamma: 0.99,
 	}
 )
 
@@ -517,14 +535,14 @@ func newUnitsWithHive(hive map[string]*Net) []Pixel {
 	for file := range hive {
 		hiveLoaded[file] = true // передана мережа = вже навчена → ε-floor
 	}
-	netFor := func(file string, mem memContract) (*Net, bool) {
+	netFor := func(file string, mem memContract, gamma, clip float32) (*Net, bool) {
 		if !sharedBrain {
-			return newNetFor(file, mem) // кожен агент — власна мережа
+			return newNetFor(file, mem, gamma, clip) // кожен агент — власна мережа
 		}
 		if n, ok := hive[file]; ok {
 			return n, hiveLoaded[file]
 		}
-		n, loaded := newNetFor(file, mem)
+		n, loaded := newNetFor(file, mem, gamma, clip)
 		hive[file], hiveLoaded[file] = n, loaded
 		return n, loaded
 	}
@@ -571,7 +589,8 @@ func newUnitsWithHive(hive map[string]*Net) []Pixel {
 			var brain *Brain
 			if cfg.IsLearner {
 				mem := resolveMemContract(cfg.Memory, cfg.MemFrames, cfg.StackSkip, cfg.GruSkip)
-				net, loaded := netFor(cfg.WeightsFile, mem)
+				gamma, clip := resolveHorizon(cfg.Gamma, cfg.QClip)
+				net, loaded := netFor(cfg.WeightsFile, mem, gamma, clip)
 				brain = NewBrainWith(net)
 				brain.combat = cfg.CombatReward   // [БІЙ] бойові члени нагороди
 				brain.combatOnly = cfg.CombatOnly // [РОЗРІДЖЕНА] без щільного «наближайся»

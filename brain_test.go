@@ -218,7 +218,7 @@ func TestSaveLoadGRURoundTrip(t *testing.T) {
 	if err := saveNetTo(n, path); err != nil {
 		t.Fatal(err)
 	}
-	m := loadNetFrom(path, n.mem) // той самий контракт, під який зберігали
+	m := loadNetFrom(path, n.mem, n.gamma, n.clip) // той самий контракт, під який зберігали
 	if m == nil {
 		t.Fatal("loadNetFrom повернув nil")
 	}
@@ -244,7 +244,7 @@ func TestSaveLoadGRURoundTrip(t *testing.T) {
 	}
 	// Старий файл БЕЗ контракту (MemFrames == 0) мусить прийматись як є — інакше
 	// рефакторинг знецінив би вже накопичені ваги.
-	m2 := loadNetFrom(oldPath, n.mem)
+	m2 := loadNetFrom(oldPath, n.mem, n.gamma, n.clip)
 	if m2 == nil {
 		t.Fatal("старий файл: loadNetFrom повернув nil")
 	}
@@ -768,10 +768,17 @@ func TestBossIsLoneAndSeparate(t *testing.T) {
 	swarm.WeightsFile = "test_swarm_never_exists.json"
 	bossFileForTest := "test_boss_never_exists.json"
 	boss.WeightsFile = bossFileForTest
+	// [GO: UnitConfig — ЗНАЧИМИЙ тип] Count правимо ДО запису в ростер: у слайс
+	// потрапляє КОПІЯ, і правка після цього змінила б лише локальну змінну.
+	boss.Count = 1 // на полі він мусить бути, хоч би що стояло в грі
 	unitRoster = []UnitConfig{swarm, boss}
 
-	if boss.Count != 1 {
-		t.Errorf("бос має бути один, а не %d — на цьому тримається весь сенс типу", boss.Count)
+	// Count > 1, а не != 1: вимкнути тип нулем — законний спосіб ізолювати замір
+	// (той самий принцип, що в TestRosterConfigsAreComplete). Перевіряємо задум
+	// «бос не буває натовпом», а не конкретне балансне число.
+	if ConfigBoss.Count > 1 {
+		t.Errorf("боса %d штук — тип задуманий як ОДИНАК, на цьому тримається сенс памʼяті",
+			ConfigBoss.Count)
 	}
 	if boss.UsesFlowField {
 		t.Error("бос із flow-field завжди знає шлях → памʼяті нічого робити")
@@ -924,7 +931,7 @@ func TestLoadRejectsWrongMemoryContract(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if loadNetFrom(path, trained) == nil {
+	if loadNetFrom(path, trained, n.gamma, n.clip) == nil {
 		t.Fatal("той самий контракт мусить вантажитись")
 	}
 
@@ -940,7 +947,7 @@ func TestLoadRejectsWrongMemoryContract(t *testing.T) {
 		{"інший ВАЖІЛЬ BPTT", memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 20}},
 	}
 	for _, c := range cases {
-		if loadNetFrom(path, c.want) != nil {
+		if loadNetFrom(path, c.want, n.gamma, n.clip) != nil {
 			t.Errorf("%s: мережа завантажилась, хоч навчена під інший контракт", c.name)
 		}
 	}
@@ -1003,16 +1010,16 @@ func TestGruSkipRepeatsAndSumsReward(t *testing.T) {
 // gruSkip кадрів. Із простим γ цінність майбутнього завищувалась би у стільки разів,
 // скільки кадрів злито в один крок, — і n-step return перестав би бути коректним.
 func TestGammaStepMatchesSkip(t *testing.T) {
-	if got := resolveMemContract(MemoryGRU, 0, 0, 1).gammaStep(); got != qGamma {
+	if got := resolveMemContract(MemoryGRU, 0, 0, 1).gammaStep(qGamma); got != qGamma {
 		t.Errorf("крок 1 мусить давати рівно qGamma: %.5f проти %.5f", got, qGamma)
 	}
 	c := resolveMemContract(MemoryGRU, 0, 0, 20)
 	want := float32(math.Pow(float64(qGamma), 20))
-	if got := c.gammaStep(); math.Abs(float64(got-want)) > 1e-6 {
+	if got := c.gammaStep(qGamma); math.Abs(float64(got-want)) > 1e-6 {
 		t.Errorf("γ^20: отримали %.6f, очікували %.6f", got, want)
 	}
 	// Здоровий сенс: за 20 кадрів при γ=0.95 лишається близько третини цінності.
-	if g := c.gammaStep(); g < 0.30 || g > 0.40 {
+	if g := c.gammaStep(qGamma); g < 0.30 || g > 0.40 {
 		t.Errorf("γ^20 = %.3f — поза очікуваним діапазоном 0.30..0.40", g)
 	}
 }
@@ -1094,5 +1101,80 @@ func TestPlayerMeleeCreditsBrain(t *testing.T) {
 	}
 	if b.dmgTaken != attackDamage {
 		t.Errorf("шкода не зарахована в мозок: dmgTaken %d, очікували %d", b.dmgTaken, attackDamage)
+	}
+}
+
+// TestHorizonIsPerNetwork — γ і стеля цінності мусять бути властивістю МЕРЕЖІ.
+//
+// Причина стала очевидною на стражнику. При ЩІЛЬНІЙ нагороді горизонт майже не
+// важить — сигнал є щокадру, і свіп γ 0.95/0.99/0.995 не дав різниці. При РОЗРІДЖЕНІЙ
+// це вже не статистика, а арифметика: сигнал є лише в момент події, тож дискаунт
+// напряму визначає, наскільки далеко назад дотягнеться кредит. γ=0.95 при 120 TPS —
+// це 20 кадрів = 0.167с; подія через 120 кадрів дисконтується до 0.002, тобто
+// невидима. Різні нагороди → різні горизонти, отже глобаллю це бути не може.
+func TestHorizonIsPerNetwork(t *testing.T) {
+	savedRoster, savedShared := unitRoster, sharedBrain
+	defer func() { unitRoster, sharedBrain = savedRoster, savedShared }()
+	sharedBrain = true
+
+	dense, sparse := ConfigLearner, ConfigWarden
+	dense.Count, dense.WeightsFile = 1, "test_dense_never_exists.json"
+	sparse.Count, sparse.WeightsFile = 1, "test_sparse_never_exists.json"
+	sparse.Gamma = 0.99
+	unitRoster = []UnitConfig{dense, sparse}
+
+	got := map[string]*Net{}
+	for _, u := range newUnits() {
+		if u.Brain == nil || u.Brain.net == nil {
+			t.Fatal("юніт без мережі")
+		}
+		got[u.Cfg.WeightsFile] = u.Brain.net
+	}
+
+	d, sp := got[dense.WeightsFile], got[sparse.WeightsFile]
+	if d == nil || sp == nil {
+		t.Fatal("не всі типи вийшли на поле")
+	}
+
+	if d.gamma != qGamma {
+		t.Errorf("тип без Gamma не успадкував глобаль: %.4f проти %.4f", d.gamma, qGamma)
+	}
+	if math.Abs(float64(sp.gamma-0.99)) > 1e-6 {
+		t.Errorf("явна Gamma не застосувалась: %.4f", sp.gamma)
+	}
+	if d.gamma == sp.gamma {
+		t.Error("два типи отримали однаковий горизонт — рефакторинг не працює")
+	}
+
+	// СТЕЛЯ мусить масштабуватись разом із γ. Без цього довший горизонт уперся б у
+	// кліп, і зміни не було б видно — з причини, яку створили ми самі. Ця помилка вже
+	// раз коштувала нам вбивці (природна Q ≈ 14.8 при стелі 10).
+	wantClip := qClip * (1 - qGamma) / (1 - 0.99)
+	if math.Abs(float64(sp.clip-wantClip)) > 1e-3 {
+		t.Errorf("стеля не масштабувалась: %.2f, очікували %.2f", sp.clip, wantClip)
+	}
+	if sp.clip <= d.clip {
+		t.Errorf("довший горизонт мусить мати ВИЩУ стелю: %.2f проти %.2f", sp.clip, d.clip)
+	}
+}
+
+// TestLoadRejectsWrongGamma — масштаб Q прямо залежить від γ (рівноважна ≈ r/(1−γ)),
+// тож продовжувати навчання з іншим горизонтом означає мати не ту калібровку.
+// Старі файли без записаної γ приймаються, інакше рефакторинг знецінив би ваги.
+func TestLoadRejectsWrongGamma(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/w.json"
+
+	n := NewNet()
+	n.gamma, n.clip = 0.99, 125
+	if err := saveNetTo(n, path); err != nil {
+		t.Fatal(err)
+	}
+
+	if loadNetFrom(path, n.mem, 0.99, 125) == nil {
+		t.Fatal("та сама γ мусить вантажитись")
+	}
+	if loadNetFrom(path, n.mem, qGamma, qClip) != nil {
+		t.Error("ваги, навчені при γ=0.99, завантажились під γ=0.95 — калібровка Q не та")
 	}
 }

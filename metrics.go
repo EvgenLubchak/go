@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"image/color"
+	"math"
 	"strings"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -71,15 +72,16 @@ func (c *curve) at(i int) float32 {
 // вбивство проти ±0.5 у рою), тож середнє змішувало різні речі. З трьома командами
 // стало б зовсім нечитабельно.
 type hiveStat struct {
-	label  string     // «brain» / «killer» / «ally» — з імені файлу ваг
-	mem    string     // контракт памʼяті ЦЬОГО вулика: «gru» або «stk4/10»
-	color  color.RGBA // колір юнітів цього типу → лінія збігається з тим, що на полі
-	reward float32    // згладжені (EMA) поточні значення
-	tdErr  float32
-	maxQ   float32
-	eps    float32
-	inited bool
-	curve  curve // крива reward саме цього вулика
+	label   string     // «brain» / «killer» / «ally» — з імені файлу ваг
+	mem     string     // контракт памʼяті ЦЬОГО вулика: «gru» або «stk4/10»
+	horizon string     // «γ0.99» — ЛИШЕ якщо відрізняється від глобального дефолту
+	color   color.RGBA // колір юнітів цього типу → лінія збігається з тим, що на полі
+	reward  float32    // згладжені (EMA) поточні значення
+	tdErr   float32
+	maxQ    float32
+	eps     float32
+	inited  bool
+	curve   curve // крива reward саме цього вулика
 }
 
 // Metrics збирає й зберігає показники навчання — ОКРЕМО по кожному вулику.
@@ -156,6 +158,11 @@ func (m *Metrics) collect(g *Game) {
 		h := m.hives[key]
 		if h == nil {
 			h = &hiveStat{label: hiveLabel(key), mem: b.net.mem.label(), color: u.Cfg.Color}
+			// Показуємо γ лише коли вона НЕ дефолтна: панель має підсвічувати
+			// незвичайне, а не повторювати те саме пʼять разів.
+			if math.Abs(float64(b.net.gamma-qGamma)) > 1e-6 {
+				h.horizon = fmt.Sprintf("γ%.3g", b.net.gamma)
+			}
 			m.hives[key] = h
 			m.order = append(m.order, key)
 		}
@@ -314,8 +321,8 @@ func (m *Metrics) draw(screen *ebiten.Image) {
 	for _, key := range m.order {
 		h := m.hives[key]
 		y += rowH
-		drawTextL(screen, fmt.Sprintf("%-7s %-9s r %+.3f  TD %.3f  Q %.2f",
-			h.label, h.mem, h.reward, h.tdErr, h.maxQ), font, float64(px)+pad, y, h.color)
+		drawTextL(screen, fmt.Sprintf("%-7s %-9s %-6s r %+.3f  TD %.3f  Q %.2f",
+			h.label, h.mem, h.horizon, h.reward, h.tdErr, h.maxQ), font, float64(px)+pad, y, h.color)
 	}
 
 	// Криві reward — по одній на вулик, тим самим кольором, у СПІЛЬНОМУ масштабі

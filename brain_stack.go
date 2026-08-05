@@ -253,7 +253,7 @@ func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainI
 	// Ціль за Беллманом по TARGET-мережі (max Q наступного стану — як константа).
 	q2 := n.forwardQTarget(s2)
 	maxNext := q2[argmaxQ(q2)]
-	target := clamp(reward+qGamma*maxNext, -qClip, qClip)
+	target := clamp(reward+n.gamma*maxNext, -n.clip, n.clip)
 
 	// Поточна оцінка + активації прихованого шару (для backprop) — по ЖИВІЙ мережі.
 	q1, h1, h2 := n.forwardQ(s)

@@ -202,7 +202,7 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, hitWall bool) int {
 	if b.hasPrev {
 		r := b.rewardFor(hitWall, b.gruPrevX[inWhisker0+b.prevAction])
 		b.gruAcc += b.gruAccPow * r
-		b.gruAccPow *= qGamma
+		b.gruAccPow *= b.net.gamma
 	}
 
 	// Anti-stuck — та сама сітка безпеки, що й у стек-режимі (по вусах кадру).
@@ -298,7 +298,7 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, hitWall bool) int {
 // [seqBurnIn..seqTotal). Так стан на момент обрахунку помилки близький до того,
 // що агент реально має під час дії (а не до «щойно народженого» h=0).
 func (n *Net) tdUpdateSeq(seq sequence) {
-	gStep := n.mem.gammaStep() // [N-STEP] дискаунт на крок відрізка (γ^gruSkip)
+	gStep := n.mem.gammaStep(n.gamma) // [N-STEP] дискаунт на крок відрізка (γ^gruSkip)
 
 	// --- Фаза 1: forward живої мережі з кешем (по ВСЬОМУ відрізку, вкл. burn-in) ---
 	var hArr [seqTotal + 1][gruHidden]float32 // hArr[t] = h_{t-1}; hArr[0]=0
@@ -359,7 +359,7 @@ func (n *Net) tdUpdateSeq(seq sequence) {
 		// цінність майбутнього завищувалась би у стільки разів, скільки кадрів злито
 		// в один крок. Рівноважна Q при цьому не змінюється — та сама сума, лише
 		// перегрупована, тож qClip підбирати заново не треба.
-		target := clamp(seq.r[t]+gStep*qNext[argmaxQ(qNext)], -qClip, qClip)
+		target := clamp(seq.r[t]+gStep*qNext[argmaxQ(qNext)], -n.clip, n.clip)
 
 		// Q(дію) живої мережі зі стану h_t (= hArr[t+1]).
 		a := seq.a[t]
