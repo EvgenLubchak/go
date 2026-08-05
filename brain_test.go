@@ -840,6 +840,13 @@ func TestRestartKeepsBrains(t *testing.T) {
 	before.remember(transition{s: s, a: 1, r: 1, s2: s2})
 	lenBefore := before.replayLen()
 
+	// Кладемо щось у лічильники заміру, інакше перевірка їхнього скидання пуста.
+	g.units[0].Brain.mBlindN = 5
+	g.metrics.collect(g)
+	if g.metrics.unitFrames == 0 {
+		t.Fatal("лічильники не наповнились — перевірка скидання була б пустою")
+	}
+
 	g.restart()
 
 	after := g.units[0].Brain.net
@@ -849,6 +856,14 @@ func TestRestartKeepsBrains(t *testing.T) {
 	if after.replayLen() != lenBefore {
 		t.Errorf("буфер досвіду скинувся: %d → %d", lenBefore, after.replayLen())
 	}
+	// [МЕТРИКИ] Лічильники заміру описують світ, тож на рестарті мусять скинутись.
+	// Без цього m.agents накопичував Brain-и через усі життя, і «ag» на панелі
+	// показував кількість смертей, а не юнітів.
+	if g.metrics.unitFrames != 0 || g.metrics.agents != nil {
+		t.Errorf("лічильники заміру не скинуто: unitFrames %d, agents %d",
+			g.metrics.unitFrames, len(g.metrics.agents))
+	}
+
 	// Світ при цьому таки новий.
 	if g.tick != 0 {
 		t.Errorf("годинник не скинувся: tick %d", g.tick)
