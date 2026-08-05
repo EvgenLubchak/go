@@ -915,7 +915,9 @@ func TestLoadRejectsWrongMemoryContract(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/w.json"
 
-	trained := memContract{gru: true, memFrames: 4, stackSkip: 10}
+	// gruSkip задаємо ЯВНО: контракт із нулем недійсний (resolveMemContract його
+	// клампить до 1), а тут ми конструюємо вручну.
+	trained := memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 1}
 	n := NewNet()
 	n.mem = trained
 	if err := saveNetTo(n, path); err != nil {
@@ -930,13 +932,87 @@ func TestLoadRejectsWrongMemoryContract(t *testing.T) {
 		name string
 		want memContract
 	}{
-		{"інший ШЛЯХ памʼяті (GRU-ваги на стек)", memContract{gru: false, memFrames: 4, stackSkip: 10}},
-		{"інший КРОК семплів", memContract{gru: true, memFrames: 4, stackSkip: 60}},
-		{"інша ГЛИБИНА памʼяті", memContract{gru: true, memFrames: 1, stackSkip: 10}},
+		{"інший ШЛЯХ памʼяті (GRU-ваги на стек)", memContract{gru: false, memFrames: 4, stackSkip: 10, gruSkip: 1}},
+		{"інший КРОК семплів", memContract{gru: true, memFrames: 4, stackSkip: 60, gruSkip: 1}},
+		{"інша ГЛИБИНА памʼяті", memContract{gru: true, memFrames: 1, stackSkip: 10, gruSkip: 1}},
+		// Найважливіший випадок для цієї роботи: важіль BPTT змінює АЛГОРИТМ
+		// (n-step із γ^gruSkip), тож ваги, навчені при кроці 1, не сумісні з 20.
+		{"інший ВАЖІЛЬ BPTT", memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 20}},
 	}
 	for _, c := range cases {
 		if loadNetFrom(path, c.want) != nil {
 			t.Errorf("%s: мережа завантажилась, хоч навчена під інший контракт", c.name)
 		}
+	}
+}
+
+// TestGruSkipRepeatsAndSumsReward — важіль BPTT цілиться в те, що градієнт не дістає
+// далі 8 кадрів. Прорідження рішень розтягує ті самі 8 кроків на 8×gruSkip кадрів,
+// але воно РОБОЧЕ лише разом із двома речами, і тест перевіряє саме їх:
+//
+//  1. між рішеннями дія ПОВТОРЮЄТЬСЯ (інакше h рухався б щокадру й нічого не змінилось);
+//  2. нагороди за пропущені кадри СУМУЮТЬСЯ (інакше (N−1)/N сигналу зникає).
+//
+// Плюс метрики мусять лишитись покадровими — інакше вибірка зменшилась би в gruSkip
+// разів і перестала бути порівнянною зі стек-шляхом.
+func TestGruSkipRepeatsAndSumsReward(t *testing.T) {
+	const skip = 5
+
+	n := NewNet()
+	n.mem = resolveMemContract(MemoryGRU, 0, 0, skip)
+	b := NewBrainWith(n)
+
+	var cur [baseInputs]float32
+	cur[inDist] = 0.5
+	cur[inVisible] = 0 // сліпий кадр → метрика мусить рахуватись
+
+	first := b.stepGRU(cur, false)
+
+	// Наступні skip-1 кадрів — та сама дія, без нового рішення.
+	for i := 1; i < skip; i++ {
+		b.progress = 1 // додатний прогрес: і нагорода, і blindClosed
+		if got := b.stepGRU(cur, false); got != first {
+			t.Fatalf("кадр %d: дія змінилась (%d → %d) — прорідження не діє", i, first, got)
+		}
+	}
+
+	// Нагорода накопичилась за ВСІ пропущені кадри, а не за один.
+	if b.gruAcc <= 0 {
+		t.Fatalf("нагорода не накопичилась: gruAcc %.4f", b.gruAcc)
+	}
+	oneFrame := float32(rewardCloserScale) // progress=1 → саме стільки за кадр (без штрафів)
+	if b.gruAcc < oneFrame*1.5 {
+		t.Errorf("накопичено %.3f — схоже на ОДИН кадр (%.3f), а не на суму за %d",
+			b.gruAcc, oneFrame, skip-1)
+	}
+
+	// Метрики покадрові: skip кадрів сліпих рішень, не одне.
+	if b.mBlindN < skip-1 {
+		t.Errorf("метрика порахувала %d сліпих кадрів замість ~%d — вибірка стала непорівнянною зі стеком",
+			b.mBlindN, skip-1)
+	}
+
+	// На наступному кадрі — нове рішення, накопичувач скинуто.
+	b.stepGRU(cur, false)
+	if b.gruAcc != 0 || b.gruAccPow != 1 {
+		t.Errorf("накопичувач не скинуто на новому рішенні: acc %.3f pow %.3f", b.gruAcc, b.gruAccPow)
+	}
+}
+
+// TestGammaStepMatchesSkip — дискаунт мусить бути γ^gruSkip, бо крок відрізка накриває
+// gruSkip кадрів. Із простим γ цінність майбутнього завищувалась би у стільки разів,
+// скільки кадрів злито в один крок, — і n-step return перестав би бути коректним.
+func TestGammaStepMatchesSkip(t *testing.T) {
+	if got := resolveMemContract(MemoryGRU, 0, 0, 1).gammaStep(); got != qGamma {
+		t.Errorf("крок 1 мусить давати рівно qGamma: %.5f проти %.5f", got, qGamma)
+	}
+	c := resolveMemContract(MemoryGRU, 0, 0, 20)
+	want := float32(math.Pow(float64(qGamma), 20))
+	if got := c.gammaStep(); math.Abs(float64(got-want)) > 1e-6 {
+		t.Errorf("γ^20: отримали %.6f, очікували %.6f", got, want)
+	}
+	// Здоровий сенс: за 20 кадрів при γ=0.95 лишається близько третини цінності.
+	if g := c.gammaStep(); g < 0.30 || g > 0.40 {
+		t.Errorf("γ^20 = %.3f — поза очікуваним діапазоном 0.30..0.40", g)
 	}
 }

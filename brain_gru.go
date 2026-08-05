@@ -181,37 +181,28 @@ func (n *Net) trainSeq(k int) {
 // (BPTT) ще НЕ підключене (крок 3) — ваги GRU поки не міняються, рій діє випадково;
 // але дані для навчання вже течуть у seqReplay, а метрики reward/blind оживають.
 func (b *Brain) stepGRU(cur [baseInputs]float32, hitWall bool) int {
-	// Рекурентний forward: несемо власний стан b.h крізь кадри.
-	q, hNew := b.net.forwardGRU(cur, b.h)
-	b.h = hNew
-
 	// [МЕТРИКИ ПАМʼЯТІ] Вбивця ВСЕВИДЮЩИЙ (flow-field глобальний), і слот 13 у
 	// нього — не visible, а швидкість цілі. Читати його як видимість не можна.
 	visible := b.flowNav || cur[inVisible] > 0.5
 
-	// Нагорода за ПОПЕРЕДНЮ дію (та сама схема, що й у стек-шляху) → крок у відрізок.
-	if b.hasPrev {
-		// [МЕТРИКИ ПАМʼЯТІ] blind-chase (як у стек-шляху).
-		if !b.flowNav && !b.prevVisible {
-			b.mBlindN++
-			if b.progress > 0 {
-				b.mBlindClosed++
-			}
+	// [МЕТРИКИ] Рахуємо ЩОКАДРУ, а не раз на рішення. Інакше при прорідженні
+	// вибірка зменшилась би в gruSkip разів і перестала бути порівнянною зі
+	// стек-шляхом — а порівнянність тут головне, бо саме нею ми і міряємо памʼять.
+	if b.hasPrev && !b.flowNav && !b.prevVisible {
+		b.mBlindN++
+		if b.progress > 0 {
+			b.mBlindClosed++
 		}
-		// Нагорода — у спільному rewardFor (див. brain.go); вус напрямку минулої
-		// дії беремо з попереднього кадру цього агента.
-		reward := b.rewardFor(hitWall, b.gruPrevX[inWhisker0+b.prevAction])
+	}
 
-		// Записуємо завершений крок (x_{t-1}, a_{t-1}, r) у накопичувач відрізка.
-		b.seqX[b.seqN] = b.gruPrevX
-		b.seqA[b.seqN] = b.prevAction
-		b.seqR[b.seqN] = reward
-		b.seqN++
-		if b.seqN == seqTotal {
-			// Відрізок повний (burn-in + навчальні) → у спільний буфер.
-			b.net.rememberSeq(sequence{x: b.seqX, a: b.seqA, r: b.seqR, xEnd: cur})
-			b.seqN = 0
-		}
+	// [НАГОРОДА] Теж ЩОКАДРУ — і накопичується в нагороду поточного кроку з
+	// дискаунтом. Без цього при прорідженні (N−1)/N сигналу зникало б: rewardFor ще
+	// й СПОЖИВАЄ бойові лічильники (dmgDealt/Taken/kills), тож пропустити його виклик
+	// означало б і втратити шкоду, і залишити лічильники брудними на наступний кадр.
+	if b.hasPrev {
+		r := b.rewardFor(hitWall, b.gruPrevX[inWhisker0+b.prevAction])
+		b.gruAcc += b.gruAccPow * r
+		b.gruAccPow *= qGamma
 	}
 
 	// Anti-stuck — та сама сітка безпеки, що й у стек-режимі (по вусах кадру).
@@ -231,6 +222,40 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, hitWall bool) int {
 		b.stuckCounter -= stuckDecay
 	}
 
+	// [ВАЖІЛЬ BPTT] Між рішеннями дія ПОВТОРЮЄТЬСЯ. Стан h не рухається — саме тому
+	// вісім кроків розгортки накривають 8×gruSkip кадрів замість восьми.
+	//
+	// Anti-stuck тут навмисно НЕ перериває інтервал: лічильник накопичується вище й
+	// спрацює на найближчому рішенні. Ціна — до gruSkip кадрів довбання стіни (при 20
+	// це 0.167с). Перебивати інтервал було б гірше: кроки перестали б бути рівними за
+	// часом, і множник γ^gruSkip у цілі став би неправдою.
+	if b.gruTick > 0 {
+		b.gruTick--
+		b.gruPrevX = cur
+		b.prevVisible = visible
+		b.hasPrev = true
+		return b.lastAction
+	}
+	b.gruTick = b.net.mem.gruSkip - 1
+
+	// Закриваємо ПОПЕРЕДНІЙ крок: (кадр рішення, дія, СУМА нагород за інтервал).
+	if b.gruHasDec {
+		b.seqX[b.seqN] = b.gruDecX
+		b.seqA[b.seqN] = b.gruDecA
+		b.seqR[b.seqN] = b.gruAcc
+		b.seqN++
+		if b.seqN == seqTotal {
+			// Відрізок повний (burn-in + навчальні) → у спільний буфер.
+			b.net.rememberSeq(sequence{x: b.seqX, a: b.seqA, r: b.seqR, xEnd: cur})
+			b.seqN = 0
+		}
+	}
+	b.gruAcc, b.gruAccPow = 0, 1
+
+	// Рекурентний forward: несемо власний стан b.h між РІШЕННЯМИ (не кадрами).
+	q, hNew := b.net.forwardGRU(cur, b.h)
+	b.h = hNew
+
 	var action int
 	switch {
 	case b.frustration > 0:
@@ -244,6 +269,8 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, hitWall bool) int {
 	default:
 		action = b.selectFromQ(q)
 	}
+
+	b.gruDecX, b.gruDecA, b.gruHasDec = cur, action, true
 
 	b.gruPrevX = cur
 	b.prevAction = action
@@ -271,6 +298,8 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, hitWall bool) int {
 // [seqBurnIn..seqTotal). Так стан на момент обрахунку помилки близький до того,
 // що агент реально має під час дії (а не до «щойно народженого» h=0).
 func (n *Net) tdUpdateSeq(seq sequence) {
+	gStep := n.mem.gammaStep() // [N-STEP] дискаунт на крок відрізка (γ^gruSkip)
+
 	// --- Фаза 1: forward живої мережі з кешем (по ВСЬОМУ відрізку, вкл. burn-in) ---
 	var hArr [seqTotal + 1][gruHidden]float32 // hArr[t] = h_{t-1}; hArr[0]=0
 	var zc, rc, cc [seqTotal][gruHidden]float32
@@ -325,7 +354,12 @@ func (n *Net) tdUpdateSeq(seq sequence) {
 		} else {
 			qNext = qEnd
 		}
-		target := clamp(seq.r[t]+qGamma*qNext[argmaxQ(qNext)], -qClip, qClip)
+		// [N-STEP] Дискаунт на КРОК, а не на кадр: крок накриває gruSkip кадрів, і
+		// нагорода в seq.r уже є сумою Σγ^k·r по інтервалу. Якби тут лишився qGamma,
+		// цінність майбутнього завищувалась би у стільки разів, скільки кадрів злито
+		// в один крок. Рівноважна Q при цьому не змінюється — та сама сума, лише
+		// перегрупована, тож qClip підбирати заново не треба.
+		target := clamp(seq.r[t]+gStep*qNext[argmaxQ(qNext)], -qClip, qClip)
 
 		// Q(дію) живої мережі зі стану h_t (= hArr[t+1]).
 		a := seq.a[t]
