@@ -210,11 +210,11 @@ func impactThreshold(ownMaxSpeed float32) float32 {
 // [БІЙ: АТРИБУЦІЯ] Записує подію обом сторонам у лічильники мозку — це
 // сировина для бойової нагороди (rewardFor споживає й обнуляє їх наступного
 // кадру). attacker може бути nil (напр. шкода не від агента).
-func applyImpactDamage(attacker, target *Pixel) {
+func applyImpactDamage(attacker, target *Pixel, dmg int) {
 	if target.InvulnTimer > 0 {
 		return
 	}
-	target.HP -= impactDamage
+	target.HP -= dmg
 	target.HitTimer = hitFlashDuration // біле блимання (вже було для удару гравця)
 	target.InvulnTimer = impactInvuln
 
@@ -240,15 +240,15 @@ func applyImpactDamage(attacker, target *Pixel) {
 	}
 
 	if attacker != nil && attacker.Brain != nil {
-		attacker.Brain.dmgDealt += impactDamage
-		attacker.Brain.mDmgDealt += impactDamage // [МЕТРИКИ] не споживається rewardFor
+		attacker.Brain.dmgDealt += dmg
+		attacker.Brain.mDmgDealt += dmg // [МЕТРИКИ] не споживається rewardFor
 		if target.HP <= 0 {
 			attacker.Brain.kills++ // добив — головна ціль бойової нагороди
 		}
 	}
 	if target.Brain != nil {
-		target.Brain.dmgTaken += impactDamage
-		target.Brain.mDmgTaken += impactDamage
+		target.Brain.dmgTaken += dmg
+		target.Brain.mDmgTaken += dmg
 	}
 }
 
@@ -256,9 +256,6 @@ func applyImpactDamage(attacker, target *Pixel) {
 // closing speed. Обробляє і гравець↔вороги, і вороги↔вороги.
 // Однопотоково (після паралельної фази) → без гонок.
 func (g *Game) resolveImpacts() {
-	// Максимальна швидкість гравця — та сама формула, що в updatePlayer.
-	playerMax := float32(playerBaseSpeed) * float32(math.Sqrt(float64(g.difficulty)))
-
 	// --- Гравець ↔ вороги ---
 	for i := range g.units {
 		e := &g.units[i]
@@ -272,14 +269,24 @@ func (g *Game) resolveImpacts() {
 		if !ok {
 			continue
 		}
-		// Гравець таранить ворога.
-		if closingSpeed(g.player.VelX, g.player.VelY, nx, ny) >= impactThreshold(playerMax) {
-			applyImpactDamage(&g.player, e)
+		// [РИВОК] Гравець ранить ЛИШЕ в активній фазі. Перевірки швидкості більше
+		// немає, і це не оптимізація, а зміна правила: раніше шкода була ПОБІЧНИМ
+		// ЕФЕКТОМ того, що ти швидко їхав, тепер вона — РЕЗУЛЬТАТ рішення вдарити.
+		//
+		// Саме тут зникає домінантна стратегія «швидко кататись і таранити». Таран не
+		// прибрано — його зроблено навмисним.
+		//
+		// Невразливість цілі після удару (impactInvuln = 45) майже точно накриває
+		// відхід гравця (dashRecovery = 45): той, кого влучили, стає безкарним рівно
+		// на той час, поки нападник безпорадний. Вікно для віддачі виникло саме,
+		// з двох незалежно виведених чисел.
+		if g.player.DashPhase == dashPhaseActive {
+			applyImpactDamage(&g.player, e, dashDamage)
 		}
 		// Ворог кидається на гравця (напрямок навпаки).
 		eMax := e.Cfg.MaxSpeed * g.difficulty
 		if eMax > 0 && closingSpeed(e.VelX, e.VelY, -nx, -ny) >= impactThreshold(eMax) {
-			applyImpactDamage(e, &g.player)
+			applyImpactDamage(e, &g.player, impactDamage)
 		}
 	}
 
@@ -301,10 +308,10 @@ func (g *Game) resolveImpacts() {
 					aMax := a.Cfg.MaxSpeed * g.difficulty
 					bMax := b.Cfg.MaxSpeed * g.difficulty
 					if aMax > 0 && closingSpeed(a.VelX, a.VelY, nx, ny) >= impactThreshold(aMax) {
-						applyImpactDamage(a, b)
+						applyImpactDamage(a, b, impactDamage)
 					}
 					if bMax > 0 && closingSpeed(b.VelX, b.VelY, -nx, -ny) >= impactThreshold(bMax) {
-						applyImpactDamage(b, a)
+						applyImpactDamage(b, a, impactDamage)
 					}
 				}
 			}
@@ -332,67 +339,100 @@ func (g *Game) checkCollisions() {
 	}
 }
 
-// playerAttack обробляє удар SPACE: cooldown, пошкодження в радіусі, анімація.
-// [GO: inpututil.IsKeyJustPressed] — спрацьовує тільки в перший кадр натискання.
-// ebiten.IsKeyPressed спрацьовував би кожен кадр поки клавіша утримується.
-func (g *Game) playerAttack() {
-	if !inpututil.IsKeyJustPressed(ebiten.KeySpace) || g.attackCooldown > 0 {
-		return
+// [РИВОК] Фази атаки гравця. Замінили ульту: та була AoE радіусом 120 раз на 10
+// кадрів, тобто НЕВІДВОРОТНА, і бій зводився до молотіння. Тут атака має тривалість,
+// а отже її можна прочитати й на неї можна відреагувати.
+const (
+	dashIdle          = iota // не атакує — керування вільне
+	dashPhaseWindup          // замах: стоїть, напрямок замкнено, юніт це БАЧИТЬ
+	dashPhaseActive          // ривок: летить по замкненій лінії, шкода на контакті
+	dashPhaseRecovery        // відхід: керування заблоковане — вікно для покарання
+)
+
+// dashCycle — повна довжина атаки. Це знаменник в умові «ухилятись вигідніше за
+// кемпінг» (див. dashDamage у main.go), тож живе константою, а не магічним числом.
+const dashCycle = dashWindup + dashActive + dashRecovery
+
+// startDash — почати атаку в напрямку (dx, dy). Окремо від читання клавіатури, щоб
+// це можна було перевірити тестом: ebiten у тесті недоступний.
+//
+// Повертає false, якщо атака не почалась.
+func startDash(p *Pixel, dx, dy float32) bool {
+	if p.DashPhase != dashIdle {
+		return false // [КОМІТ] почав — доводь. Скасувати замах не можна, у цьому й ціна.
 	}
-	g.attackCooldown = attackCooldownMax
-	g.attackTimer = attackDuration
-	g.applyPlayerMelee()
+	n := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+	if n < 1e-6 {
+		return false // без напрямку немає ЛІНІЇ удару, а отже й нічого читати
+	}
+	p.DashDirX, p.DashDirY = dx/n, dy/n
+	p.DashPhase, p.DashTimer = dashPhaseWindup, dashWindup
+	return true
 }
 
-// applyPlayerMelee — саме НАРАХУВАННЯ удару, окремо від читання клавіатури.
-// Розділено, щоб це можна було перевірити тестом: ebiten у тесті недоступний.
-func (g *Game) applyPlayerMelee() {
-	px := g.player.X + pixelSize/2
-	py := g.player.Y + pixelSize/2
-
-	for i := range g.units {
-		e := &g.units[i]
-		ex := e.X + pixelSize/2
-		ey := e.Y + pixelSize/2
-		dx := px - ex
-		dy := py - ey
-		dist := float32(math.Sqrt(float64(dx*dx + dy*dy)))
-		if dist <= attackRadius {
-			e.HP -= attackDamage
-			e.HitTimer = hitFlashDuration
-
-			// [НАВЧАННЯ] Удар пробілом У НАГОРОДУ НЕ ВХОДИТЬ — свідомо.
-			//
-			// Це «ульта»: AoE радіусом attackRadius=120, без невразливості, кулдаун 10
-			// кадрів. Від неї НЕМОЖЛИВО ухилитись, і це не оцінка, а арифметика:
-			// найшвидший юніт має MaxSpeed 1.6 проти гравцевих 5.0, а щоб завдати шкоди
-			// зіткненням, треба дійти до КОНТАКТУ (25px) — тобто глибоко всередину
-			// 120-піксельного радіуса. Жоден тип не може вдарити, не увійшовши в зону
-			// ульти, і жоден не може від неї втекти.
-			//
-			// Отже це не сигнал, а постійний негативний ШУМ, який заглушує ті обміни, на
-			// які агент таки впливає. Той самий контрольний тест, яким ми прибрали
-			// WanderStrength: «чи міг агент вплинути на це число сам?» — ульта його не
-			// проходить.
-			//
-			// Я САМ додав тут крединування двома комітами раніше й назвав багом те, що
-			// воно не працювало. Принцип був правильний (шкода мусить бути видима), але
-			// саме для НЕВІДВОРОТНОЇ шкоди висновок хибний.
-			//
-			// HP усе одно падає — ульта лишається зброєю гравця. Не входить лише в
-			// навчання й у бойову метрику (щоб «отримано» на стенді міряло те, чого
-			// можна уникнути).
-			//
-			// КОЛИ ПОВЕРНУТИ: якщо ульта колись стане відворотною — менший радіус,
-			// телеграф, невразливість після удару, — вона знову стане сигналом.
-			if g.player.Brain != nil {
-				g.player.Brain.dmgDealt += attackDamage // [SELF-PLAY] жертва обрала атаку сама
-				if e.HP <= 0 {
-					g.player.Brain.kills++
-				}
-			}
-		}
+// advanceDash — один кадр машини фаз.
+func advanceDash(p *Pixel) {
+	if p.DashPhase == dashIdle {
+		return
 	}
+	p.DashTimer--
+	if p.DashTimer > 0 {
+		return
+	}
+	switch p.DashPhase {
+	case dashPhaseWindup:
+		p.DashPhase, p.DashTimer = dashPhaseActive, dashActive
+	case dashPhaseActive:
+		p.DashPhase, p.DashTimer = dashPhaseRecovery, dashRecovery
+	default:
+		p.DashPhase, p.DashTimer = dashIdle, 0
+	}
+}
+
+// dashWindupProgress — [ВХІД МОЗКУ] наскільько замах уже визрів: 0..1, і 0 коли
+// замаху немає. Це ЯВНА ознака телеграфу — свідомий контроль перед тим, як вимагати
+// від агента вивести її з історії самому.
+//
+// Порядок «явне перед відкривним» — та дисципліна, якої нам забракло з GRU: там ми
+// одразу вимагали ВИВЕСТИ памʼять і отримали нуль, не знаючи, чи задача взагалі
+// розвʼязна. Тут спершу подаємо відповідь у вхід і встановлюємо СТЕЛЮ, а вже потім
+// ознаку прибираємо й дивимось, чи вікно памʼяті її замінить.
+func dashWindupProgress(p *Pixel) float32 {
+	if p.DashPhase != dashPhaseWindup {
+		return 0
+	}
+	return float32(dashWindup-p.DashTimer) / float32(dashWindup)
+}
+
+// playerDashInput — читає SPACE і напрямок, починає ривок. Напрямок беремо з
+// НАТИСНУТИХ клавіш, а не з поточної швидкості: гравець мусить сам оголосити лінію
+// удару, і в замаху вона вже не змінюється.
+//
+// [GO: inpututil.IsKeyJustPressed] — лише перший кадр натискання, інакше утримання
+// пробілу перезапускало б замах щокадру.
+func (g *Game) playerDashInput() {
+	if !inpututil.IsKeyJustPressed(ebiten.KeySpace) {
+		return
+	}
+	var dx, dy float32
+	if ebiten.IsKeyPressed(ebiten.KeyArrowUp) || ebiten.IsKeyPressed(ebiten.KeyW) {
+		dy--
+	}
+	if ebiten.IsKeyPressed(ebiten.KeyArrowDown) || ebiten.IsKeyPressed(ebiten.KeyS) {
+		dy++
+	}
+	if ebiten.IsKeyPressed(ebiten.KeyArrowLeft) || ebiten.IsKeyPressed(ebiten.KeyA) {
+		dx--
+	}
+	if ebiten.IsKeyPressed(ebiten.KeyArrowRight) || ebiten.IsKeyPressed(ebiten.KeyD) {
+		dx++
+	}
+	if dx == 0 && dy == 0 {
+		// Клавіш не тримають — беремо напрямок руху. Стоячи на місці вдарити не можна:
+		// без лінії удару немає ні атаки, ні телеграфу.
+		dx, dy = g.player.VelX, g.player.VelY
+	}
+	startDash(&g.player, dx, dy)
 }
 
 // deathTransition — [RL] доставляє агентові нагороду за ФАТАЛЬНИЙ удар.

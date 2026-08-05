@@ -15,6 +15,12 @@ import (
 //	топ-даун   — стрілки рухають у СВІТОВИХ координатах (як завжди);
 //	від 1-ї особи — ліво/право ПОВЕРТАЮТЬ камеру, вперед/назад рухають У БІК ПОГЛЯДУ.
 func (g *Game) handlePlayerInput() {
+	// [РИВОК] У будь-якій фазі атаки керування заблоковане — у цьому і є ЦІНА удару.
+	// Замах видно, напрямок замкнено, відхід безпорадний: саме звідси в юніта
+	// зʼявляється що читати й коли карати.
+	if g.player.DashPhase != dashIdle {
+		return
+	}
 	if g.firstPerson {
 		g.handleFirstPersonInput()
 		return
@@ -101,12 +107,17 @@ func (g *Game) updatePlayer() {
 		g.player.HitTimer--
 	}
 
+	// [РИВОК] Машина фаз — ДО тертя й до стелі швидкості: у замаху ми швидкість
+	// зануляємо, у ривку задаємо, і тертя не має цього псувати.
+	advanceDash(&g.player)
+
 	// Тертя — при відпусканні клавіші гравець поступово зупиняється (інерція)
 	g.player.VelX *= playerFriction
 	g.player.VelY *= playerFriction
 
 	// sqrt робить ріст плавнішим: 1→1.41→1.73→2.0 замість 1→2→3→4
-	maxSpeed := float32(playerBaseSpeed) * float32(math.Sqrt(float64(g.difficulty)))
+	base := float32(playerBaseSpeed) * float32(math.Sqrt(float64(g.difficulty)))
+	maxSpeed := base
 	// [БІЙ] Гравця теж відкидає ударом — інакше удар по ньому не відчувався б.
 	// Тертя гравця (0.90) гасить віддачу швидше, ніж у юнітів (0.95), тож контроль
 	// повертається за кілька кадрів.
@@ -114,6 +125,26 @@ func (g *Game) updatePlayer() {
 		g.player.KnockTimer--
 		maxSpeed *= knockSpeedMulti
 	}
+	// [РИВОК] Замах — ПОВНА зупинка: це і є телеграф, і він мусить бути безсумнівним.
+	// Ривок — рух по замкненій лінії з піднятою стелею (10 кадрів × 10px = 100px,
+	// чотири корпуси). Відхід нічого не задає: гравця несе за інерцією й гасить тертя.
+	switch g.player.DashPhase {
+	case dashPhaseWindup:
+		g.player.VelX, g.player.VelY = 0, 0
+	case dashPhaseActive:
+		// Швидкість ривка — від БАЗОВОЇ стелі, а НЕ від піднятої віддачею. Інакше удар,
+		// що прилетів під час ривка, множив би стелю двічі: 5.0 × knockSpeedMulti 5.0 ×
+		// dashSpeedMulti 2.0 = 50px/кадр, тобто 500px за 10 кадрів — телепорт через пів
+		// екрана замість ривка. Дві незалежні механіки підняття стелі не мусять
+		// множитись; беремо більшу з двох.
+		ds := base * dashSpeedMulti
+		g.player.VelX = g.player.DashDirX * ds
+		g.player.VelY = g.player.DashDirY * ds
+		if ds > maxSpeed {
+			maxSpeed = ds
+		}
+	}
+
 	speed := float32(math.Sqrt(float64(g.player.VelX*g.player.VelX + g.player.VelY*g.player.VelY)))
 	if speed > maxSpeed {
 		g.player.VelX = g.player.VelX / speed * maxSpeed

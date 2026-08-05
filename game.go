@@ -41,9 +41,6 @@ type Game struct {
 	// пауза морозить світ, а навчання просто не отримує нових кадрів.
 	paused bool
 
-	attackCooldown int // кадрів до наступного удару
-	attackTimer    int // кадрів до кінця анімації кола
-
 	// [RAYCASTER] Вид від першої особи (Wolfenstein-стиль). Симуляція лишається
 	// 2D — змінюється ЛИШЕ камера/рендер. Перемикач: клавіша F.
 	firstPerson bool    // false = вид зверху; true = від першої особи
@@ -87,8 +84,7 @@ func (g *Game) restart() {
 	g.player.HP = playerMaxHP // [БІЙ] відновлюємо здоровʼя
 	g.player.resetFur()
 	g.player.InvulnTimer = 0
-	g.attackCooldown = 0
-	g.attackTimer = 0
+	g.player.DashPhase, g.player.DashTimer = dashIdle, 0 // [РИВОК] обриваємо недоведену атаку
 	g.units = newUnitsWithHive(hive)
 
 	// [МЕТРИКИ] Лічильники заміру описують СВІТ, а не навчання — тож на рестарті їх
@@ -195,21 +191,16 @@ func (g *Game) Update() error {
 		startBeat(g.difficulty) // темп зростає щорівня
 	}
 
-	if g.attackCooldown > 0 {
-		g.attackCooldown--
-	}
-	if g.attackTimer > 0 {
-		g.attackTimer--
-	}
-
 	if aiPlayer && g.player.Brain != nil {
 		g.updatePrey() // [SELF-PLAY] гравцем керує мозок-жертва
 	} else {
+		// [РИВОК] Пробіл читаємо ПЕРЕД рухом: напрямок удару беремо з клавіш, а
+		// handlePlayerInput у фазах атаки все одно нічого не додасть.
+		g.playerDashInput()
 		g.handlePlayerInput()
 	}
 	g.updatePlayer()
 	g.updateFlowFields() // [FLOW-FIELD] маршрути обох сторін (троттлинг)
-	g.playerAttack()
 	g.updateBoidMap()
 	g.calcAcceleration()
 	g.trainBrains() // [SHARED BRAIN] навчання мереж хижаків раз/кадр, ОДНОПОТОКОВО

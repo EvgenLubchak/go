@@ -1083,49 +1083,336 @@ func TestCombatOnlyRewardHasNoChaseTerm(t *testing.T) {
 	}
 }
 
-// TestPlayerUltDoesNotTeach — удар пробілом НЕ входить у навчання, але HP знімає.
-//
-// Це «ульта»: AoE радіусом 120 без невразливості. Від неї неможливо ухилитись —
-// найшвидший юніт має 1.6 проти гравцевих 5.0, а завдати шкоди можна лише з КОНТАКТУ
-// (25px), тобто глибоко всередині радіуса. Отже це постійний негативний шум, який
-// заглушує обміни, на які агент впливає.
-//
-// Той самий контрольний тест, яким ми прибрали WanderStrength: «чи міг агент вплинути
-// на це число сам?»
-//
-// Тест пінить ОБА боки: шкода відбувається (HP падає), але в навчання не потрапляє.
-func TestPlayerUltDoesNotTeach(t *testing.T) {
+// wardenTestGame — стражник і гравець в одній точці, без стін. Спільна заготовка
+// для бойових тестів: усі вони про те, ЯК зараховується шкода, а не про геометрію.
+func wardenTestGame(t *testing.T) (*Game, *Brain) {
+	t.Helper()
 	savedRoster, savedMap := unitRoster, tileMap
 	tileMap = [boidMapH][boidMapW]bool{}
-	defer func() { unitRoster, tileMap = savedRoster, savedMap }()
+	t.Cleanup(func() { unitRoster, tileMap = savedRoster, savedMap })
 
 	w := ConfigWarden
 	w.Count, w.WeightsFile = 1, "test_warden_never_exists.json"
 	unitRoster = []UnitConfig{w}
 
+	// Тіла ПЕРЕТИНАЮТЬСЯ, але центри РІЗНІ. Точка-в-точку не годиться: unitTo при
+	// нульовій відстані не дає напрямку, і тест «біг не ранить» проходив би з
+	// неправильної причини — не тому, що правило працює, а тому, що шкода взагалі
+	// не рахувалась. Саме це й сталось із першою версією цього тесту.
 	g := &Game{difficulty: 1.0, units: newUnits()}
-	g.player = Pixel{X: g.units[0].X, Y: g.units[0].Y, HP: 10, MaxHP: 10, Faction: factionPlayer}
-
+	g.player = Pixel{
+		X: g.units[0].X - pixelSize*0.4, Y: g.units[0].Y,
+		HP: 100, MaxHP: 100, Faction: factionPlayer,
+	}
 	b := g.units[0].Brain
 	if b == nil {
 		t.Fatal("стражник без мозку")
 	}
+	return g, b
+}
+
+// TestDashDamagesOnlyInActivePhase — головний регресійний запобіжник нової механіки.
+//
+// Було: шкода — ПОБІЧНИЙ ЕФЕКТ швидкості (поріг 0.6×5.0 = 3.0, досяжний просто на
+// бігу). Стало: шкода — РЕЗУЛЬТАТ рішення вдарити. Саме тут зникає домінантна
+// стратегія «швидко кататись і таранити», і саме тут зʼявляється те, що агент може
+// прочитати.
+//
+// Тест пінить обидві половини, бо кожна окремо ламається молча:
+//   - біг на ПОВНІЙ швидкості не ранить (інакше замах — декорація);
+//   - ривок ранить І ВЧИТЬ (dmgTaken зростає — на відміну від ульти, яку ми з
+//     навчання виключали саме через невідворотність; ривок відворотний, тож мусить
+//     повернутись у нагороду).
+func TestDashDamagesOnlyInActivePhase(t *testing.T) {
+	g, b := wardenTestGame(t)
+
+	// 1. Біг на повній швидкості просто в юніта — раніше це був удар.
 	hpBefore := g.units[0].HP
-
-	// Викликаємо тіло атаки напряму: сама playerAttack читає клавіатуру (ebiten),
-	// якої в тесті немає. Перевіряємо саме нарахування, а не введення.
-	g.applyPlayerMelee()
-
-	if g.units[0].HP != hpBefore-attackDamage {
-		t.Errorf("HP не зменшилось: %d → %d — ульта мусить лишатись зброєю", hpBefore, g.units[0].HP)
+	g.player.VelX, g.player.VelY = playerBaseSpeed, 0
+	g.player.DashPhase = dashIdle
+	g.resolveImpacts()
+	if g.units[0].HP != hpBefore {
+		t.Errorf("біг завдав шкоди (%d → %d): таран мусить бути НАВМИСНИМ, "+
+			"інакше замах ні на що не впливає", hpBefore, g.units[0].HP)
 	}
 	if b.dmgTaken != 0 {
-		t.Errorf("ульта потрапила в НАГОРОДУ: dmgTaken %d — агент карається за невідворотне",
-			b.dmgTaken)
+		t.Errorf("біг потрапив у нагороду: dmgTaken %d", b.dmgTaken)
 	}
-	if b.mDmgTaken != 0 {
-		t.Errorf("ульта потрапила в МЕТРИКУ: mDmgTaken %d — «отримано» перестане міряти те, "+
-			"чого можна уникнути", b.mDmgTaken)
+
+	// 2. Активна фаза ривка — навіть без швидкості: фаза І Є атака.
+	g.units[0].InvulnTimer = 0
+	hpBefore = g.units[0].HP
+	g.player.VelX, g.player.VelY = 0, 0
+	g.player.DashPhase = dashPhaseActive
+	g.resolveImpacts()
+	if g.units[0].HP != hpBefore-dashDamage {
+		t.Errorf("ривок не завдав %d шкоди: %d → %d", dashDamage, hpBefore, g.units[0].HP)
+	}
+	if b.dmgTaken != dashDamage {
+		t.Errorf("ривок НЕ потрапив у нагороду: dmgTaken %d, чекали %d.\n"+
+			"  Ульту ми виключали, бо від неї не можна ухилитись. Від ривка МОЖНА, "+
+			"тож він мусить учити.", b.dmgTaken, dashDamage)
+	}
+}
+
+// TestDodgeIsPhysicallyPossible — умова існування розвʼязку, а не тюнінг.
+//
+// Це той самий прорахунок на три рядки, якого нам забракло раніше: ми зняли ЧОТИРИ
+// заміри по стражнику (γ, горизонт, памʼять, темп бою) і отримали чотири нулі, бо при
+// гравцевих 5.0 проти його 0.6 у нього було 5 кадрів і 12% корпусу — політики, яка
+// ухиляється, просто НЕ ІСНУВАЛО. Гіперпараметри тут ні до чого.
+//
+// Тепер це перевіряється машиною, а не пам'яттю про урок:
+//
+//	замах  ≥ корпус / швидкість  →  можна зійти з лінії
+//	відхід ≥ корпус / швидкість  →  можна повернутись і покарати
+//
+// Без другої нерівності «ідеальна» політика — вічно тікати з нульовою нагородою:
+// пацифіст, а не боєць.
+func TestDodgeIsPhysicallyPossible(t *testing.T) {
+	need := float32(pixelSize) / ConfigWarden.MaxSpeed
+	if float32(dashWindup) < need {
+		t.Errorf("dashWindup = %d < %.1f кадрів: стражник (швидкість %.2f) не встигає зійти "+
+			"з лінії удару на корпус (%d px) — УХИЛЕННЯ фізично неможливе, і жодне "+
+			"навчання цього не виправить", dashWindup, need, ConfigWarden.MaxSpeed, pixelSize)
+	}
+	if float32(dashRecovery) < need {
+		t.Errorf("dashRecovery = %d < %.1f кадрів: той, хто ухилився, не встигає повернутись — "+
+			"оптимальна політика стає «тікати вічно» з нульовою нагородою", dashRecovery, need)
+	}
+}
+
+// TestDodgingBeatsCamping — ухилення мусить бути ВИГІДНІШИМ за розмін.
+//
+// Юніт ранить гравця дотиком на швидкості, тобто заробляє НЕПЕРЕРВНО, поки
+// тримається біля нього (стеля — один удар на impactInvuln). За час між двома
+// ривками він заробляє тим більше, чим ця пауза довша:
+//
+//	заробіток за цикл атаки:  impactDamage × dashCadence / impactInvuln
+//	втрата від пропущеного:   dashDamage
+//
+// Якщо перше більше, оптимальна політика — стояти й розмінюватись, і ми б виміряли
+// розмінника, а не ухильника. Саме це вийшло б при dashDamage = 5, і саме на цьому
+// я спіймався: узяв за каденцію мінімальний цикл (100) замість зміряних 230.
+//
+// ⚠️ dashCadence — ЗМІРЯНЕ число. Змінивши dashActive, швидкість гравця або
+// benchDashRange, його треба переміряти, інакше цей тест втратить силу.
+func TestDodgingBeatsCamping(t *testing.T) {
+	earn := float32(impactDamage) * float32(dashCadence) / float32(impactInvuln)
+	lose := float32(dashDamage)
+	if lose <= earn {
+		t.Errorf("розмін вигідніший за ухилення: за цикл атаки (%d кадрів) юніт заробляє "+
+			"%.1f, а пропущений ривок коштує лише %.1f.\n"+
+			"  Треба dashDamage > %.1f (зараз %d), АБО коротша каденція, "+
+			"АБО менший impactDamage.", dashCadence, earn, lose, earn, dashDamage)
+	}
+	if dashCycle > dashCadence {
+		t.Errorf("dashCadence = %d менша за мінімальний цикл %d — число нереальне",
+			dashCadence, dashCycle)
+	}
+}
+
+// TestDashDirectionLocksAtWindupStart — напрямок замикається на ПОЧАТКУ замаху.
+//
+// Це різниця між реакцією і вгадуванням. Якби напрямок обирався в момент випуску,
+// гравець дивився б, куди відійшов юніт, і націлювався туди — вийшла б гра
+// «камінь-ножиці-папір», у якій оптимальна політика ВИПАДКОВА. Випадковість не
+// вивчається, і замір знову був би про ніщо.
+func TestDashDirectionLocksAtWindupStart(t *testing.T) {
+	p := &Pixel{}
+	if !startDash(p, 1, 0) {
+		t.Fatal("ривок не почався")
+	}
+	dx, dy := p.DashDirX, p.DashDirY
+
+	// Спроба перецілитись у будь-якій фазі мусить бути відхилена.
+	for i := 0; i < dashCycle; i++ {
+		if startDash(p, 0, 1) {
+			t.Fatalf("кадр %d (фаза %d): напрямок перезадали — телеграф став брехнею",
+				i, p.DashPhase)
+		}
+		if p.DashDirX != dx || p.DashDirY != dy {
+			t.Fatalf("кадр %d: напрямок поїхав %.2f,%.2f → %.2f,%.2f",
+				i, dx, dy, p.DashDirX, p.DashDirY)
+		}
+		advanceDash(p)
+	}
+	if p.DashPhase != dashIdle {
+		t.Errorf("після %d кадрів фаза %d, чекали dashIdle", dashCycle, p.DashPhase)
+	}
+}
+
+// TestDashPhasesRunInOrder — машина фаз проходить замах → ривок → відхід і саме
+// стільки кадрів, скільки обіцяють константи. Шкода є ЛИШЕ в середній фазі, тож
+// зсув на кадр тут — це зсув вікна, у яке агент мусить укластися.
+func TestDashPhasesRunInOrder(t *testing.T) {
+	p := &Pixel{}
+	startDash(p, 1, 0)
+
+	want := make([]int, 0, dashCycle)
+	for i := 0; i < dashWindup; i++ {
+		want = append(want, dashPhaseWindup)
+	}
+	for i := 0; i < dashActive; i++ {
+		want = append(want, dashPhaseActive)
+	}
+	for i := 0; i < dashRecovery; i++ {
+		want = append(want, dashPhaseRecovery)
+	}
+	for i, w := range want {
+		if p.DashPhase != w {
+			t.Fatalf("кадр %d: фаза %d, чекали %d", i, p.DashPhase, w)
+		}
+		advanceDash(p)
+	}
+
+	// Прогрес замаху — вхідна ознака мозку: мусить рости 0→1, інакше агент бачить шум.
+	p2 := &Pixel{}
+	startDash(p2, 1, 0)
+	if got := dashWindupProgress(p2); got != 0 {
+		t.Errorf("на початку замаху прогрес %.3f, чекали 0", got)
+	}
+	for i := 0; i < dashWindup-1; i++ {
+		advanceDash(p2)
+	}
+	if got := dashWindupProgress(p2); got < 0.9 {
+		t.Errorf("у кінці замаху прогрес %.3f, чекали ≈1", got)
+	}
+	advanceDash(p2) // перейшли в ривок
+	if got := dashWindupProgress(p2); got != 0 {
+		t.Errorf("у фазі ривка прогрес %.3f, чекали 0 (ознака описує лише ЗАМАХ)", got)
+	}
+}
+
+// TestWindupStopsThePlayer — замах мусить бути ВИДИМИМ, і зупинка це його підпис.
+//
+// Перевіряємо через updatePlayer, а не через клавіатуру: handlePlayerInput читає
+// ebiten, якого в тесті немає. Важливо саме те, що фізика не дає рухатись у замаху
+// незалежно від того, звідки взялась швидкість, — інакше скриптований гравець на
+// стенді «читерив» би, рухаючись у замаху, і телеграф став би брехнею.
+func TestWindupStopsThePlayer(t *testing.T) {
+	savedMap := tileMap
+	tileMap = [boidMapH][boidMapW]bool{}
+	defer func() { tileMap = savedMap }()
+
+	g := &Game{difficulty: 1.0}
+	g.player = Pixel{X: 400, Y: 400, HP: 10, MaxHP: 10, VelX: playerBaseSpeed}
+	g.player.resetFur()
+	startDash(&g.player, 1, 0)
+
+	g.updatePlayer()
+	if g.player.VelX != 0 || g.player.VelY != 0 {
+		t.Errorf("у замаху гравець рухається (%.2f, %.2f) — телеграф не видно",
+			g.player.VelX, g.player.VelY)
+	}
+
+	// Доганяємо до активної фази: там швидкість мусить бути ПІДНЯТА над звичайною.
+	for g.player.DashPhase == dashPhaseWindup {
+		g.updatePlayer()
+	}
+	if g.player.DashPhase != dashPhaseActive {
+		t.Fatalf("фаза %d після замаху", g.player.DashPhase)
+	}
+	speed := g.player.VelX
+	if speed <= playerBaseSpeed {
+		t.Errorf("швидкість ривка %.2f не перевищує звичайну %.2f — ривок не дістане "+
+			"на dashActive×швидкість, і замах не має сенсу", speed, float32(playerBaseSpeed))
+	}
+
+	// Удар ПІД ЧАС ривка не мусить множити стелю вдруге. Дві незалежні механіки
+	// підняття (віддача й ривок) перемножувались і давали 50px/кадр — телепорт через
+	// пів екрана. Беремо більшу з двох, а не добуток.
+	g.player.KnockTimer = knockFrames
+	g.updatePlayer()
+	if got := g.player.VelX; got > playerBaseSpeed*dashSpeedMulti+0.01 {
+		t.Errorf("швидкість ривка після удару %.2f перевищує %.2f: стелі перемножились",
+			got, playerBaseSpeed*dashSpeedMulti)
+	}
+}
+
+// TestCombatInputsOnlyForCombatTypes — ознаки бою НЕ мусять зʼявлятись у рою.
+//
+// Це не мікрооптимізація, а захист ЗАМІРІВ. Рій має щільну нагороду за наближення,
+// бій його не стосується — для нього невразливість і замах були б шумом. А головне:
+// поки його вхід біт-у-біт той самий, усі записані базові лінії (памʼять 72+72, свіпи
+// зору й горизонту, важіль BPTT) далі порівнюються з новими числами.
+//
+// Ознака, потрібна ОДНОМУ типу, не мусить знецінювати заміри всіх інших — саме тому
+// ми й не пішли шляхом «додати всім, ваги все одно перевчимо».
+func TestCombatInputsOnlyForCombatTypes(t *testing.T) {
+	savedMap := tileMap
+	tileMap = [boidMapH][boidMapW]bool{}
+	defer func() { tileMap = savedMap }()
+
+	// Гравець у розпалі замаху, націленого просто в юніта, і юніт у невразливості —
+	// тобто ОБІ ознаки мали б бути ненульові, якби тип їх отримував.
+	player := &Pixel{X: 300, Y: 300, HP: 10, MaxHP: 10}
+	startDash(player, 1, 0)
+	for i := 0; i < dashWindup/2; i++ {
+		advanceDash(player)
+	}
+
+	mk := func(cfg UnitConfig) [baseInputs]float32 {
+		u := &Pixel{X: 340, Y: 300, HP: 5, MaxHP: 5, Cfg: cfg, InvulnTimer: impactInvuln / 2}
+		return GatherInputs(u, player)
+	}
+
+	swarm := mk(ConfigLearner)
+	if swarm[inInvuln] != 0 || swarm[inDashAtMe] != 0 {
+		t.Errorf("рій отримав бойові ознаки: [14]=%.3f [15]=%.3f — базові лінії "+
+			"переслідування знецінені", swarm[inInvuln], swarm[inDashAtMe])
+	}
+
+	warden := mk(ConfigWarden)
+	if warden[inInvuln] <= 0 {
+		t.Errorf("стражник не бачить власної невразливості: [14]=%.3f", warden[inInvuln])
+	}
+	if warden[inDashAtMe] <= 0 {
+		t.Errorf("стражник не бачить замаху в себе: [15]=%.3f", warden[inDashAtMe])
+	}
+}
+
+// TestTelegraphCarriesTimingAndAim — одне число мусить нести ОБА сенси.
+//
+// Вільний слот лишився один (подати напрямок ривка окремо означало б baseInputs 16→17
+// і знецінення всіх ваг), тож ознака = прогрес замаху × проєкція напрямку ривка на
+// напрямок «від гравця до мене». Перевіряємо, що не втратився ні таймінг, ні приціл:
+// якщо ознака реагує лише на одне з двох, агент або ухилятиметься від чужих ривків,
+// або не знатиме, коли саме.
+func TestTelegraphCarriesTimingAndAim(t *testing.T) {
+	savedMap := tileMap
+	tileMap = [boidMapH][boidMapW]bool{}
+	defer func() { tileMap = savedMap }()
+
+	unit := func() *Pixel {
+		return &Pixel{X: 340, Y: 300, HP: 5, MaxHP: 5, Cfg: ConfigWarden}
+	}
+	// Юніт праворуч від гравця: ривок (+1,0) летить У нього, (−1,0) — від нього.
+	feat := func(dirX, dirY float32, frames int) float32 {
+		p := &Pixel{X: 300, Y: 300, HP: 10, MaxHP: 10}
+		if dirX != 0 || dirY != 0 {
+			startDash(p, dirX, dirY)
+			for i := 0; i < frames; i++ {
+				advanceDash(p)
+			}
+		}
+		return GatherInputs(unit(), p)[inDashAtMe]
+	}
+
+	if v := feat(0, 0, 0); v != 0 {
+		t.Errorf("без замаху ознака %.3f, чекали 0", v)
+	}
+	early, late := feat(1, 0, 2), feat(1, 0, dashWindup-2)
+	if !(late > early) {
+		t.Errorf("ознака не несе ТАЙМІНГ: рано %.3f, пізно %.3f — агент не дізнається, "+
+			"коли саме прилетить", early, late)
+	}
+	if away := feat(-1, 0, dashWindup-2); away >= 0 {
+		t.Errorf("ознака не несе ПРИЦІЛ: ривок У ПРОТИЛЕЖНИЙ бік дав %.3f, чекали "+
+			"відʼємне — інакше агент ухилятиметься від чужих атак", away)
+	}
+	if side := feat(0, 1, dashWindup-2); side > 0.2 || side < -0.2 {
+		t.Errorf("ривок ПЕРПЕНДИКУЛЯРНО дав %.3f, чекали ≈0", side)
 	}
 }
 

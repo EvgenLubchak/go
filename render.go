@@ -244,6 +244,40 @@ func drawBody(screen *ebiten.Image, p Pixel, col color.RGBA) {
 }
 
 // drawPixel малює тіло з flash-ефектом, HP bar і міткою.
+// drawDash — [РИВОК] телеграф атаки. Це не оздоблення: уся механіка тримається на
+// тому, що ЛІНІЮ УДАРУ видно заздалегідь. Не намалювати її означало б зробити атаку
+// невідворотною знову, тобто повернути ульту під іншим імʼям.
+//
+//	замах  — лінія в замкненому напрямку, наливається кольором і ДОВЖИНОЮ: видно не
+//	         лише «зараз ударю», а й куди дістане (dashActive × швидкість ривка);
+//	ривок  — яскравий слід уздовж пройденого відрізка;
+//	відхід — кільце, що гасне: видно, скільки ще бути безпорадним.
+//
+// Юніт через свою ознаку бачить лише замах (dashWindupProgress) — людині корисніше
+// бачити всі три фази, бо вона ще й цілиться.
+func drawDash(screen *ebiten.Image, p *Pixel) {
+	if p.DashPhase == dashIdle {
+		return
+	}
+	cx := p.X + pixelSize/2
+	cy := p.Y + pixelSize/2
+	reach := float32(dashActive) * playerBaseSpeed * dashSpeedMulti
+
+	switch p.DashPhase {
+	case dashPhaseWindup:
+		f := dashWindupProgress(p)
+		ln := reach * f
+		vector.StrokeLine(screen, cx, cy, cx+p.DashDirX*ln, cy+p.DashDirY*ln,
+			1+2*f, color.RGBA{255, uint8(220 - 140*f), 60, uint8(90 + 150*f)}, true)
+	case dashPhaseActive:
+		vector.StrokeLine(screen, cx-p.DashDirX*reach, cy-p.DashDirY*reach, cx, cy,
+			4, color.RGBA{255, 255, 200, 210}, true)
+	default:
+		a := uint8(120 * p.DashTimer / dashRecovery)
+		vector.StrokeCircle(screen, cx, cy, pixelSize*0.9, 1.5, color.RGBA{120, 170, 255, a}, true)
+	}
+}
+
 func drawPixel(screen *ebiten.Image, p Pixel) {
 	// Flash: поки HitTimer > 0 — малюємо білим
 	col := p.Color
@@ -375,15 +409,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		drawFur(screen, &g.player)
 		drawPixel(screen, g.player)
 
-		// Кільце атаки — StrokeCircle (контур) замість DrawFilledCircle (заповнене).
-		// Виглядає чистіше як індикатор зони удару і не засліплює.
-		// alpha = 180..0 — плавно зникає разом з attackTimer.
-		if g.attackTimer > 0 {
-			cx := g.player.X + pixelSize/2
-			cy := g.player.Y + pixelSize/2
-			alpha := uint8(180 * g.attackTimer / attackDuration)
-			vector.StrokeCircle(screen, cx, cy, attackRadius, 2, color.RGBA{255, 255, 80, alpha}, true)
-		}
+		drawDash(screen, &g.player)
 	} // кінець топ-даун-гілки
 
 	// HUD
