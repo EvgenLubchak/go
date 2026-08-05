@@ -52,15 +52,19 @@ import (
 // benchCfg — одна конфігурація памʼяті для порівняння.
 type benchCfg struct {
 	name   string
-	gru    bool        // useGRU
-	frames int         // memFrames: скільки слотів стеку несуть історію
-	skip   int         // stackSkip: кадрів між семплами
-	units  int         // скільки учнів на полі (1 перевіряє гіпотезу «рій замінює памʼять»)
-	gruLR  float32     // gruLearnRate; 0 = лишити поточний
-	gamma  float32     // qGamma; 0 = лишити поточний
-	gskip  int         // [RNN] важіль BPTT: раз на скільки кадрів GRU думає; 0 = 1
-	askip  int         // [ПОВТОР ДІЇ] раз на скільки кадрів вирішує СТЕК-шлях; 0 = 1
-	base   *UnitConfig // базовий конфіг типу; nil = ConfigLearner
+	gru    bool    // useGRU
+	frames int     // memFrames: скільки слотів стеку несуть історію
+	skip   int     // stackSkip: кадрів між семплами
+	units  int     // скільки учнів на полі (1 перевіряє гіпотезу «рій замінює памʼять»)
+	gruLR  float32 // gruLearnRate; 0 = лишити поточний
+	gamma  float32 // qGamma; 0 = лишити поточний
+	gskip  int     // [RNN] важіль BPTT: раз на скільки кадрів GRU думає; 0 = 1
+	askip  int     // [ПОВТОР ДІЇ] раз на скільки кадрів вирішує СТЕК-шлях; 0 = 1
+
+	// [КОНТРОЛІ] Дві комірки-відповіді на питання «це поведінка чи пружина».
+	untrained bool        // 0 розігріву + заморожена політика: мережа НІКОЛИ не вчилась
+	noForce   bool        // brainForce = 0: мозок думає, але рішення не рухають тіло
+	base      *UnitConfig // базовий конфіг типу; nil = ConfigLearner
 
 	// [БАЛАНС] Перебивання балансних чисел; 0 = лишити конфігове/глобальне.
 	invuln int // impactInvuln — головна ручка ТЕМПУ бою, отже й темпу навчання
@@ -278,6 +282,33 @@ func TestMemoryBench(t *testing.T) {
 			// УВАГА: поріг удару = max(0.6×MaxSpeed, 0.4), тож піднявши швидкість, ми
 			// піднімаємо і планку. Влучати НЕ стане легше — виграш лише в ІНІЦІАТИВІ.
 			{name: "швидкість 1.2 (ініціатива)", base: &w, units: 1, speed: 1.2},
+		}
+	}
+	if os.Getenv("BENCH_SET") == "physics" {
+		// [ПРУЖИНА ЧИ ПОЛІТИКА] Питання, яке на око не розвʼязується.
+		//
+		// У грі видно, що стражник зміщується з лінії атаки й бʼє після відскоку. Але
+		// bodyBounce і віддача удару роблять рівно те саме БЕЗ жодної участі мозку, і
+		// відрізнити одне від одного спостереженням неможливо — обидва виглядають як
+		// «відскочив і вкусив».
+		//
+		// Три комірки, і кожна відповідає на своє:
+		//
+		//	навчений    що ми міряли досі
+		//	невчений    та сама архітектура, та сама фізика, НУЛЬ навчання
+		//	фізика      мозок думає й пише метрики, але рішення не рухають тіло
+		//
+		// Читання: якщо всі три збігаються — те, що видно в грі, це пружини. Якщо
+		// навчений > невчений — навчання щось дало. Якщо невчений > фізика, але
+		// навчений ≈ невчений — рух допомагає, а НАВЧАННЯ ні.
+		if !combat || !benchDriveSeek || !benchArena {
+			t.Fatal("набір physics вимагає BENCH_COMBAT=1 BENCH_SEEK=1 BENCH_ARENA=1")
+		}
+		w := ConfigWarden
+		cfgs = []benchCfg{
+			{name: "навчений (60k)", base: &w, units: 1, warmup: 60000},
+			{name: "невчений (0 розігріву, заморожений)", base: &w, units: 1, untrained: true},
+			{name: "чиста фізика (рішення не рухають)", base: &w, units: 1, warmup: 60000, noForce: true},
 		}
 	}
 	if os.Getenv("BENCH_SET") == "actrepeat" {
@@ -618,7 +649,9 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving, combat bool) (live, 
 	savedShared := sharedBrain
 	savedInvuln := impactInvuln
 	savedFeats := [2]bool{featDashOpen, featDashAtMe}
+	savedForce := brainForce
 	defer func() {
+		brainForce = savedForce
 		featDashOpen, featDashAtMe = savedFeats[0], savedFeats[1]
 		impactInvuln = savedInvuln
 		sharedBrain = savedShared
@@ -627,7 +660,13 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving, combat bool) (live, 
 		sightRange = savedSight
 	}()
 
-	frozenPolicy = false
+	frozenPolicy = c.untrained // [КОНТРОЛЬ] заморожено З САМОГО ПОЧАТКУ = ніколи не вчилось
+	if c.untrained {
+		warmup = 0
+	}
+	if c.noForce {
+		brainForce = 0
+	}
 	if c.gruLR > 0 {
 		gruLearnRate = c.gruLR
 	}
