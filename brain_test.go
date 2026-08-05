@@ -1083,13 +1083,18 @@ func TestCombatOnlyRewardHasNoChaseTerm(t *testing.T) {
 	}
 }
 
-// TestPlayerMeleeCreditsBrain — удар пробілом мусить доходити до мозку цілі.
+// TestPlayerUltDoesNotTeach — удар пробілом НЕ входить у навчання, але HP знімає.
 //
-// Був справжній пропуск: playerAttack міняв HP напряму, обходячи applyImpactDamage,
-// тож dmgTaken не реєструвався НІКОЛИ. Отже всі агенти з CombatReward учились не
-// відчуваючи головної зброї гравця. Для стражника, у якого бойова нагорода — ЄДИНЕ
-// джерело сигналу, це зробило б навчання беззмістовним.
-func TestPlayerMeleeCreditsBrain(t *testing.T) {
+// Це «ульта»: AoE радіусом 120 без невразливості. Від неї неможливо ухилитись —
+// найшвидший юніт має 1.6 проти гравцевих 5.0, а завдати шкоди можна лише з КОНТАКТУ
+// (25px), тобто глибоко всередині радіуса. Отже це постійний негативний шум, який
+// заглушує обміни, на які агент впливає.
+//
+// Той самий контрольний тест, яким ми прибрали WanderStrength: «чи міг агент вплинути
+// на це число сам?»
+//
+// Тест пінить ОБА боки: шкода відбувається (HP падає), але в навчання не потрапляє.
+func TestPlayerUltDoesNotTeach(t *testing.T) {
 	savedRoster, savedMap := unitRoster, tileMap
 	tileMap = [boidMapH][boidMapW]bool{}
 	defer func() { unitRoster, tileMap = savedRoster, savedMap }()
@@ -1112,10 +1117,15 @@ func TestPlayerMeleeCreditsBrain(t *testing.T) {
 	g.applyPlayerMelee()
 
 	if g.units[0].HP != hpBefore-attackDamage {
-		t.Errorf("HP не зменшилось: %d → %d", hpBefore, g.units[0].HP)
+		t.Errorf("HP не зменшилось: %d → %d — ульта мусить лишатись зброєю", hpBefore, g.units[0].HP)
 	}
-	if b.dmgTaken != attackDamage {
-		t.Errorf("шкода не зарахована в мозок: dmgTaken %d, очікували %d", b.dmgTaken, attackDamage)
+	if b.dmgTaken != 0 {
+		t.Errorf("ульта потрапила в НАГОРОДУ: dmgTaken %d — агент карається за невідворотне",
+			b.dmgTaken)
+	}
+	if b.mDmgTaken != 0 {
+		t.Errorf("ульта потрапила в МЕТРИКУ: mDmgTaken %d — «отримано» перестане міряти те, "+
+			"чого можна уникнути", b.mDmgTaken)
 	}
 }
 

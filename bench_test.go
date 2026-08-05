@@ -33,6 +33,8 @@ import (
 //	BENCH_WARMUP=20000 тіків навчання перед заміром
 //	BENCH_MEASURE=6000 тіків у кожному вікні заміру
 //	BENCH_MOVING=1     1 = гравець рухається, 0 = стоїть
+//	BENCH_RAM=0        1 = гравець бʼється лише ТАРАНОМ, без ульти (уся шкода
+//	                   відворотна → «отримано» стає показником політики)
 //	BENCH_ARENA=0      1 = прибрати стіни (для бойових замірів: лабіринт додає лише
 //	                   навігаційну лотерею, а стражник стоїть і бʼється)
 //	BENCH_SEEK=0       1 = гравець ШУКАЄ найближчого й атакує (для бойових замірів:
@@ -121,6 +123,7 @@ func TestMemoryBench(t *testing.T) {
 	combat := benchEnvInt("BENCH_COMBAT", 0) != 0
 	benchDriveSeek = benchEnvInt("BENCH_SEEK", 0) != 0
 	benchArena = benchEnvInt("BENCH_ARENA", 0) != 0
+	benchRam = benchEnvInt("BENCH_RAM", 0) != 0
 	if benchArena {
 		savedMap := tileMap
 		tileMap = [boidMapH][boidMapW]bool{} // арена без стін
@@ -237,11 +240,14 @@ func TestMemoryBench(t *testing.T) {
 		// фізично не бачить удару, що наближається (подія через 120 кадрів
 		// дисконтується до 0.002) і осідає у «все варте нуля». γ=0.99 дає 100 кадрів
 		// ≈ 0.83с — досить, щоб приписати заслугу позиціюванню.
-		if !combat || !benchDriveSeek || !benchArena {
-			t.Fatal("набір warden вимагає BENCH_COMBAT=1 BENCH_SEEK=1 BENCH_ARENA=1.\n" +
+		if !combat || !benchDriveSeek || !benchArena || !benchRam {
+			t.Fatal("набір warden вимагає BENCH_COMBAT=1 BENCH_SEEK=1 BENCH_ARENA=1 BENCH_RAM=1.\n" +
 				"  COMBAT — без бою стражник не отримає жодної нагородної події;\n" +
 				"  SEEK   — гравець, що блукає, до його поста не дійде;\n" +
-				"  ARENA  — з лабіринтом гравець застрягає, і бою не було в 11 із 24 прогонів")
+				"  ARENA  — з лабіринтом гравець застрягає, і бою не було в 11 із 24 прогонів;\n" +
+				"  RAM    — ульта невідворотна, тож без неї «отримано» вперше стає\n" +
+				"           показником ПОЛІТИКИ, а не темпу молотіння. Без цього прапорця\n" +
+				"           захисну половину гіпотези виміряти неможливо")
 		}
 		w := ConfigWarden
 		cfgs = []benchCfg{
@@ -300,6 +306,7 @@ func TestMemoryBench(t *testing.T) {
 
 	chaseBy := map[string][]float32{}
 	dmgBy := map[string][]float32{}
+	netBy := map[string][]float32{}
 	var order []string
 	for _, c := range cfgs {
 		if only != "" && !strings.Contains(c.name, only) {
@@ -333,9 +340,20 @@ func TestMemoryBench(t *testing.T) {
 					silent++
 				}
 			}
-			t.Logf("%s | ЗАВДАНО на 1000 тіків %s", c.name, benchStats(dealt))
-			t.Logf("%s | завдано по прогонах: %s", c.name, benchList(dealt))
-			t.Logf("%s | отримано на 1000 тіків %s", c.name, benchStats(taken))
+			// [ПОКАЗНИК] Чиста шкода — саме її агент і оптимізує: його нагорода це
+			// 2·завдано − 2·отримано. Раніше ми порівнювали лише «завдано», бо
+			// «отримано» задавала ульта й воно не залежало від політики. З BENCH_RAM
+			// ульти немає, обидві складові стали політичними — отже net осмислений.
+			net := make([]float32, len(dealt))
+			for i := range dealt {
+				net[i] = dealt[i] - taken[i]
+			}
+			netBy[c.name] = net
+
+			t.Logf("%s | ЧИСТА на 1000 тіків %s", c.name, benchStats(net))
+			t.Logf("%s | завдано %s", c.name, benchStats(dealt))
+			t.Logf("%s | отримано %s", c.name, benchStats(taken))
+			t.Logf("%s | чиста по прогонах: %s", c.name, benchList(net))
 			t.Logf("%s | БЕЗ БОЮ: %d з %d прогонів%s", c.name, silent, len(taken),
 				map[bool]string{true: "  ← замір недійсний", false: ""}[silent*4 > len(taken)])
 		}
@@ -352,7 +370,9 @@ func TestMemoryBench(t *testing.T) {
 	// відповідає на «наскільки надійно A виграє», і 50% означає «ніяк».
 	metric, by := "chase", chaseBy
 	if combat {
-		metric, by = "ЗАВДАНУ шкоду", dmgBy // у бойових замірах chase не застосовний
+		// ЧИСТА шкода, а не завдана: саме її агент оптимізує (нагорода = 2·завдано −
+		// 2·отримано). chase у бойових замірах не застосовний узагалі.
+		metric, by = "ЧИСТУ шкоду", netBy
 	}
 	t.Logf("— попарно, частка пар прогонів, де перший конфіг має вищу %s —", metric)
 	for i := 0; i < len(order); i++ {
@@ -570,6 +590,14 @@ func (g *Game) tickHeadless(drive func(*Game), combat bool) {
 // коли стіни не є предметом заміру, їх не має бути.
 var benchArena bool
 
+// benchRam — гравець бʼється ЛИШЕ тараном, без ульти.
+//
+// Ульта з навчання вже виключена (див. applyPlayerMelee), але вона все одно знімає HP
+// і вбиває — а кожна смерть скидає памʼять агента й обриває його досвід. Для заміру
+// УХИЛЕННЯ це зайвий шум: хочемо, щоб уся шкода була відворотною, і щоб стражник жив
+// достатньо довго, аби показати політику.
+var benchRam bool
+
 // benchDriveSeek — режим «шукати й атакувати» замість блукання.
 //
 // Потрібен для бойових замірів: стражник СТОЇТЬ на своєму посту, а гравець, що блукає
@@ -583,8 +611,8 @@ func benchDriver(moving, combat bool) func(*Game) {
 	// був би про ніщо. Ритм той самий, що дозволяє гра: раз на attackCooldownMax.
 	attackTick := 0
 	melee := func(g *Game) {
-		if !combat {
-			return
+		if !combat || benchRam {
+			return // [ТАРАН] без ульти: уся шкода мусить бути відворотною
 		}
 		attackTick++
 		if attackTick >= attackCooldownMax {
