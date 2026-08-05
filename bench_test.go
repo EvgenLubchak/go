@@ -61,10 +61,14 @@ type benchCfg struct {
 	gruLR  float32     // gruLearnRate; 0 = лишити поточний
 	gamma  float32     // qGamma; 0 = лишити поточний
 	gskip  int         // [RNN] важіль BPTT: раз на скільки кадрів GRU думає; 0 = 1
-	base   *UnitConfig // базовий конфіг типу; nil = ConfigLearner. qClip масштабується автоматично
-	sight  float32     // sightRange; 0 = лишити поточний
-	indep  bool        // true = sharedBrain=false (у кожного юніта СВОЯ мережа)
-	wander float32     // WanderStrength; 0 = лишити конфігове (у учнів воно теж 0)
+	base   *UnitConfig // базовий конфіг типу; nil = ConfigLearner
+
+	// [БАЛАНС] Перебивання балансних чисел; 0 = лишити конфігове/глобальне.
+	invuln int     // impactInvuln — головна ручка ТЕМПУ бою, отже й темпу навчання
+	speed  float32 // MaxSpeed типу. qClip масштабується автоматично
+	sight  float32 // sightRange; 0 = лишити поточний
+	indep  bool    // true = sharedBrain=false (у кожного юніта СВОЯ мережа)
+	wander float32 // WanderStrength; 0 = лишити конфігове (у учнів воно теж 0)
 }
 
 // benchOut — те, що знімаємо з одного вікна заміру.
@@ -225,6 +229,35 @@ func TestMemoryBench(t *testing.T) {
 			{name: "2/180  γ0.995 (1.67с)", frames: 2, skip: 180, units: 1, gamma: 0.995},
 		}
 	}
+	if os.Getenv("BENCH_SET") == "balance" {
+		// [БАЛАНС СТРАЖНИКА] Чи можна дати йому шанс навчитись ловити вікна?
+		//
+		// ПО ОДНІЙ РУЧЦІ ЗА РАЗ від базової лінії, а не повний факторіал. Причина —
+		// наш власний урок про роздільну здатність: взаємодії цей стенд виміряти НЕ
+		// МОЖЕ (для них треба ~1200 прогонів на комірку), тож вісім комірок дали б ті
+		// самі головні ефекти за втричі довший час.
+		//
+		// Виміряне вузьке місце — не «несправедливість», а ГОЛОД ПО ДАНИХ: стражник
+		// отримує ~5.5 подій на 1000 тіків, тобто ~165 за розігрів, проти 30000 у рою
+		// зі щільною нагородою. Різниця в 180 разів. Усі три ручки нижче цілять саме в
+		// кількість подій, а не в «баланс» у звичному сенсі.
+		if !combat || !benchDriveSeek || !benchArena || !benchRam {
+			t.Fatal("набір balance вимагає BENCH_COMBAT=1 BENCH_SEEK=1 BENCH_ARENA=1 BENCH_RAM=1")
+		}
+		w := ConfigWarden
+		cfgs = []benchCfg{
+			{name: "база (×1, невр 45, шв 0.6)", base: &w, units: 1},
+			// Найсильніший виміряний важіль у проєкті (спільний буфер, 85%, p=4e-5).
+			// АЛЕ: пости розкидані, а гравець бʼється з НАЙБЛИЖЧИМ — решта може
+			// простоювати, і тоді ×4 не дасть ×4 даних. Замір це й покаже.
+			{name: "×4 стражники (спільний мозок)", base: &w, units: 4},
+			// Стеля шкоди 1000/20 = 50 замість 22 → більш ніж удвічі більше подій.
+			{name: "невразливість 20 (темп ×2)", base: &w, units: 1, invuln: 20},
+			// УВАГА: поріг удару = max(0.6×MaxSpeed, 0.4), тож піднявши швидкість, ми
+			// піднімаємо і планку. Влучати НЕ стане легше — виграш лише в ІНІЦІАТИВІ.
+			{name: "швидкість 1.2 (ініціатива)", base: &w, units: 1, speed: 1.2},
+		}
+	}
 	if os.Getenv("BENCH_SET") == "warden" {
 		// [СТРАЖНИК] Чи дала γ=0.99 бойовий тайминг?
 		//
@@ -307,6 +340,7 @@ func TestMemoryBench(t *testing.T) {
 	chaseBy := map[string][]float32{}
 	dmgBy := map[string][]float32{}
 	netBy := map[string][]float32{}
+	shareBy := map[string][]float32{}
 	var order []string
 	for _, c := range cfgs {
 		if only != "" && !strings.Contains(c.name, only) {
@@ -345,15 +379,26 @@ func TestMemoryBench(t *testing.T) {
 			// «отримано» задавала ульта й воно не залежало від політики. З BENCH_RAM
 			// ульти немає, обидві складові стали політичними — отже net осмислений.
 			net := make([]float32, len(dealt))
+			share := make([]float32, len(dealt))
 			for i := range dealt {
 				net[i] = dealt[i] - taken[i]
+				if t := dealt[i] + taken[i]; t > 0 {
+					share[i] = 100 * dealt[i] / t
+				}
 			}
 			netBy[c.name] = net
+			shareBy[c.name] = share
 
-			t.Logf("%s | ЧИСТА на 1000 тіків %s", c.name, benchStats(net))
-			t.Logf("%s | завдано %s", c.name, benchStats(dealt))
-			t.Logf("%s | отримано %s", c.name, benchStats(taken))
-			t.Logf("%s | чиста по прогонах: %s", c.name, benchList(net))
+			// ЧАСТКА ВИГРАНИХ ОБМІНІВ — головний показник ВМІННЯ, бо не залежить від
+			// ТЕМПУ бою. Чиста шкода на 1000 тіків його з умінням змішує: стражник у
+			// середньому програє обмін, тож будь-яка ручка, що прискорює бій
+			// (невразливість, швидкість), автоматично дає більший мінус — навіть якщо
+			// вміння не змінилось. На калібруванні це виглядало як «невразливість 20
+			// гірша», хоч там просто вдвічі більше боїв.
+			t.Logf("%s | ЧАСТКА виграних обмінів %s", c.name, benchStats(share))
+			t.Logf("%s | чиста на 1000 тіків %s", c.name, benchStats(net))
+			t.Logf("%s | завдано %s   отримано %s", c.name, benchStats(dealt), benchStats(taken))
+			t.Logf("%s | частка по прогонах: %s", c.name, benchList(share))
 			t.Logf("%s | БЕЗ БОЮ: %d з %d прогонів%s", c.name, silent, len(taken),
 				map[bool]string{true: "  ← замір недійсний", false: ""}[silent*4 > len(taken)])
 		}
@@ -370,9 +415,11 @@ func TestMemoryBench(t *testing.T) {
 	// відповідає на «наскільки надійно A виграє», і 50% означає «ніяк».
 	metric, by := "chase", chaseBy
 	if combat {
-		// ЧИСТА шкода, а не завдана: саме її агент оптимізує (нагорода = 2·завдано −
-		// 2·отримано). chase у бойових замірах не застосовний узагалі.
-		metric, by = "ЧИСТУ шкоду", netBy
+		// ЧАСТКА виграних обмінів, а не чиста шкода: вона незалежна від ТЕМПУ бою, тож
+		// комірки з різною швидкістю чи невразливістю порівнюються чесно. Чиста шкода
+		// лишається у виводі — її агент і оптимізує, — але як показник ВМІННЯ вона
+		// непридатна. chase у бойових замірах не застосовний узагалі.
+		metric, by = "ЧАСТКУ виграних обмінів", shareBy
 	}
 	t.Logf("— попарно, частка пар прогонів, де перший конфіг має вищу %s —", metric)
 	for i := 0; i < len(order); i++ {
@@ -434,7 +481,9 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving, combat bool) (live, 
 	savedLR, savedGamma, savedClip := gruLearnRate, qGamma, qClip
 	savedSight := sightRange
 	savedShared := sharedBrain
+	savedInvuln := impactInvuln
 	defer func() {
+		impactInvuln = savedInvuln
 		sharedBrain = savedShared
 		unitRoster, frozenPolicy = savedRoster, savedFrozen
 		gruLearnRate, qGamma, qClip = savedLR, savedGamma, savedClip
@@ -447,6 +496,9 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving, combat bool) (live, 
 	}
 	if c.sight > 0 {
 		sightRange = c.sight
+	}
+	if c.invuln > 0 {
+		impactInvuln = c.invuln
 	}
 	sharedBrain = !c.indep
 
@@ -463,6 +515,9 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving, combat bool) (live, 
 	// типу: стала популяція означає, що знаменник метрик не пливе. Без цього прогін,
 	// у якому пощастило вижити, не порівнювався б із прогоном, де юнітів вибили.
 	learner.Respawns = -1
+	if c.speed > 0 {
+		learner.MaxSpeed = c.speed
+	}
 
 	// [ГОРИЗОНТ] Через КОНФІГ, а не через глобаль: після рефакторингу γ — властивість
 	// мережі, і стенд мусить іти тим самим шляхом, що й гра. Стеля цінності
