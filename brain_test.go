@@ -1170,7 +1170,12 @@ func TestDashDamagesOnlyInActivePhase(t *testing.T) {
 // Без другої нерівності «ідеальна» політика — вічно тікати з нульовою нагородою:
 // пацифіст, а не боєць.
 func TestDodgeIsPhysicallyPossible(t *testing.T) {
-	need := float32(pixelSize) / ConfigWarden.MaxSpeed
+	// Три доданки, а не один. Голої геометрії (25/0.6 = 41.7) НЕ досить: ε їсть частину
+	// кадрів, а ознака замаху наростає з нуля, тож агент не може почати з кадру 0.
+	// Із самою геометрією 45 кадрів «проходили» тест і не працювали б у ділі.
+	const reactionLag = 0.25 // частка замаху, яку агент витрачає на розпізнавання
+	eff := ConfigWarden.MaxSpeed * (1 - qEpsilonConst*7.0/8.0)
+	need := float32(pixelSize) / eff / (1 - reactionLag)
 	if float32(dashWindup) < need {
 		t.Errorf("dashWindup = %d < %.1f кадрів: стражник (швидкість %.2f) не встигає зійти "+
 			"з лінії удару на корпус (%d px) — УХИЛЕННЯ фізично неможливе, і жодне "+
@@ -1179,6 +1184,19 @@ func TestDodgeIsPhysicallyPossible(t *testing.T) {
 	if float32(dashRecovery) < need {
 		t.Errorf("dashRecovery = %d < %.1f кадрів: той, хто ухилився, не встигає повернутись — "+
 			"оптимальна політика стає «тікати вічно» з нульовою нагородою", dashRecovery, need)
+	}
+
+	// ПОКАРАННЯ обмежує dashActive ЗВЕРХУ, і цю межу я спершу пропустив: при
+	// dashActive = 10 ривок відносив гравця на 100px, а стражник за відхід криє 36px.
+	// Вікно покарання існувало лише на папері, і замір це показав («завдано» 1.7 → 0.8).
+	reach := float32(dashActive) * playerBaseSpeed * dashSpeedMulti
+	canClose := float32(dashRecovery) * eff
+	if reach-pixelSize > canClose {
+		t.Errorf("ривок відносить гравця на %.0fpx, стражникові треба закрити %.0fpx, "+
+			"а за %d кадрів відходу він криє лише %.0fpx — ПОКАРАННЯ фізично неможливе.\n"+
+			"  Треба dashActive ≤ %.0f (зараз %d) АБО довший відхід.",
+			reach, reach-pixelSize, dashRecovery, canClose,
+			(canClose+pixelSize)/(playerBaseSpeed*dashSpeedMulti), dashActive)
 	}
 }
 
@@ -1353,22 +1371,48 @@ func TestCombatInputsOnlyForCombatTypes(t *testing.T) {
 	}
 
 	mk := func(cfg UnitConfig) [baseInputs]float32 {
-		u := &Pixel{X: 340, Y: 300, HP: 5, MaxHP: 5, Cfg: cfg, InvulnTimer: impactInvuln / 2}
+		u := &Pixel{X: 340, Y: 300, HP: 5, MaxHP: 5, Cfg: cfg}
 		return GatherInputs(u, player)
 	}
 
 	swarm := mk(ConfigLearner)
-	if swarm[inInvuln] != 0 || swarm[inDashAtMe] != 0 {
+	if swarm[inDashOpen] != 0 || swarm[inDashAtMe] != 0 {
 		t.Errorf("рій отримав бойові ознаки: [14]=%.3f [15]=%.3f — базові лінії "+
-			"переслідування знецінені", swarm[inInvuln], swarm[inDashAtMe])
+			"переслідування знецінені", swarm[inDashOpen], swarm[inDashAtMe])
 	}
 
 	warden := mk(ConfigWarden)
-	if warden[inInvuln] <= 0 {
-		t.Errorf("стражник не бачить власної невразливості: [14]=%.3f", warden[inInvuln])
-	}
 	if warden[inDashAtMe] <= 0 {
 		t.Errorf("стражник не бачить замаху в себе: [15]=%.3f", warden[inDashAtMe])
+	}
+
+	// Друга половина: вікно покарання. Доганяємо гравця до фази відходу.
+	for player.DashPhase != dashPhaseRecovery {
+		advanceDash(player)
+	}
+	rec := mk(ConfigWarden)
+	if rec[inDashOpen] <= 0 {
+		t.Errorf("стражник не бачить вікна покарання: [14]=%.3f", rec[inDashOpen])
+	}
+	if rec[inDashAtMe] != 0 {
+		t.Errorf("у відході ознака замаху %.3f, чекали 0", rec[inDashAtMe])
+	}
+	if mk(ConfigLearner)[inDashOpen] != 0 {
+		t.Error("рій побачив вікно покарання")
+	}
+
+	// Вимикачі для A/B: без них не поставити питання «чи ознака взагалі щось дає».
+	// Перевіряємо, що вони справді глушать, і що кожен глушить ЛИШЕ своє.
+	saved := [2]bool{featDashOpen, featDashAtMe}
+	defer func() { featDashOpen, featDashAtMe = saved[0], saved[1] }()
+
+	featDashOpen, featDashAtMe = false, false
+	if off := mk(ConfigWarden); off[inDashOpen] != 0 || off[inDashAtMe] != 0 {
+		t.Errorf("вимикачі не діють: [14]=%.3f [15]=%.3f", off[inDashOpen], off[inDashAtMe])
+	}
+	featDashOpen = true
+	if one := mk(ConfigWarden); one[inDashOpen] == 0 || one[inDashAtMe] != 0 {
+		t.Errorf("вимикачі не незалежні: [14]=%.3f [15]=%.3f", one[inDashOpen], one[inDashAtMe])
 	}
 }
 
