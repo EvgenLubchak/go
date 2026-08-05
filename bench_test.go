@@ -33,6 +33,8 @@ import (
 //	BENCH_WARMUP=20000 тіків навчання перед заміром
 //	BENCH_MEASURE=6000 тіків у кожному вікні заміру
 //	BENCH_MOVING=1     1 = гравець рухається, 0 = стоїть
+//	BENCH_SEEK=0       1 = гравець ШУКАЄ найближчого й атакує (для бойових замірів:
+//	                   стражник стоїть, і випадкове блукання до нього не дійде)
 //	BENCH_COMBAT=0     1 = увімкнути бій (респаун стенд ставить безкінечний сам).
 //	                   Вимкнений за замовчуванням: усі записані базові лінії зняті
 //	                   без бою, і тихо ввімкнути його означало б їх знецінити
@@ -48,16 +50,17 @@ import (
 // benchCfg — одна конфігурація памʼяті для порівняння.
 type benchCfg struct {
 	name   string
-	gru    bool    // useGRU
-	frames int     // memFrames: скільки слотів стеку несуть історію
-	skip   int     // stackSkip: кадрів між семплами
-	units  int     // скільки учнів на полі (1 перевіряє гіпотезу «рій замінює памʼять»)
-	gruLR  float32 // gruLearnRate; 0 = лишити поточний
-	gamma  float32 // qGamma; 0 = лишити поточний
-	gskip  int     // [RNN] важіль BPTT: раз на скільки кадрів GRU думає; 0 = 1. qClip масштабується автоматично
-	sight  float32 // sightRange; 0 = лишити поточний
-	indep  bool    // true = sharedBrain=false (у кожного юніта СВОЯ мережа)
-	wander float32 // WanderStrength; 0 = лишити конфігове (у учнів воно теж 0)
+	gru    bool        // useGRU
+	frames int         // memFrames: скільки слотів стеку несуть історію
+	skip   int         // stackSkip: кадрів між семплами
+	units  int         // скільки учнів на полі (1 перевіряє гіпотезу «рій замінює памʼять»)
+	gruLR  float32     // gruLearnRate; 0 = лишити поточний
+	gamma  float32     // qGamma; 0 = лишити поточний
+	gskip  int         // [RNN] важіль BPTT: раз на скільки кадрів GRU думає; 0 = 1
+	base   *UnitConfig // базовий конфіг типу; nil = ConfigLearner. qClip масштабується автоматично
+	sight  float32     // sightRange; 0 = лишити поточний
+	indep  bool        // true = sharedBrain=false (у кожного юніта СВОЯ мережа)
+	wander float32     // WanderStrength; 0 = лишити конфігове (у учнів воно теж 0)
 }
 
 // benchOut — те, що знімаємо з одного вікна заміру.
@@ -65,12 +68,38 @@ type benchOut struct {
 	blind    float32 // % часу, коли агент НЕ бачив ціль — головна метрика
 	chase    float32 // % сліпих кадрів із прогресом до цілі (умовна метрика)
 	perAgent float32 // те саме, але усереднене по агентах
+	// [БІЙ] Шкода на 1000 тіків, ОКРЕМО. Роздільно навмисно: «отримано» майже не
+	// залежить від політики (гравець швидший у 8 разів і молотить у радіусі 120 без
+	// невразливості — це просто темп молотіння), а «завдано» вимагає від стражника
+	// набрати швидкість зближення. Дискримінує саме воно; чиста шкода тонула б у шумі.
+	dealt float32
+	taken float32
 }
 
 // benchTurnEvery — через скільки тіків скриптований гравець змінює напрямок.
 // ~0.4 с при 120 TPS: досить довго, щоб реально переміщатись, і досить часто,
 // щоб не застрягати в куті на весь прогін.
 const benchTurnEvery = 45
+
+// [БІЙ] Ритм «наліт → відхід» скриптованого гравця в режимі BENCH_SEEK.
+//
+// Зближення триває ДО ДИСТАНЦІЇ, а не фіксовану кількість кадрів: стражник стоїть на
+// посту, і з таймером гравець до нього просто не доїжджав.
+//
+// Відхід потрібен, бо гравець швидший у вісім разів: приклеївшись, він робить
+// стражника мішенню, «отримано» стає просто темпом молотіння, а вікна для віддачі не
+// існує взагалі. 60 кадрів відходу перевищують його невразливість (45).
+const (
+	// КОНТАКТНА дистанція, не радіус удару. З 72px (attackRadius×0.6) гравець молотив
+	// AoE з відстані й ЖОДНОГО РАЗУ не торкався стражника — а resolveImpacts вимагає
+	// фізичного перетину тіл. Отже стражник не мав можливості влучити взагалі, і
+	// «завдано» виходило рівно нуль в усіх прогонах.
+	//
+	// Живий гравець НАЛІТАЄ на нього — саме тому в сесіях віддачі були. Скриптований
+	// мусить робити те саме, інакше він міряє іншу гру.
+	benchSeekRange   = pixelSize * 0.9 // до перетину тіл
+	benchSeekRetreat = 60              // кадрів відходу після удару
+)
 
 func TestMemoryBench(t *testing.T) {
 	if os.Getenv("BOIDS_BENCH") == "" {
@@ -85,6 +114,7 @@ func TestMemoryBench(t *testing.T) {
 	// увімкнути його тихо означало б знецінити їх — нові числа перестали б із ними
 	// порівнюватись. Вмикати свідомо, для тих замірів, де бій і є предметом.
 	combat := benchEnvInt("BENCH_COMBAT", 0) != 0
+	benchDriveSeek = benchEnvInt("BENCH_SEEK", 0) != 0
 
 	// BENCH_SET=main — порівняння архітектур; sweep — горизонт памʼяті одинака.
 	cfgs := []benchCfg{
@@ -181,6 +211,31 @@ func TestMemoryBench(t *testing.T) {
 			{name: "2/180  γ0.995 (1.67с)", frames: 2, skip: 180, units: 1, gamma: 0.995},
 		}
 	}
+	if os.Getenv("BENCH_SET") == "warden" {
+		// [СТРАЖНИК] Чи дала γ=0.99 бойовий тайминг?
+		//
+		// Питання, яке досі неможливо було виміряти: стражник — єдиний тип із
+		// РОЗРІДЖЕНОЮ нагородою (лише бій), а бій у стенді був вимкнений, бо юніти
+		// гинули без респауну. Тепер респаун є.
+		//
+		// Показник тут НЕ blind/chase — вони про переслідування, а стражник стоїть.
+		// Дивимось на ЧИСТУ ШКОДУ: (завдано − отримано) на 1000 тіків. Позитивна
+		// означає, що він виграє обміни.
+		//
+		// Гіпотеза: γ=0.95 дає горизонт 20 кадрів = 0.167с, тож функція цінності
+		// фізично не бачить удару, що наближається (подія через 120 кадрів
+		// дисконтується до 0.002) і осідає у «все варте нуля». γ=0.99 дає 100 кадрів
+		// ≈ 0.83с — досить, щоб приписати заслугу позиціюванню.
+		if !combat || !benchDriveSeek {
+			t.Fatal("набір warden вимагає BENCH_COMBAT=1 BENCH_SEEK=1 — без бою й без " +
+				"зближення стражник не отримає жодної нагородної події, і замір буде про ніщо")
+		}
+		w := ConfigWarden
+		cfgs = []benchCfg{
+			{name: "стражник γ0.95 (0.17с)", base: &w, units: 1, gamma: 0.95},
+			{name: "стражник γ0.99 (0.83с)", base: &w, units: 1, gamma: 0.99},
+		}
+	}
 	if os.Getenv("BENCH_SET") == "lever" {
 		// [ВАЖІЛЬ BPTT] Головна перевірка: чи справа була в тому, що градієнт не
 		// дістає далі 8 кадрів.
@@ -231,6 +286,7 @@ func TestMemoryBench(t *testing.T) {
 		seeds, warmup, measure, moving)
 
 	chaseBy := map[string][]float32{}
+	dmgBy := map[string][]float32{}
 	var order []string
 	for _, c := range cfgs {
 		if only != "" && !strings.Contains(c.name, only) {
@@ -239,16 +295,28 @@ func TestMemoryBench(t *testing.T) {
 		live := make([]float32, 0, seeds)
 		frozen := make([]float32, 0, seeds)
 		chase := make([]float32, 0, seeds)
+		dealt := make([]float32, 0, seeds)
+		taken := make([]float32, 0, seeds)
 		for s := 0; s < seeds; s++ {
 			l, f := runBenchTrial(c, warmup, measure, moving, combat)
 			live = append(live, l.blind)
 			frozen = append(frozen, f.blind)
 			chase = append(chase, l.chase)
+			dealt = append(dealt, l.dealt)
+			taken = append(taken, l.taken)
 		}
 		chaseBy[c.name] = chase
 		order = append(order, c.name)
 		t.Logf("%s | наосліп живцем %s | наосліп заморожено %s | chase живцем %s",
 			c.name, benchStats(live), benchStats(frozen), benchStats(chase))
+		if combat {
+			t.Logf("%s | ЗАВДАНО на 1000 тіків %s", c.name, benchStats(dealt))
+			t.Logf("%s | завдано по прогонах: %s", c.name, benchList(dealt))
+			t.Logf("%s | отримано на 1000 тіків %s", c.name, benchStats(taken))
+		}
+		if combat {
+			dmgBy[c.name] = dealt
+		}
 		t.Logf("%s | chase по прогонах: %s", c.name, benchList(chase))
 	}
 
@@ -257,11 +325,15 @@ func TestMemoryBench(t *testing.T) {
 	// вузькі [63.5..64.7] і виглядав переможцем, а на десяти зрівнявся з рештою.
 	// benchDominance рахує частку ПАР прогонів, де A кращий за B — це прямо
 	// відповідає на «наскільки надійно A виграє», і 50% означає «ніяк».
-	t.Log("— попарно, частка пар прогонів, де перший конфіг має вищий chase —")
+	metric, by := "chase", chaseBy
+	if combat {
+		metric, by = "ЗАВДАНУ шкоду", dmgBy // у бойових замірах chase не застосовний
+	}
+	t.Logf("— попарно, частка пар прогонів, де перший конфіг має вищу %s —", metric)
 	for i := 0; i < len(order); i++ {
 		for j := i + 1; j < len(order); j++ {
 			a, b := order[i], order[j]
-			t.Logf("  %s проти %s: %.0f%%", a, b, 100*benchDominance(chaseBy[a], chaseBy[b]))
+			t.Logf("  %s проти %s: %.0f%%", a, b, 100*benchDominance(by[a], by[b]))
 		}
 	}
 }
@@ -331,28 +403,34 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving, combat bool) (live, 
 	if c.sight > 0 {
 		sightRange = c.sight
 	}
-	if c.gamma > 0 {
-		// Стеля цінності МУСИТЬ рости разом із горизонтом: рівноважна Q ≈ r/(1−γ).
-		// Інакше довший горизонт уріжеться в кліп, і замір показав би «різниці немає»
-		// з причини, яку ми самі й створили. Ця помилка вже раз коштувала нам вбивці
-		// (природна Q≈14.8 при стелі 10).
-		qClip = savedClip * (1 - savedGamma) / (1 - c.gamma)
-		qGamma = c.gamma
-	}
-
 	sharedBrain = !c.indep
 
 	// [КОНТРАКТ ПАМʼЯТІ] Тепер задається через КОНФІГ, а не через глобалі: памʼять
 	// стала властивістю мережі. Стенд від цього тільки чистіший — конфіг прогону
 	// описується в одному місці й не тече в глобальний стан процесу.
 	learner := ConfigLearner
+	if c.base != nil {
+		learner = *c.base
+	}
 	learner.Count = c.units
 	learner.WeightsFile = "" // ефемерні ваги: стенд не читає й не пише файли на диск
 	// [РЕСПАУН] Стенд ЗАВЖДИ ставить безкінечний респаун, хоч би що стояло в конфізі
 	// типу: стала популяція означає, що знаменник метрик не пливе. Без цього прогін,
 	// у якому пощастило вижити, не порівнювався б із прогоном, де юнітів вибили.
 	learner.Respawns = -1
-	learner.Memory = MemoryStack
+
+	// [ГОРИЗОНТ] Через КОНФІГ, а не через глобаль: після рефакторингу γ — властивість
+	// мережі, і стенд мусить іти тим самим шляхом, що й гра. Стеля цінності
+	// масштабується автоматично в resolveHorizon.
+	if c.gamma > 0 {
+		learner.Gamma = c.gamma
+	}
+
+	// Памʼять: якщо база її вже задала явно (як стражник), не перебиваємо — інакше
+	// стенд тихо міняв би конфіг типу, який ми ж і хочемо перевірити.
+	if learner.Memory == MemoryDefault {
+		learner.Memory = MemoryStack
+	}
 	if c.gru {
 		learner.Memory = MemoryGRU
 	}
@@ -439,6 +517,13 @@ func (g *Game) tickHeadless(drive func(*Game), combat bool) {
 // випадковий напрямок benchTurnEvery тіків, тоді бере новий. Об стіни не думає —
 // updatePlayer сам зупиняє відповідну вісь, і виходить ковзання вздовж стін,
 // схоже на живу гру. Головне, що це РУХ: рій мусить шукати ціль, а не висіти на ній.
+// benchDriveSeek — режим «шукати й атакувати» замість блукання.
+//
+// Потрібен для бойових замірів: стражник СТОЇТЬ на своєму посту, а гравець, що блукає
+// випадково по великій карті, до нього просто не дійде — нагородних подій не буде, і
+// замір вийде про ніщо. Тут гравець рухається на найближчого юніта.
+var benchDriveSeek bool
+
 func benchDriver(moving, combat bool) func(*Game) {
 	// [БІЙ] Скриптований гравець ще й АТАКУЄ — інакше агенти з бойовою нагородою
 	// (стражник, у якого вона єдина) не отримали б жодної нагородної події, і замір
@@ -452,6 +537,46 @@ func benchDriver(moving, combat bool) func(*Game) {
 		if attackTick >= attackCooldownMax {
 			attackTick = 0
 			g.applyPlayerMelee()
+		}
+	}
+
+	if benchDriveSeek {
+		// [БІЙ] Наліт і ВІДХІД, а не приклеїтись і молотити.
+		//
+		// Гравець, що глухо стоїть на стражнику, — вироджений опонент: він швидший у
+		// вісім разів, тож стражник фізично не може відірватись, і «отримано» стає
+		// просто темпом молотіння, незалежним від політики. Вікна для віддачі не
+		// існує, і міряти нічого.
+		//
+		// Цикл наліт/відхід ближче до справжньої гри (де ти теж заходиш і відскакуєш) і
+		// дає стражникові те, чого ми в нього й шукаємо: моменти, коли можна вдарити.
+		// Зближення — ЗА ВІДСТАННЮ, не за таймером. Фіксована фаза підходу не працює:
+		// стражник стоїть на своєму посту, і якщо він далі, ніж гравець проходить за
+		// 90 кадрів, той просто гойдається на місці й ніколи не доїжджає — обидві
+		// комірки видали нулі й замір був про ніщо.
+		retreat := 0
+		return func(g *Game) {
+			t := g.nearestTargetFor(&g.player)
+			if t == nil {
+				return
+			}
+			ddx, ddy := t.X-g.player.X, t.Y-g.player.Y
+			d := float32(math.Sqrt(float64(ddx*ddx + ddy*ddy)))
+			if d < 0.001 {
+				return
+			}
+
+			sign := float32(1)
+			switch {
+			case retreat > 0:
+				retreat--
+				sign = -1 // відходимо, даючи стражникові вікно для віддачі
+			case d < benchSeekRange:
+				melee(g)
+				retreat = benchSeekRetreat // дійшли й ударили → відскік
+			}
+			g.player.VelX += sign * ddx / d * playerAccel
+			g.player.VelY += sign * ddy / d * playerAccel
 		}
 	}
 
@@ -484,6 +609,10 @@ func readBench(m *Metrics) benchOut {
 	}
 	if pa, _, _, k := m.blindPerAgent(); k > 0 {
 		o.perAgent = 100 * pa
+	}
+	if m.window > 0 {
+		o.dealt = float32(m.dmgDealt) * 1000 / float32(m.window)
+		o.taken = float32(m.dmgTaken) * 1000 / float32(m.window)
 	}
 	return o
 }

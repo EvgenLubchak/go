@@ -98,6 +98,11 @@ type Metrics struct {
 	catches     int // спіймань гравця
 	window      int // кадрів від моменту скидання (для catch-rate у хв)
 
+	// [БІЙ] Кумулятивна шкода за період — єдиний змістовний результат для бойового
+	// учня (стражника), який стоїть на місці й до якого blind/chase не застосовні.
+	dmgDealt int
+	dmgTaken int
+
 	// Знаменник для ЧАСТКИ часу наосліп: сума «агент × кадр» за період. Рахуємо
 	// саме так, а не як window×8, бо юніти можуть гинути — інакше після смерті
 	// частка занижувалась би без жодної зміни в поведінці.
@@ -126,6 +131,7 @@ type blindAgent struct {
 // НЕ чіпаємо — вони показують динаміку, а лічильники — підсумок навченого рою.
 func (m *Metrics) resetCounters() {
 	m.blindN, m.blindClosed, m.catches, m.window = 0, 0, 0, 0
+	m.dmgDealt, m.dmgTaken = 0, 0
 	m.unitFrames = 0
 	m.agents = nil
 }
@@ -191,6 +197,10 @@ func (m *Metrics) collect(g *Game) {
 		m.blindN += b.mBlindN
 		m.blindClosed += b.mBlindClosed
 		b.mBlindN, b.mBlindClosed = 0, 0
+
+		m.dmgDealt += b.mDmgDealt
+		m.dmgTaken += b.mDmgTaken
+		b.mDmgDealt, b.mDmgTaken = 0, 0
 
 		// TD/maxQ — з МЕРЕЖІ, тож беремо раз на унікальну мережу.
 		if !seen[b.net] {
@@ -378,6 +388,10 @@ func (m *Metrics) draw(screen *ebiten.Image) {
 		pa = fmt.Sprintf("per-agent %.0f%%  (%d ag  %.0f..%.0f%%)", 100*mean, k, 100*lo, 100*hi)
 	}
 	drawTextL(screen, pa, font, float64(px)+pad, fy, color.RGBA{170, 120, 220, 255})
+
+	// [БІЙ] Чиста шкода — показник для бойових учнів, до яких blind/chase не застосовні.
+	drawTextL(screen, fmt.Sprintf("dmg +%d/-%d = %+d", m.dmgDealt, m.dmgTaken, m.dmgDealt-m.dmgTaken),
+		font, float64(px)+pw*0.5, fy, color.RGBA{235, 140, 110, 255})
 }
 
 // firstEps — ε будь-якого вулика (у всіх однакова формула, показуємо як довідку).

@@ -241,12 +241,14 @@ func applyImpactDamage(attacker, target *Pixel) {
 
 	if attacker != nil && attacker.Brain != nil {
 		attacker.Brain.dmgDealt += impactDamage
+		attacker.Brain.mDmgDealt += impactDamage // [МЕТРИКИ] не споживається rewardFor
 		if target.HP <= 0 {
 			attacker.Brain.kills++ // добив — головна ціль бойової нагороди
 		}
 	}
 	if target.Brain != nil {
 		target.Brain.dmgTaken += impactDamage
+		target.Brain.mDmgTaken += impactDamage
 	}
 }
 
@@ -369,6 +371,7 @@ func (g *Game) applyPlayerMelee() {
 			// беззмістовним: половина подій, на які він мусить реагувати, була невидима.
 			if e.Brain != nil {
 				e.Brain.dmgTaken += attackDamage
+				e.Brain.mDmgTaken += attackDamage // [МЕТРИКИ] не споживається rewardFor
 				if e.HP <= 0 && g.player.Brain != nil {
 					g.player.Brain.kills++ // [SELF-PLAY] жертві теж треба знати результат
 				}
