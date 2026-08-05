@@ -565,6 +565,22 @@ func benchDriver(moving, combat bool) func(*Game) {
 			if d < 0.001 {
 				return
 			}
+			ddx, ddy = ddx/d, ddy/d
+
+			// [ПОШУК ШЛЯХУ] Крізь стіни — по flow-field, тому самому, що ми будували
+			// для вбивць. Без нього гравець ішов ПО ПРЯМІЙ, наштовхувався на стіну й до
+			// поста стражника просто не доходив: у першому справжньому прогоні бою не
+			// було в 19 з 24 випадків, а «результат» був порівнянням нулів.
+			//
+			// Живий гравець лабіринт проходить. Скриптований мусить теж, інакше він
+			// міряє не бій, а геометрію.
+			//
+			// Поле беремо ЗА ФРАКЦІЄЮ (flowFor), як це роблять юніти: гравець на стороні
+			// factionPlayer, отже йому потрібне поле ДО ворогів. Прямий напрямок
+			// лишається як запас — на випадок, коли клітинка недосяжна.
+			if fx, fy, ok := g.flowFor(&g.player).dirAt(g.player.X, g.player.Y); ok && d > benchSeekRange {
+				ddx, ddy = fx, fy
+			}
 
 			sign := float32(1)
 			switch {
@@ -575,8 +591,8 @@ func benchDriver(moving, combat bool) func(*Game) {
 				melee(g)
 				retreat = benchSeekRetreat // дійшли й ударили → відскік
 			}
-			g.player.VelX += sign * ddx / d * playerAccel
-			g.player.VelY += sign * ddy / d * playerAccel
+			g.player.VelX += sign * ddx * playerAccel
+			g.player.VelY += sign * ddy * playerAccel
 		}
 	}
 
