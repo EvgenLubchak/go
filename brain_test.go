@@ -1155,6 +1155,31 @@ func TestDashDamagesOnlyInActivePhase(t *testing.T) {
 	}
 }
 
+// TestRewardFitsUnderErrorClip — найбільша штатна подія мусить лізти під кліп помилки.
+//
+// tdUpdate обрізає TD-помилку до [−1,1]. Поки нагорода за влучний ривок була
+// 8 × (−2) = −16, а за таран 1 × (−2) = −2, ОБІ події давали градієнт −1: агент не міг
+// відрізнити те, від чого варто ухилятись, від того, чим варто розмінюватись. Уся
+// виведена умова «ухилятись у 8 разів вигідніше» була невидима для навчання, і перший
+// A/B по телеграфу дав рівно нуль саме через це.
+//
+// Тест тримає інваріант: підняв dashDamage або нагороду — перевір, чи ще влазиш.
+func TestRewardFitsUnderErrorClip(t *testing.T) {
+	worst := float32(dashDamage) * -rewardDamageTaken
+	if worst > 1 {
+		t.Errorf("влучний ривок дає нагороду %.2f, а кліп помилки ±1 — усе вище %g "+
+			"сплющується в одне значення, і РІЗНИЦЯ МІЖ ПОДІЯМИ зникає.\n"+
+			"  Треба rewardDamageTaken ≥ −%.3f (зараз %.3f) або менший dashDamage.",
+			worst, 1.0, 1.0/float32(dashDamage), rewardDamageTaken)
+	}
+	// І навпаки: якщо найбільша подія на порядок МЕНША за кліп, ми задарма втратили
+	// швидкість навчання — кліп тоді ні на що не впливає, а градієнти дрібні.
+	if worst < 0.2 {
+		t.Errorf("влучний ривок дає лише %.3f при доступному кліпі 1.0 — градієнти "+
+			"дрібніші, ніж могли б бути", worst)
+	}
+}
+
 // TestDodgeIsPhysicallyPossible — умова існування розвʼязку, а не тюнінг.
 //
 // Це той самий прорахунок на три рядки, якого нам забракло раніше: ми зняли ЧОТИРИ
@@ -1663,5 +1688,68 @@ func TestDeathCostsReward(t *testing.T) {
 	}
 	if last.r >= 0 {
 		t.Errorf("смерть не коштувала нагороди: r %.3f", last.r)
+	}
+}
+
+// TestTelegraphReachesAgentInPlay — ЗАПОБІЖНИК ПРОТИ ХИБНОГО НУЛЯ.
+//
+// Перший замір A/B дав рівно нуль: 12.4% / 12.4% / 12.4% / 11.9%, медіани збіглись до
+// десятої. Такий плоский результат однаково узгоджений із «підказка не допомагає» і з
+// «підказка не доходить», а це два протилежні висновки. Розрізнити їх можна лише
+// перевіркою водопроводу, і зробити її треба ДО того, як писати висновок у доки.
+//
+// Тест крутить справжній безголовий цикл зі скриптованим гравцем і дивиться, що
+// НАСПРАВДІ бачить агент у слотах 14-15.
+func TestTelegraphReachesAgentInPlay(t *testing.T) {
+	savedRoster, savedMap := unitRoster, tileMap
+	savedSeek, savedArena := benchDriveSeek, benchArena
+	tileMap = [boidMapH][boidMapW]bool{}
+	benchDriveSeek, benchArena = true, true
+	defer func() {
+		unitRoster, tileMap = savedRoster, savedMap
+		benchDriveSeek, benchArena = savedSeek, savedArena
+	}()
+
+	w := ConfigWarden
+	w.Count, w.WeightsFile, w.Respawns = 1, "", -1
+	unitRoster = []UnitConfig{w}
+
+	g := newBenchGame()
+	drive := benchDriver(true, true)
+
+	var nAtMe, nOpen, nWindup int
+	var maxAtMe, maxOpen float32
+	const frames = 4000
+	for i := 0; i < frames; i++ {
+		g.tickHeadless(drive, true)
+		if g.player.DashPhase == dashPhaseWindup {
+			nWindup++
+		}
+		in := GatherInputs(&g.units[0], &g.player)
+		if in[inDashAtMe] != 0 {
+			nAtMe++
+			if v := in[inDashAtMe]; v > maxAtMe {
+				maxAtMe = v
+			}
+		}
+		if in[inDashOpen] != 0 {
+			nOpen++
+			if v := in[inDashOpen]; v > maxOpen {
+				maxOpen = v
+			}
+		}
+	}
+	t.Logf("за %d кадрів: замах гравця %d кадрів; агент бачив [15] у %d кадрах (макс %.2f), "+
+		"[14] у %d кадрах (макс %.2f)", frames, nWindup, nAtMe, maxAtMe, nOpen, maxOpen)
+
+	if nWindup == 0 {
+		t.Fatal("скриптований гравець НЕ замахується — замір був би про ніщо")
+	}
+	if nAtMe == 0 {
+		t.Errorf("агент НІ РАЗУ не побачив замах, хоч гравець замахувався %d кадрів: "+
+			"нуль у A/B означає зламаний водопровід, а не відсутність ефекту", nWindup)
+	}
+	if nOpen == 0 {
+		t.Error("агент ні разу не побачив вікна покарання")
 	}
 }
