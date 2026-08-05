@@ -81,6 +81,9 @@ type benchOut struct {
 // щоб не застрягати в куті на весь прогін.
 const benchTurnEvery = 45
 
+// benchPlayerHP — здоровʼя спаринг-партнера. Велике навмисно: див. newBenchGame.
+const benchPlayerHP = 1 << 24
+
 // [БІЙ] Ритм «наліт → відхід» скриптованого гравця в режимі BENCH_SEEK.
 //
 // Зближення триває ДО ДИСТАНЦІЇ, а не фіксовану кількість кадрів: стражник стоїть на
@@ -310,9 +313,21 @@ func TestMemoryBench(t *testing.T) {
 		t.Logf("%s | наосліп живцем %s | наосліп заморожено %s | chase живцем %s",
 			c.name, benchStats(live), benchStats(frozen), benchStats(chase))
 		if combat {
+			// [ПРИДАТНІСТЬ] Скільком прогонам бою не було ЗОВСІМ — контрольне число, без
+			// якого «завдано = 0» неможливо відрізнити від «сутички не відбулось». Саме
+			// на цьому ми вже двічі отримували порівняння нулів і мало не подали його
+			// як результат. Виводимо завжди, а не коли запідозримо.
+			silent := 0
+			for i := range taken {
+				if taken[i] == 0 && dealt[i] == 0 {
+					silent++
+				}
+			}
 			t.Logf("%s | ЗАВДАНО на 1000 тіків %s", c.name, benchStats(dealt))
 			t.Logf("%s | завдано по прогонах: %s", c.name, benchList(dealt))
 			t.Logf("%s | отримано на 1000 тіків %s", c.name, benchStats(taken))
+			t.Logf("%s | БЕЗ БОЮ: %d з %d прогонів%s", c.name, silent, len(taken),
+				map[bool]string{true: "  ← замір недійсний", false: ""}[silent*4 > len(taken)])
 		}
 		if combat {
 			dmgBy[c.name] = dealt
@@ -469,7 +484,23 @@ func newBenchGame() *Game {
 		difficulty: 1.0,
 		player: Pixel{
 			X: playerSpawn.X, Y: playerSpawn.Y,
-			HP: playerMaxHP, MaxHP: playerMaxHP,
+			// [СТЕНД] Гравець тут — ВІЧНИЙ спаринг-партнер, а не учасник виживання.
+			//
+			// З ігровими 20 HP він помирав за ~20 отриманих ударів, а checkCollisions
+			// стенд не викликає — тож game over не настає, HP просто лишається ≤ 0.
+			// І тоді все зупиняється: nearestTargetFor перестає віддавати мертвого
+			// гравця як ціль, у calcAcceleration спрацьовує `if target == nil {
+			// continue }`, і бойовий агент більше НЕ РОБИТЬ Step узагалі. Вікно заміру
+			// записувало мертву тишу — «отримано» виходило 0 у більшості прогонів.
+			//
+			// Калібрування цього не ловило, бо йшло з коротким розігрівом: гравець ще
+			// не встигав набрати 20 шкоди. Звідси правило: калібрувати з РЕАЛЬНИМИ
+			// параметрами й малою кількістю сідів, а не з малими параметрами.
+			//
+			// Ціна: rewardKill не спрацьовує ніколи, тож агент вчиться «шкодити», але
+			// не «добивати». Для заміру бойового ТАЙМИНГУ це прийнятно; для заміру
+			// «чи вміє добити» потрібен був би інший стенд.
+			HP: benchPlayerHP, MaxHP: benchPlayerHP,
 			Faction: factionPlayer,
 		},
 		units: newUnits(),
