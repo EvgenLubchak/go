@@ -225,6 +225,7 @@ var (
 var (
 	memFrames = stackFrames // скільки слотів стеку несуть історію (1..stackFrames)
 	stackSkip = 10          // кадрів між семплами → вікно ≈ (memFrames-1)×stackSkip
+	actSkip   = 1           // [ПОВТОР ДІЇ] кадрів на одне рішення стек-шляху; 1 = щокадру
 
 	// [POMDP] Радіус видимості цілі (px) у режимі localSight.
 	//
@@ -325,11 +326,42 @@ type memContract struct {
 	//
 	// 1 = кожен кадр (поведінка до цієї правки).
 	gruSkip int
+
+	// [ПОВТОР ДІЇ] Те саме для СТЕК-шляху: раз на скільки кадрів агент ухвалює нове
+	// рішення. Між рішеннями дія повторюється, а нагорода накопичується з дискаунтом.
+	//
+	// НАВІЩО, І ЦЕ НЕ КОСМЕТИКА. Стражник мусить ухилятись — а це 45 кадрів
+	// ПОСЛІДОВНОЇ дії в один бік. При рішенні щокадру це 45 рішень поспіль, кожне з
+	// яких може зірватись на ε-шумі чи дрібній різниці Q. При actSkip = 15 їх ТРИ.
+	//
+	// Друга причина — темпи були розсинхронізовані. stackSkip = 10 означає, що
+	// спостереження оновлюється раз на 10 кадрів (слоти 1..3 стеку), а дія
+	// обиралась ЩОКАДРУ: десять рішень майже в тому самому стані. Повтор дії зводить
+	// темп рішень до темпу спостережень.
+	//
+	// Третя — кредит. Одношаговий TD переносить цінність на ОДИН крок за оновлення;
+	// при кроці в N кадрів той самий один крок накриває N кадрів, тобто кредит від
+	// удару до рішення доходить у N разів швидше. Саме це лишилось єдиною
+	// невиключеною гіпотезою після пʼяти нулів по стражнику.
+	//
+	// Ціна та сама, що в gruSkip: N кадрів латентності на реакцію.
+	// 1 = кожен кадр (поведінка до цієї правки).
+	actSkip int
+}
+
+// decisionSkip — скільки кадрів накриває ОДНЕ рішення, незалежно від шляху памʼяті.
+// Один зміст, дві реалізації: у GRU це прорідження BPTT, у стеку — повтор дії.
+func (c memContract) decisionSkip() int {
+	if c.gru {
+		return c.gruSkip
+	}
+	return c.actSkip
 }
 
 // resolveMemContract — контракт типу юніта: що вказано в конфізі, решта з глобалей.
-func resolveMemContract(kind MemoryKind, frames, skip, gskip int) memContract {
-	c := memContract{gru: useGRU, memFrames: memFrames, stackSkip: stackSkip, gruSkip: gruSkip}
+func resolveMemContract(kind MemoryKind, frames, skip, gskip, askip int) memContract {
+	c := memContract{gru: useGRU, memFrames: memFrames, stackSkip: stackSkip,
+		gruSkip: gruSkip, actSkip: actSkip}
 	switch kind {
 	case MemoryStack:
 		c.gru = false
@@ -357,6 +389,12 @@ func resolveMemContract(kind MemoryKind, frames, skip, gskip int) memContract {
 	if c.gruSkip < 1 {
 		c.gruSkip = 1
 	}
+	if askip > 0 {
+		c.actSkip = askip
+	}
+	if c.actSkip < 1 {
+		c.actSkip = 1
+	}
 	return c
 }
 
@@ -367,10 +405,11 @@ func resolveMemContract(kind MemoryKind, frames, skip, gskip int) memContract {
 // Рівноважна Q при цьому НЕ змінюється: сума γ^k·r по кадрах — та сама величина,
 // просто перегрупована. Тож qClip підбирати заново не треба.
 func (c memContract) gammaStep(gamma float32) float32 {
-	if c.gruSkip <= 1 {
+	n := c.decisionSkip()
+	if n <= 1 {
 		return gamma
 	}
-	return float32(math.Pow(float64(gamma), float64(c.gruSkip)))
+	return float32(math.Pow(float64(gamma), float64(n)))
 }
 
 // resolveHorizon — γ і стеля цінності для типу юніта.
@@ -395,6 +434,9 @@ func resolveHorizon(gamma, clip float32) (float32, float32) {
 func (c memContract) label() string {
 	if c.gru {
 		return fmt.Sprintf("gru/%d", c.gruSkip)
+	}
+	if c.actSkip > 1 {
+		return fmt.Sprintf("stk%d/%d×%d", c.memFrames, c.stackSkip, c.actSkip)
 	}
 	return fmt.Sprintf("stk%d/%d", c.memFrames, c.stackSkip)
 }
@@ -547,6 +589,12 @@ type Brain struct {
 	// [RNN] Прорідження рішень (memContract.gruSkip). Між рішеннями дія
 	// ПОВТОРЮЄТЬСЯ, а нагороди за пропущені кадри СУМУЮТЬСЯ з дискаунтом у
 	// нагороду того кроку — інакше (N−1)/N навчального сигналу просто зникало б.
+	// [ПОВТОР ДІЇ] Стек-шлях: скільки кадрів ще повторювати дію, і накопичена
+	// нагорода поточного кроку з дискаунтом (actAccPow = γ^к).
+	actTick   int
+	actAcc    float32
+	actAccPow float32
+
 	gruTick   int                 // кадрів до наступного рішення
 	gruAcc    float32             // накопичена дисконтована нагорода поточного кроку
 	gruAccPow float32             // поточний γ^k у накопиченні (1 на початку кроку)
@@ -642,7 +690,7 @@ func sigmoid(x float32) float32 {
 func NewNet() *Net {
 	// Дефолтний контракт — із глобалей. Так поводяться мережі без конфігу:
 	// мозок-жертва в self-play і всі тести, що створюють Net напряму.
-	n := &Net{mem: resolveMemContract(MemoryDefault, 0, 0, 0)}
+	n := &Net{mem: resolveMemContract(MemoryDefault, 0, 0, 0, 0)}
 	n.gamma, n.clip = resolveHorizon(0, 0) // дефолт із глобалей
 	s1 := float32(math.Sqrt(1.0 / brainInputs))
 	for j := range n.W1 {
@@ -669,10 +717,10 @@ func NewNet() *Net {
 
 // NewBrain — голова агента з ВЛАСНОЮ новою мережею (незалежний режим).
 // gruAccPow = 1: перший кадр кроку не має домножуватись на нуль.
-func NewBrain() *Brain { return &Brain{net: NewNet(), gruAccPow: 1} }
+func NewBrain() *Brain { return &Brain{net: NewNet(), gruAccPow: 1, actAccPow: 1} }
 
 // NewBrainWith — голова агента, що ДІЛИТЬ передану мережу (режим sharedBrain).
-func NewBrainWith(net *Net) *Brain { return &Brain{net: net, gruAccPow: 1} }
+func NewBrainWith(net *Net) *Brain { return &Brain{net: net, gruAccPow: 1, actAccPow: 1} }
 
 // resetForNewLife скидає ОСОБИСТУ памʼять агента після відродження. Мережу (спільну
 // або власну) не чіпаємо — вона й далі вчиться.
@@ -688,6 +736,9 @@ func (b *Brain) resetForNewLife() {
 	b.seqN = 0
 	b.gruHasDec = false
 	b.gruAcc, b.gruAccPow, b.gruTick = 0, 1, 0
+	// [ПОВТОР ДІЇ] Без цього нове життя доклало б у перший крок нагороду з минулого
+	// і повторювало б дію, обрану ще до смерті.
+	b.actAcc, b.actAccPow, b.actTick = 0, 1, 0
 	b.stuckCounter, b.frustration = 0, 0
 	b.dmgDealt, b.dmgTaken, b.kills = 0, 0, 0
 }
@@ -1208,6 +1259,7 @@ type BrainData struct {
 	MemFrames int  `json:"memFrames"`
 	StackSkip int  `json:"stackSkip"`
 	GruSkip   int  `json:"gruSkip"`
+	ActSkip   int  `json:"actSkip"`
 
 	// [ГОРИЗОНТ] Під яку γ навчені ці ваги. Масштаб Q прямо залежить від γ
 	// (рівноважна ≈ r/(1−γ)), тож продовжувати навчання з іншим горизонтом означає
@@ -1265,7 +1317,7 @@ func saveNetTo(n *Net, path string) error {
 	data := BrainData{
 		Inputs: brainInputs, Hidden1: brainHidden1, Hidden2: brainHidden2, Actions: brainActions,
 		Gru: n.mem.gru, MemFrames: n.mem.memFrames, StackSkip: n.mem.stackSkip,
-		GruSkip: n.mem.gruSkip, Gamma: n.gamma,
+		GruSkip: n.mem.gruSkip, ActSkip: n.mem.actSkip, Gamma: n.gamma,
 		W1: n.W1, B1: n.B1, W2: n.W2, B2: n.B2, W3: n.W3, B3: n.B3,
 		// [RNN] і рекурентні ваги — щоб gru-рій не вчився з нуля щоразу.
 		HasGRU: true, GruHidden: gruHidden,
@@ -1284,7 +1336,7 @@ func saveNetTo(n *Net, path string) error {
 // LoadNet завантажує мережу з файлу за замовчуванням (brainFile).
 func LoadNet() *Net {
 	g, c := resolveHorizon(0, 0)
-	return loadNetFrom(brainFile, resolveMemContract(MemoryDefault, 0, 0, 0), g, c)
+	return loadNetFrom(brainFile, resolveMemContract(MemoryDefault, 0, 0, 0, 0), g, c)
 }
 
 // loadNetFrom завантажує мережу з файлу. Повертає nil (→ caller створить NewNet),
@@ -1318,9 +1370,12 @@ func loadNetFrom(path string, want memContract, wantGamma, wantClip float32) *Ne
 	// інакше рефакторинг знецінив би вже накопичені ваги.
 	if data.MemFrames != 0 {
 		got := memContract{gru: data.Gru, memFrames: data.MemFrames, stackSkip: data.StackSkip,
-			gruSkip: data.GruSkip}
+			gruSkip: data.GruSkip, actSkip: data.ActSkip}
 		if got.gruSkip == 0 {
 			got.gruSkip = 1 // файл, збережений до появи важеля BPTT
+		}
+		if got.actSkip == 0 {
+			got.actSkip = 1 // файл, збережений до появи повтору дії
 		}
 		if got != want {
 			return nil // навчена під інший контракт → чесніше почати з нуля

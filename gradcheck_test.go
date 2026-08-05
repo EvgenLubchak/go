@@ -82,7 +82,7 @@ func TestGRUGradientMatchesFiniteDifference(t *testing.T) {
 
 func runGradCheck(t *testing.T, sign float32, lr float32) {
 	n := NewNet()
-	n.mem = resolveMemContract(MemoryGRU, 0, 0, 1)
+	n.mem = resolveMemContract(MemoryGRU, 0, 0, 1, 0)
 	n.syncTarget() // target = живі ваги (нам байдуже, ціль однаково сатурує)
 
 	// Відрізок із детермінованими входами. Нагорода ±50 при qClip=25 гарантує, що

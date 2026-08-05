@@ -164,31 +164,36 @@ func (b *Brain) stepStack(cur [baseInputs]float32, hitWall bool) int {
 	// тож читати його як видимість не можна.
 	visible := b.flowNav || cur[inVisible] > 0.5
 
-	// 1) Нагорода за попередню дію → перехід у (можливо спільний) буфер.
+	// 1) Нагорода ЩОКАДРУ — і накопичується в нагороду поточного КРОКУ з дискаунтом.
+	//
+	// Щокадру, а не раз на рішення, з двох причин, обидві вже коштували нам крові в
+	// GRU-шляху: (а) rewardFor СПОЖИВАЄ бойові лічильники, тож пропустити виклик
+	// означало б і втратити шкоду, і лишити лічильники брудними на наступний кадр;
+	// (б) при actSkip = N без накопичення (N−1)/N сигналу просто зникло б.
 	if b.hasPrev {
-		// [МЕТРИКИ ПАМʼЯТІ] Якщо на момент минулого рішення агент був СЛІПИЙ — це
-		// «сліпе рішення»; фіксуємо, чи він усе одно рушив У БІК цілі.
+		// [МЕТРИКИ ПАМʼЯТІ] Теж щокадру — інакше при прорідженні вибірка зменшилась би
+		// в actSkip разів і перестала бути порівнянною з попередніми замірами.
 		//
 		// Міряємо ВЛАСНИЙ прогрес, а не зміну відстані: інакше метрика зараховує
-		// агентові те, що дистанцію скоротив сам гравець, налетівши на нього. Саме
-		// через це цифра трималась ~55-73% незалежно від памʼяті.
-		// Реактивний агент наосліп ≈ 50%; агент із памʼяттю тримає слід → більше.
+		// агентові те, що дистанцію скоротив сам гравець, налетівши на нього.
 		if !b.flowNav && !b.prevVisible {
 			b.mBlindN++
 			if b.progress > 0 {
 				b.mBlindClosed++
 			}
 		}
-		// Нагорода — у спільному rewardFor (див. brain.go). Вус напрямку, в який
-		// агент пішов минулого кадру, беремо з ПЕРШОГО кадру попереднього стеку.
-		reward := b.rewardFor(hitWall, b.prevState[inWhisker0+b.prevAction])
-		b.net.remember(transition{s: b.prevState, a: b.prevAction, r: reward, s2: stacked})
+		// Вус напрямку, в який агент пішов, беремо з ПЕРШОГО кадру стану рішення.
+		r := b.rewardFor(hitWall, b.prevState[inWhisker0+b.prevAction])
+		b.actAcc += b.actAccPow * r
+		b.actAccPow *= b.net.gamma
 	}
 
 	// 2) [2] Anti-stuck. КЛЮЧОВЕ: якщо агент наближається до гравця — він НЕ
 	//    застряг (хай навіть тернеться об стіну, productively ковзаючи вздовж неї).
 	// Прогрес — ВЛАСНИЙ внесок агента в потрібному напрямку (пряма для рою,
 	// коридор для вбивці), щоб anti-stuck не сварив за обхід стіни.
+	// Лічильники крутяться ЩОКАДРУ (це стан світу), а от дію вони змінять лише в
+	// момент рішення — інакше повтор дії нічого б не давав.
 	madeProgress := b.hasPrev && b.progressToward() > stuckProgressEps
 	switch {
 	case madeProgress:
@@ -201,6 +206,15 @@ func (b *Brain) stepStack(cur [baseInputs]float32, hitWall bool) int {
 		b.stuckCounter += stuckNoProgInc
 	case b.stuckCounter > 0:
 		b.stuckCounter -= stuckDecay
+	}
+
+	// [ПОВТОР ДІЇ] Між рішеннями просто повторюємо дію. Зсув історії спостережень при
+	// цьому йде своїм темпом (stackSkip) — це різні речі: як часто ми ДИВИМОСЬ і як
+	// часто ВИРІШУЄМО.
+	if b.actTick > 0 {
+		b.actTick--
+		b.shiftFrames(cur)
+		return b.prevAction
 	}
 
 	// 3) Обираємо дію. У «фрустрації» — НАПРАВЛЕНИЙ вихід у найвідкритіший бік
@@ -219,6 +233,15 @@ func (b *Brain) stepStack(cur [baseInputs]float32, hitWall bool) int {
 		action = b.selectAction(stacked)
 	}
 
+	// Закриваємо ПОПЕРЕДНІЙ крок: стан рішення → накопичена нагорода → стан цього
+	// рішення. Саме тому tdUpdate мусить бутстрапити через gammaStep, а не через
+	// gamma: крок накриває actSkip кадрів.
+	if b.hasPrev {
+		b.net.remember(transition{s: b.prevState, a: b.prevAction, r: b.actAcc, s2: stacked})
+	}
+	b.actAcc, b.actAccPow = 0, 1
+	b.actTick = b.net.mem.actSkip - 1
+
 	b.prevState = stacked
 	b.prevAction = action
 	b.prevVisible = visible // [МЕТРИКИ ПАМʼЯТІ] видимість на момент цього рішення
@@ -230,21 +253,31 @@ func (b *Brain) stepStack(cur [baseInputs]float32, hitWall bool) int {
 	// і воно того варте: пласка Q стане видимою на екрані як рівний квадрат.
 	b.lastQ, _, _ = b.net.forwardQ(stacked)
 
-	// [ПАМ'ЯТЬ] Раз на stackSkip кадрів записуємо поточний кадр в історію (зсув).
-	// Індекс СКРІЗЬ змінна i (не літерал 0) — інакше при stackFrames=1 масив frames
-	// має тип [0] і Go бракує константний frames[0] ще на компіляції.
+	b.shiftFrames(cur)
+	return action
+}
+
+// shiftFrames — [ПАМ'ЯТЬ] раз на stackSkip кадрів записує поточний кадр в історію.
+//
+// Викликається і з гілки рішення, і з гілки повтору дії: темп СПОСТЕРЕЖЕНЬ не залежить
+// від темпу РІШЕНЬ. Прив'язати зсув до рішень означало б, що при actSkip = 15 вікно
+// памʼяті мовчки розтягнеться в 15 разів.
+//
+// Індекс СКРІЗЬ змінна i (не літерал 0) — інакше при stackFrames=1 масив frames має
+// тип [0] і Go бракує константний frames[0] ще на компіляції.
+func (b *Brain) shiftFrames(cur [baseInputs]float32) {
 	b.frameTick++
-	if b.frameTick >= b.net.mem.stackSkip {
-		b.frameTick = 0
-		for i := stackFrames - 2; i >= 0; i-- {
-			if i > 0 {
-				b.frames[i] = b.frames[i-1] // зсуваємо старі кадри назад
-			} else {
-				b.frames[i] = cur // найновіший кадр — у позицію 0
-			}
+	if b.frameTick < b.net.mem.stackSkip {
+		return
+	}
+	b.frameTick = 0
+	for i := stackFrames - 2; i >= 0; i-- {
+		if i > 0 {
+			b.frames[i] = b.frames[i-1] // зсуваємо старі кадри назад
+		} else {
+			b.frames[i] = cur // найновіший кадр — у позицію 0
 		}
 	}
-	return action
 }
 
 // tdUpdate — навчання Q-LEARNING через TD (temporal-difference) помилку.
@@ -261,7 +294,10 @@ func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainI
 	// Ціль за Беллманом по TARGET-мережі (max Q наступного стану — як константа).
 	q2 := n.forwardQTarget(s2)
 	maxNext := q2[argmaxQ(q2)]
-	target := clamp(reward+n.gamma*maxNext, -n.clip, n.clip)
+	// [ПОВТОР ДІЇ] Дискаунт на крок, а не на кадр: при actSkip > 1 один перехід
+	// накриває actSkip кадрів, і бутстрапити через n.gamma означало б рахувати
+	// майбутнє дорожчим, ніж воно є.
+	target := clamp(reward+n.mem.gammaStep(n.gamma)*maxNext, -n.clip, n.clip)
 	if terminal {
 		target = clamp(reward, -n.clip, n.clip) // після смерті майбутнього немає
 	}

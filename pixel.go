@@ -92,6 +92,7 @@ type UnitConfig struct {
 	MemFrames int // 0 = глобальний memFrames
 	StackSkip int // 0 = глобальний stackSkip
 	GruSkip   int // [RNN] важіль BPTT: раз на скільки кадрів GRU думає; 0 = глобальний
+	ActSkip   int // [ПОВТОР ДІЇ] кадрів на одне рішення СТЕК-шляху; 0 = глобальний
 }
 
 // [GO: PACKAGE-LEVEL VAR]
@@ -660,7 +661,7 @@ func newUnitsWithHive(hive map[string]*Net) []Pixel {
 			// кожен має власну (завантажену з файлу або нову).
 			var brain *Brain
 			if cfg.IsLearner {
-				mem := resolveMemContract(cfg.Memory, cfg.MemFrames, cfg.StackSkip, cfg.GruSkip)
+				mem := resolveMemContract(cfg.Memory, cfg.MemFrames, cfg.StackSkip, cfg.GruSkip, cfg.ActSkip)
 				gamma, clip := resolveHorizon(cfg.Gamma, cfg.QClip)
 				net, loaded := netFor(cfg.WeightsFile, mem, gamma, clip)
 				brain = NewBrainWith(net)

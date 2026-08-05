@@ -937,9 +937,9 @@ func TestLoadRejectsWrongMemoryContract(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/w.json"
 
-	// gruSkip задаємо ЯВНО: контракт із нулем недійсний (resolveMemContract його
-	// клампить до 1), а тут ми конструюємо вручну.
-	trained := memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 1}
+	// gruSkip і actSkip задаємо ЯВНО: контракт із нулем недійсний (resolveMemContract
+	// клампить їх до 1), а тут ми конструюємо вручну.
+	trained := memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 1, actSkip: 1}
 	n := NewNet()
 	n.mem = trained
 	if err := saveNetTo(n, path); err != nil {
@@ -954,17 +954,119 @@ func TestLoadRejectsWrongMemoryContract(t *testing.T) {
 		name string
 		want memContract
 	}{
-		{"інший ШЛЯХ памʼяті (GRU-ваги на стек)", memContract{gru: false, memFrames: 4, stackSkip: 10, gruSkip: 1}},
-		{"інший КРОК семплів", memContract{gru: true, memFrames: 4, stackSkip: 60, gruSkip: 1}},
-		{"інша ГЛИБИНА памʼяті", memContract{gru: true, memFrames: 1, stackSkip: 10, gruSkip: 1}},
+		{"інший ШЛЯХ памʼяті (GRU-ваги на стек)", memContract{gru: false, memFrames: 4, stackSkip: 10, gruSkip: 1, actSkip: 1}},
+		{"інший КРОК семплів", memContract{gru: true, memFrames: 4, stackSkip: 60, gruSkip: 1, actSkip: 1}},
+		{"інша ГЛИБИНА памʼяті", memContract{gru: true, memFrames: 1, stackSkip: 10, gruSkip: 1, actSkip: 1}},
 		// Найважливіший випадок для цієї роботи: важіль BPTT змінює АЛГОРИТМ
 		// (n-step із γ^gruSkip), тож ваги, навчені при кроці 1, не сумісні з 20.
-		{"інший ВАЖІЛЬ BPTT", memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 20}},
+		{"інший ВАЖІЛЬ BPTT", memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 20, actSkip: 1}},
+		// Те саме для повтору дії: він теж міняє АЛГОРИТМ (бутстрап через γ^actSkip),
+		// тож ваги, навчені при кроці 1, не сумісні з 15.
+		{"інший ПОВТОР ДІЇ", memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 1, actSkip: 15}},
 	}
 	for _, c := range cases {
 		if loadNetFrom(path, c.want, n.gamma, n.clip) != nil {
 			t.Errorf("%s: мережа завантажилась, хоч навчена під інший контракт", c.name)
 		}
+	}
+}
+
+// TestActSkipRepeatsAndSumsReward — повтор дії для СТЕК-шляху.
+//
+// Навіщо: стражник мусить ухилятись, а це 45 кадрів ПОСЛІДОВНОЇ дії в один бік. При
+// рішенні щокадру це 45 рішень поспіль, кожне з яких може зірватись на ε-шумі чи
+// дрібній різниці Q. При actSkip = 15 їх ТРИ. Плюс кредит доходить у 15 разів швидше:
+// одношаговий TD переносить цінність на один КРОК за оновлення, а крок тепер накриває
+// 15 кадрів.
+//
+// Механізм робочий лише разом із трьома речами, і тест перевіряє саме їх — кожна
+// ламається молча:
+//
+//  1. між рішеннями дія ПОВТОРЮЄТЬСЯ;
+//  2. нагороди за пропущені кадри СУМУЮТЬСЯ з дискаунтом (інакше (N−1)/N зникає);
+//  3. зсув історії спостережень іде СВОЇМ темпом (stackSkip), а не темпом рішень —
+//     інакше вікно памʼяті мовчки розтяглось би в actSkip разів.
+func TestActSkipRepeatsAndSumsReward(t *testing.T) {
+	const skip = 5
+
+	n := NewNet()
+	n.mem = resolveMemContract(MemoryStack, 4, 2, 0, skip)
+	b := NewBrainWith(n)
+	b.combat = true
+
+	var in [baseInputs]float32
+	in[inVisible] = 1
+
+	// Прогріваємо один крок, щоб зʼявився hasPrev.
+	first := b.stepStack(in, false)
+	actions := []int{first}
+	// Даємо шкоду ЩОКАДРУ: якщо сумування зламане, у переході осяде лише частина.
+	for i := 0; i < skip; i++ {
+		b.dmgDealt = 1
+		actions = append(actions, b.stepStack(in, false))
+	}
+
+	// 1) Дія повторювалась усі skip кадрів після рішення.
+	for i := 1; i < skip; i++ {
+		if actions[i] != actions[0] {
+			t.Fatalf("кадр %d: дія змінилась %d → %d, хоч рішення раз на %d кадрів",
+				i, actions[0], actions[i], skip)
+		}
+	}
+
+	// 2) Нагорода підсумована з дискаунтом. Очікуємо Σ γ^k · r за skip кадрів.
+	if b.net.replayLen() == 0 {
+		t.Fatal("жодного переходу в буфері")
+	}
+	var want float32
+	pow := float32(1)
+	for i := 0; i < skip; i++ {
+		want += pow * rewardDamageDealt
+		pow *= n.gamma
+	}
+	got := b.net.replay[b.net.replayLen()-1].r
+	if diff := got - want; diff > 0.01 || diff < -0.01 {
+		t.Errorf("нагорода кроку %.4f, чекали Σγ^k·r = %.4f — сумування зламане",
+			got, want)
+	}
+
+	// 3) Вікно памʼяті не поїхало: за skip+1 кадрів при stackSkip=2 мусило статись
+	//    (skip+1)/2 зсувів, тобто зсув живе своїм темпом, а не темпом рішень.
+	b2 := NewBrainWith(n)
+	shifts := 0
+	prev := b2.frames
+	for i := 0; i < 12; i++ {
+		in[0] = float32(i) // унікальний кадр, щоб зсув було видно
+		b2.stepStack(in, false)
+		if b2.frames != prev {
+			shifts++
+			prev = b2.frames
+		}
+	}
+	if shifts < 5 {
+		t.Errorf("за 12 кадрів при stackSkip=2 сталось лише %d зсувів історії — "+
+			"зсув привʼязали до РІШЕНЬ замість кадрів, і вікно памʼяті розтяглось", shifts)
+	}
+}
+
+// TestActSkipBootstrapsPerStep — бутстрап мусить іти через γ^actSkip, а не через γ.
+//
+// Крок тепер накриває actSkip кадрів, і дисконтувати його як один кадр означало б
+// рахувати майбутнє дорожчим, ніж воно є. Та сама помилка, що ми вже ловили в
+// gruSkip — тому й перевіряємо тим самим способом.
+func TestActSkipBootstrapsPerStep(t *testing.T) {
+	c := resolveMemContract(MemoryStack, 4, 10, 0, 15)
+	want := float32(math.Pow(float64(qGamma), 15))
+	if got := c.gammaStep(qGamma); got < want*0.999 || got > want*1.001 {
+		t.Errorf("gammaStep = %.6f, чекали γ^15 = %.6f", got, want)
+	}
+	if c.decisionSkip() != 15 {
+		t.Errorf("decisionSkip = %d, чекали 15", c.decisionSkip())
+	}
+	// GRU-шлях мусить читати СВІЙ важіль, а не стековий.
+	g := resolveMemContract(MemoryGRU, 4, 10, 7, 15)
+	if g.decisionSkip() != 7 {
+		t.Errorf("GRU decisionSkip = %d, чекали gruSkip 7", g.decisionSkip())
 	}
 }
 
@@ -981,7 +1083,7 @@ func TestGruSkipRepeatsAndSumsReward(t *testing.T) {
 	const skip = 5
 
 	n := NewNet()
-	n.mem = resolveMemContract(MemoryGRU, 0, 0, skip)
+	n.mem = resolveMemContract(MemoryGRU, 0, 0, skip, 0)
 	b := NewBrainWith(n)
 
 	var cur [baseInputs]float32
@@ -1025,10 +1127,10 @@ func TestGruSkipRepeatsAndSumsReward(t *testing.T) {
 // gruSkip кадрів. Із простим γ цінність майбутнього завищувалась би у стільки разів,
 // скільки кадрів злито в один крок, — і n-step return перестав би бути коректним.
 func TestGammaStepMatchesSkip(t *testing.T) {
-	if got := resolveMemContract(MemoryGRU, 0, 0, 1).gammaStep(qGamma); got != qGamma {
+	if got := resolveMemContract(MemoryGRU, 0, 0, 1, 0).gammaStep(qGamma); got != qGamma {
 		t.Errorf("крок 1 мусить давати рівно qGamma: %.5f проти %.5f", got, qGamma)
 	}
-	c := resolveMemContract(MemoryGRU, 0, 0, 20)
+	c := resolveMemContract(MemoryGRU, 0, 0, 20, 0)
 	want := float32(math.Pow(float64(qGamma), 20))
 	if got := c.gammaStep(qGamma); math.Abs(float64(got-want)) > 1e-6 {
 		t.Errorf("γ^20: отримали %.6f, очікували %.6f", got, want)

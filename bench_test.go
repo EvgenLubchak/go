@@ -59,6 +59,7 @@ type benchCfg struct {
 	gruLR  float32     // gruLearnRate; 0 = лишити поточний
 	gamma  float32     // qGamma; 0 = лишити поточний
 	gskip  int         // [RNN] важіль BPTT: раз на скільки кадрів GRU думає; 0 = 1
+	askip  int         // [ПОВТОР ДІЇ] раз на скільки кадрів вирішує СТЕК-шлях; 0 = 1
 	base   *UnitConfig // базовий конфіг типу; nil = ConfigLearner
 
 	// [БАЛАНС] Перебивання балансних чисел; 0 = лишити конфігове/глобальне.
@@ -277,6 +278,31 @@ func TestMemoryBench(t *testing.T) {
 			// УВАГА: поріг удару = max(0.6×MaxSpeed, 0.4), тож піднявши швидкість, ми
 			// піднімаємо і планку. Влучати НЕ стане легше — виграш лише в ІНІЦІАТИВІ.
 			{name: "швидкість 1.2 (ініціатива)", base: &w, units: 1, speed: 1.2},
+		}
+	}
+	if os.Getenv("BENCH_SET") == "actrepeat" {
+		// [ПОВТОР ДІЇ] Остання невиключена гіпотеза після пʼяти нулів по стражнику.
+		//
+		// Потрібна поведінка — ухилення — це 45 кадрів ПОСЛІДОВНОЇ дії. При рішенні
+		// щокадру це 45 рішень поспіль, кожне з яких може зірватись. При actSkip = 15
+		// їх ТРИ. Плюс два побічні ефекти, обидва в потрібний бік:
+		//
+		//	кредит  одношаговий TD переносить цінність на один КРОК за оновлення;
+		//	        крок тепер накриває N кадрів → кредит доходить у N разів швидше;
+		//	темпи   stackSkip = 10 оновлює спостереження раз на 10 кадрів, а дія
+		//	        обиралась щокадру — десять рішень майже в тому самому стані.
+		//
+		// Ціна — РЕАКТИВНІСТЬ: N кадрів латентності. При N = 30 це чверть замаху (60),
+		// тобто агент може «проспати» початок атаки. Тому свіп, а не одне значення.
+		if !combat || !benchDriveSeek || !benchArena {
+			t.Fatal("набір actrepeat вимагає BENCH_COMBAT=1 BENCH_SEEK=1 BENCH_ARENA=1")
+		}
+		w := ConfigWarden
+		cfgs = []benchCfg{
+			{name: "×1 щокадру (як досі)", base: &w, units: 1},
+			{name: "×5  (12 рішень на ухилення)", base: &w, units: 1, askip: 5},
+			{name: "×15 (3 рішення на ухилення)", base: &w, units: 1, askip: 15},
+			{name: "×30 (2 рішення, чверть замаху латентності)", base: &w, units: 1, askip: 30},
 		}
 	}
 	if os.Getenv("BENCH_SET") == "soak" {
@@ -649,6 +675,7 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving, combat bool) (live, 
 	learner.MemFrames = c.frames
 	learner.StackSkip = c.skip
 	learner.GruSkip = c.gskip
+	learner.ActSkip = c.askip
 	if c.wander > 0 {
 		learner.WanderStrength = c.wander
 	}
