@@ -389,6 +389,21 @@ type memContract struct {
 	// Ціна та сама, що в gruSkip: N кадрів латентності на реакцію.
 	// 1 = кожен кадр (поведінка до цієї правки).
 	actSkip int
+
+	// [N-STEP] Скільки РІШЕНЬ накриває один збережений перехід.
+	//
+	// Одношаговий TD (nStep = 1) переносить цінність на один крок за оновлення, тож щоб
+	// кредит дійшов від наслідку до рішення за 65 кадрів, потрібні десятки «поколінь»
+	// оновлень, кожне з яких вимагає, щоб нижче вже було правильно.
+	//
+	// n-step замінює це на один стрибок: у переході лежить сума нагород за n кроків, а
+	// бутстрап дисконтується на γ^(крок×n). Драбина показала, що саме затримка ламає
+	// задачу в парі з добутком (0 з 4), тож це ліки прямої дії.
+	//
+	// Ціна — ЗМІЩЕННЯ: сума береться по ДІЯХ, які агент реально зробив, тобто це вже
+	// не чистий off-policy Q-learning. При великому n і поганій політиці цілі
+	// псуються. Класичний компроміс дисперсія/зміщення.
+	nStep int
 }
 
 // decisionSkip — скільки кадрів накриває ОДНЕ рішення, незалежно від шляху памʼяті.
@@ -437,6 +452,9 @@ func resolveMemContract(kind MemoryKind, frames, skip, gskip, askip int) memCont
 	if c.actSkip < 1 {
 		c.actSkip = 1
 	}
+	if c.nStep < 1 {
+		c.nStep = 1
+	}
 	return c
 }
 
@@ -447,7 +465,12 @@ func resolveMemContract(kind MemoryKind, frames, skip, gskip, askip int) memCont
 // Рівноважна Q при цьому НЕ змінюється: сума γ^k·r по кадрах — та сама величина,
 // просто перегрупована. Тож qClip підбирати заново не треба.
 func (c memContract) gammaStep(gamma float32) float32 {
+	// Крок переходу = кадрів на рішення × рішень на перехід. Обидва множники
+	// незалежні: перший про повтор дії, другий про n-step.
 	n := c.decisionSkip()
+	if c.nStep > 1 {
+		n *= c.nStep
+	}
 	if n <= 1 {
 		return gamma
 	}
@@ -1331,6 +1354,7 @@ type BrainData struct {
 	StackSkip int  `json:"stackSkip"`
 	GruSkip   int  `json:"gruSkip"`
 	ActSkip   int  `json:"actSkip"`
+	NStep     int  `json:"nStep"`
 
 	// [ГОРИЗОНТ] Під яку γ навчені ці ваги. Масштаб Q прямо залежить від γ
 	// (рівноважна ≈ r/(1−γ)), тож продовжувати навчання з іншим горизонтом означає
@@ -1388,7 +1412,7 @@ func saveNetTo(n *Net, path string) error {
 	data := BrainData{
 		Inputs: brainInputs, Hidden1: brainHidden1, Hidden2: brainHidden2, Actions: brainActions,
 		Gru: n.mem.gru, MemFrames: n.mem.memFrames, StackSkip: n.mem.stackSkip,
-		GruSkip: n.mem.gruSkip, ActSkip: n.mem.actSkip, Gamma: n.gamma,
+		GruSkip: n.mem.gruSkip, ActSkip: n.mem.actSkip, NStep: n.mem.nStep, Gamma: n.gamma,
 		W1: n.W1, B1: n.B1, W2: n.W2, B2: n.B2, W3: n.W3, B3: n.B3,
 		// [RNN] і рекурентні ваги — щоб gru-рій не вчився з нуля щоразу.
 		HasGRU: true, GruHidden: gruHidden,
@@ -1441,12 +1465,15 @@ func loadNetFrom(path string, want memContract, wantGamma, wantClip float32) *Ne
 	// інакше рефакторинг знецінив би вже накопичені ваги.
 	if data.MemFrames != 0 {
 		got := memContract{gru: data.Gru, memFrames: data.MemFrames, stackSkip: data.StackSkip,
-			gruSkip: data.GruSkip, actSkip: data.ActSkip}
+			gruSkip: data.GruSkip, actSkip: data.ActSkip, nStep: data.NStep}
 		if got.gruSkip == 0 {
 			got.gruSkip = 1 // файл, збережений до появи важеля BPTT
 		}
 		if got.actSkip == 0 {
 			got.actSkip = 1 // файл, збережений до появи повтору дії
+		}
+		if got.nStep == 0 {
+			got.nStep = 1 // файл, збережений до появи n-step
 		}
 		if got != want {
 			return nil // навчена під інший контракт → чесніше почати з нуля

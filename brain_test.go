@@ -938,9 +938,9 @@ func TestLoadRejectsWrongMemoryContract(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/w.json"
 
-	// gruSkip і actSkip задаємо ЯВНО: контракт із нулем недійсний (resolveMemContract
-	// клампить їх до 1), а тут ми конструюємо вручну.
-	trained := memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 1, actSkip: 1}
+	// gruSkip, actSkip і nStep задаємо ЯВНО: контракт із нулем недійсний
+	// (resolveMemContract клампить їх до 1), а тут ми конструюємо вручну.
+	trained := memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 1, actSkip: 1, nStep: 1}
 	n := NewNet()
 	n.mem = trained
 	if err := saveNetTo(n, path); err != nil {
@@ -955,15 +955,17 @@ func TestLoadRejectsWrongMemoryContract(t *testing.T) {
 		name string
 		want memContract
 	}{
-		{"інший ШЛЯХ памʼяті (GRU-ваги на стек)", memContract{gru: false, memFrames: 4, stackSkip: 10, gruSkip: 1, actSkip: 1}},
-		{"інший КРОК семплів", memContract{gru: true, memFrames: 4, stackSkip: 60, gruSkip: 1, actSkip: 1}},
-		{"інша ГЛИБИНА памʼяті", memContract{gru: true, memFrames: 1, stackSkip: 10, gruSkip: 1, actSkip: 1}},
+		{"інший ШЛЯХ памʼяті (GRU-ваги на стек)", memContract{gru: false, memFrames: 4, stackSkip: 10, gruSkip: 1, actSkip: 1, nStep: 1}},
+		{"інший КРОК семплів", memContract{gru: true, memFrames: 4, stackSkip: 60, gruSkip: 1, actSkip: 1, nStep: 1}},
+		{"інша ГЛИБИНА памʼяті", memContract{gru: true, memFrames: 1, stackSkip: 10, gruSkip: 1, actSkip: 1, nStep: 1}},
 		// Найважливіший випадок для цієї роботи: важіль BPTT змінює АЛГОРИТМ
 		// (n-step із γ^gruSkip), тож ваги, навчені при кроці 1, не сумісні з 20.
-		{"інший ВАЖІЛЬ BPTT", memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 20, actSkip: 1}},
+		{"інший ВАЖІЛЬ BPTT", memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 20, actSkip: 1, nStep: 1}},
 		// Те саме для повтору дії: він теж міняє АЛГОРИТМ (бутстрап через γ^actSkip),
 		// тож ваги, навчені при кроці 1, не сумісні з 15.
-		{"інший ПОВТОР ДІЇ", memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 1, actSkip: 15}},
+		{"інший ПОВТОР ДІЇ", memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 1, actSkip: 15, nStep: 1}},
+		// n-step теж міняє АЛГОРИТМ (ціль = сума за n кроків, бутстрап на γ^n).
+		{"інший n-STEP", memContract{gru: true, memFrames: 4, stackSkip: 10, gruSkip: 1, actSkip: 1, nStep: 5}},
 	}
 	for _, c := range cases {
 		if loadNetFrom(path, c.want, n.gamma, n.clip) != nil {
