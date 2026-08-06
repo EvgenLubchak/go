@@ -1251,6 +1251,7 @@ const (
 	allyKillerFile = "ally_killer_weights.json" // [КОМАНДИ] вбивця гравця
 	wardenFile     = "warden_weights.json"      // [СТРАЖНИК] бос лише з бойовою нагородою
 	bossFile       = "boss_weights.json"        // [БОС] одинак із власною мережею (ConfigBoss)
+	hunterFile     = "hunter_weights.json"      // [МИСЛИВЕЦЬ] лише бій + наосліп + рухомий
 )
 
 // BrainData — серіалізація ваг у JSON + розміри мережі для перевірки сумісності.
