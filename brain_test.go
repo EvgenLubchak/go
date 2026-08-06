@@ -2068,3 +2068,138 @@ func TestStyleCountersAreAntiDiagonal(t *testing.T) {
 			"взаємовиключні, задача порожня механічно", bad)
 	}
 }
+
+// TestStyleCountersAcrossMotionAngles — [ДІАГНОСТИКА] чи антидіагональність тримається
+// для ВСІХ напрямків руху цілі, чи лише для перпендикулярного.
+//
+// Перша перевірка (TestStyleCountersAreAntiDiagonal) брала стражника, що рухається
+// ПЕРПЕНДИКУЛЯРНО до нападника, і дала ідеальну таблицю. Але справжній стражник
+// АТАКУЄ, тобто рухається переважно НА гравця — радіально. Якщо для радіального руху
+// обидва стилі влучають однаково, біт стилю не несе інформації саме в тих кадрах, які
+// трапляються найчастіше, і оракул приречений на нуль.
+func TestStyleCountersAcrossMotionAngles(t *testing.T) {
+	saved := dashStyleMirror
+	defer func() { dashStyleMirror = saved }()
+
+	hit := func(mirror bool, vx, vy float32, keep bool) bool {
+		dashStyleMirror = mirror
+		player := &Pixel{X: 300, Y: 300}
+		w := &Pixel{X: 330, Y: 300, VelX: vx, VelY: vy}
+		ax, ay := dashAimAt(player, w)
+		startDash(player, ax, ay)
+		if !keep {
+			vx, vy = -vx, -vy
+		}
+		for f := 0; f < dashWindup+dashActive; f++ {
+			if player.DashPhase == dashPhaseActive {
+				sp := float32(playerBaseSpeed) * dashSpeedMulti
+				player.X += player.DashDirX * sp
+				player.Y += player.DashDirY * sp
+				if collides(player.X, player.Y, w.X, w.Y) {
+					return true
+				}
+			}
+			w.X += vx
+			w.Y += vy
+			advanceDash(player)
+		}
+		return false
+	}
+
+	// Стражник праворуч від гравця. Кут 0° = рух ПРЯМО НА гравця (радіально),
+	// 90° = перпендикулярно, 180° = від гравця.
+	t.Logf("%-22s %-12s %-12s %-12s %-12s %s", "напрямок руху",
+		"вед×прод", "вед×розв", "дзерк×прод", "дзерк×розв", "інформативно?")
+	informative := 0
+	angles := []int{0, 30, 45, 60, 90, 120, 150, 180}
+	for _, deg := range angles {
+		rad := float64(deg) * math.Pi / 180
+		// 0° = на гравця = −X (гравець ліворуч від стражника)
+		vx := float32(-math.Cos(rad)) * 0.6
+		vy := float32(math.Sin(rad)) * 0.6
+		lk, lr := hit(false, vx, vy, true), hit(false, vx, vy, false)
+		mk, mr := hit(true, vx, vy, true), hit(true, vx, vy, false)
+		// Інформативно, якщо НАЙКРАЩА реакція залежить від стилю.
+		bestLead := "продовж"
+		if lk && !lr {
+			bestLead = "розворот"
+		}
+		bestMirr := "продовж"
+		if mk && !mr {
+			bestMirr = "розворот"
+		}
+		ok := bestLead != bestMirr
+		if ok {
+			informative++
+		}
+		t.Logf("%3d° %-18s %-12v %-12v %-12v %-12v %v", deg, "", lk, lr, mk, mr, ok)
+	}
+	t.Logf("→ інформативних напрямків: %d з %d", informative, len(angles))
+	if informative*2 < len(angles) {
+		t.Errorf("біт стилю несе інформацію лише для %d з %d напрямків руху — "+
+			"для решти обидва стилі дають ту саму найкращу реакцію",
+			informative, len(angles))
+	}
+}
+
+// TestWardenMotionAngleAtWindup — [ДІАГНОСТИКА] під яким кутом до гравця стражник
+// РЕАЛЬНО рухається в момент замаху.
+//
+// TestStyleCountersAcrossMotionAngles показав, що біт стилю мовчить для радіального
+// руху (0° і 180°) і говорить лише для 30-120°. Якщо реальний розподіл зосереджений
+// біля 0°, оракул приречений на нуль — і саме це ми зміряли.
+func TestWardenMotionAngleAtWindup(t *testing.T) {
+	savedRoster, savedMap := unitRoster, tileMap
+	savedSeek, savedArena := benchDriveSeek, benchArena
+	tileMap = [boidMapH][boidMapW]bool{}
+	benchDriveSeek, benchArena = true, true
+	defer func() {
+		unitRoster, tileMap = savedRoster, savedMap
+		benchDriveSeek, benchArena = savedSeek, savedArena
+	}()
+	w := ConfigWarden
+	w.Count, w.WeightsFile, w.Respawns = 1, "", -1
+	unitRoster = []UnitConfig{w}
+	g := newBenchGame()
+	drive := benchDriver(true, true)
+
+	buckets := make([]int, 6) // 0-30,30-60,60-90,90-120,120-150,150-180
+	prev, n := dashIdle, 0
+	for i := 0; i < 40000; i++ {
+		g.tickHeadless(drive, true)
+		if g.player.DashPhase == dashPhaseWindup && prev != dashPhaseWindup && len(g.units) > 0 {
+			u := &g.units[0]
+			sp := math.Hypot(float64(u.VelX), float64(u.VelY))
+			if sp > 0.05 {
+				// кут між ВЛАСНОЮ швидкістю і напрямком НА гравця
+				dx, dy := float64(g.player.X-u.X), float64(g.player.Y-u.Y)
+				d := math.Hypot(dx, dy)
+				if d > 0.001 {
+					cos := (float64(u.VelX)*dx + float64(u.VelY)*dy) / (sp * d)
+					deg := math.Acos(math.Max(-1, math.Min(1, cos))) * 180 / math.Pi
+					b := int(deg / 30)
+					if b > 5 {
+						b = 5
+					}
+					buckets[b]++
+					n++
+				}
+			}
+		}
+		prev = g.player.DashPhase
+	}
+	if n == 0 {
+		t.Fatal("жодного замаху")
+	}
+	labels := []string{"0-30° НА гравця", "30-60°", "60-90°", "90-120°", "120-150°", "150-180° ВІД"}
+	mute := 0
+	for i, c := range buckets {
+		flag := ""
+		if i == 0 || i == 5 {
+			flag = "  ← біт стилю МОВЧИТЬ"
+			mute += c
+		}
+		t.Logf("  %-16s %4d  %3d%%%s", labels[i], c, 100*c/n, flag)
+	}
+	t.Logf("→ замахів, де стиль не несе інформації: %d%% (%d з %d)", 100*mute/n, mute, n)
+}
