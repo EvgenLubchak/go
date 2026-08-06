@@ -207,7 +207,7 @@ var (
 		Faction:     factionEnemy,
 		WeightsFile: brainFile,
 		MaxHP:       2,                            // живучий — більше часу на навчання
-		Respawns:    -1,                           // [РЕСПАУН] безкінечно: стала популяція = порівнянні метрики
+		Respawns:    0,                            // [РЕСПАУН] безкінечно: стала популяція = порівнянні метрики
 		Color:       color.RGBA{0, 255, 100, 255}, // зелений — учень
 		Label:       "",
 		IsLearner:   true, // ← саме це вмикає мозок, а не мітка
@@ -234,8 +234,8 @@ var (
 		Count:           0, // мало: вони сильніші за рій
 		Faction:         factionEnemy,
 		WeightsFile:     killerFile,
-		Respawns:        -1,                           // [РЕСПАУН] безкінечно — вони частина сталого складу
-		MaxHP:           20,                           // витримує на удар більше за рій
+		Respawns:        0,                            // [РЕСПАУН] безкінечно — вони частина сталого складу
+		MaxHP:           8,                            // витримує на удар більше за рій
 		Color:           color.RGBA{255, 90, 60, 255}, // червоний — щоб одразу вирізняти
 		Label:           "",
 		IsLearner:       true,
@@ -262,7 +262,7 @@ var (
 		Count:           0,
 		Faction:         factionPlayer, // ← свій; рій його атакує, він рій
 		WeightsFile:     allyFile,
-		Respawns:        0,
+		Respawns:        1,
 		MaxHP:           3,
 		Color:           color.RGBA{80, 170, 255, 255}, // блакитний — свої
 		Label:           "",
@@ -293,7 +293,7 @@ var (
 		Faction:         factionPlayer,
 		WeightsFile:     allyKillerFile,
 		Respawns:        1,
-		MaxHP:           20,
+		MaxHP:           10,
 		Color:           color.RGBA{140, 100, 255, 255}, // фіолетовий — твій вбивця
 		Label:           "≡_≡",
 		IsLearner:       true,
@@ -362,7 +362,7 @@ var (
 		Count:           0, // ОДИН. У цьому вся суть типу
 		Faction:         factionEnemy,
 		WeightsFile:     bossFile,
-		Respawns:        3,                             // [РЕСПАУН] бос не безсмертний: три життя на сесію
+		Respawns:        0,                             // [РЕСПАУН] бос не безсмертний: три життя на сесію
 		MaxHP:           75,                            // умова навчання, не лише баланс
 		Color:           color.RGBA{235, 70, 160, 255}, // малиновий — не сплутати ні з ким
 		Label:           "$_$",
@@ -478,7 +478,7 @@ var (
 		CohesionRate:   0.0,
 		SeparationRate: 0.02, // тільки щоб не злипались у купу
 		MaxSpeed:       1.3,
-		Count:          3,
+		Count:          0,
 		Faction:        factionEnemy,
 		WeightsFile:    hunterFile,
 		Respawns:       -1, // стала присутність: сенс типу — ДОВГЕ навчання
