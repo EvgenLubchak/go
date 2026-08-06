@@ -213,3 +213,107 @@ func TestLadderRung2(t *testing.T) {
 		t.Error("кредит не доходить НІ ЗА ЯКОЇ затримки — проблема в поширенні цінності")
 	}
 }
+
+// ladderRung3 — ЩАБЕЛЬ 3: умова не проста, а ДОБУТОК двох входів.
+//
+// Щаблі 1-2 брали «біт → конкретна дія» — просте табличне відображення на 2 випадки.
+// У бою ж потрібне ВІДНОСНЕ рішення: «якщо стиль ВЕДУЧИЙ → розвернутись, якщо
+// ДЗЕРКАЛЬНИЙ → продовжувати». Правильна дія залежить від ДРУГОГО входу — власного
+// напрямку руху, — тож це вже 2 × 8 = 16 випадків, і мережа мусить вивчити добуток, а
+// не пошук.
+//
+// Це остання неперевірена відмінність між драбиною й оракулом. Затримку й γ беремо ті,
+// що щабель 2 показав робочими (65 кроків, γ = 0.99), щоб міряти РІВНО добуток.
+func ladderRung3(delay int, gamma float32, steps int) (solved bool, hit float32) {
+	saved := qEpsilonConst
+	qEpsilonConst = 0.05
+	defer func() { qEpsilonConst = saved }()
+
+	n := NewNet()
+	n.mem = resolveMemContract(MemoryStack, 1, 10, 0, 0)
+	n.gamma, n.clip = resolveHorizon(gamma, 0)
+	b := NewBrainWith(n)
+
+	// state: [0]=стиль, [1..2]=власний напрямок руху (одиничний вектор), [3]=фаза,
+	//        [4]=рішення вже ухвалене
+	st := func(style, dir, phase, committed int) [brainInputs]float32 {
+		var s [brainInputs]float32
+		s[0] = float32(style)
+		s[1], s[2] = dirs8[dir][0], dirs8[dir][1]
+		s[3] = float32(phase) / float32(delay+1)
+		s[4] = float32(committed)
+		return s
+	}
+	// ВЕДУЧИЙ (0) → розвернутись: дія навпроти напрямку руху.
+	// ДЗЕРКАЛЬНИЙ (1) → продовжувати: дія збігається з напрямком.
+	want := func(style, dir int) int {
+		if style == 0 {
+			return (dir + brainActions/2) % brainActions
+		}
+		return dir
+	}
+
+	done, right, total := 0, 0, 0
+	for done < steps {
+		style, dir := rand.Intn(2), rand.Intn(brainActions)
+		s0 := st(style, dir, 0, 0)
+		a0 := b.selectAction(s0)
+		committed := -1
+		if a0 == want(style, dir) {
+			committed = 1
+		}
+		if done > steps/2 {
+			total++
+			if committed == 1 {
+				right++
+			}
+		}
+		prev, prevA := s0, a0
+		for ph := 1; ph <= delay; ph++ {
+			cur := st(style, dir, ph, committed)
+			n.remember(transition{s: prev, a: prevA, r: 0, s2: cur})
+			n.train(qBatch)
+			done++
+			prev, prevA = cur, b.selectAction(cur)
+		}
+		n.remember(transition{s: prev, a: prevA, r: float32(committed), s2: prev, terminal: true})
+		n.train(qBatch)
+		done++
+	}
+
+	// Жадібно перевіряємо ВСІ 16 комбінацій.
+	ok := 0
+	for style := 0; style < 2; style++ {
+		for dir := 0; dir < brainActions; dir++ {
+			q, _, _ := n.forwardQ(st(style, dir, 0, 0))
+			if argmaxQ(q) == want(style, dir) {
+				ok++
+			}
+		}
+	}
+	if total > 0 {
+		hit = 100 * float32(right) / float32(total)
+	}
+	return ok == 2*brainActions, hit
+}
+
+// TestLadderRung3 — чи бере учень ДОБУТОК двох входів, а не просто пошук по біту.
+func TestLadderRung3(t *testing.T) {
+	const runs, steps = 4, 120000
+	t.Logf("ЩАБЕЛЬ 3: дія = f(стиль, власний напрямок), 2×8 = 16 випадків")
+	t.Logf("%8s %8s %12s %14s", "затримка", "γ", "усі 16", "точність")
+	for _, c := range []struct {
+		delay int
+		gamma float32
+	}{{0, 0.95}, {65, 0.99}} {
+		ok, acc := 0, float32(0)
+		for r := 0; r < runs; r++ {
+			s, h := ladderRung3(c.delay, c.gamma, steps)
+			if s {
+				ok++
+			}
+			acc += h
+		}
+		t.Logf("%8d %8.2f %6d з %d %12.1f%%", c.delay, c.gamma, ok, runs, acc/float32(runs))
+	}
+}
