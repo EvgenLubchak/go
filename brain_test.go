@@ -1257,6 +1257,97 @@ func TestDashDamagesOnlyInActivePhase(t *testing.T) {
 	}
 }
 
+// TestAimStylesAreMutuallyExclusive — несуча властивість усього заміру стилів.
+//
+// Задача про передбачення не порожня ЛИШЕ якщо контрзаходи взаємовиключні: те, що рятує
+// від одного стилю, мусить ловити від іншого. Інакше сліпий агент знайде одну політику
+// проти обох, і знання стилю не дасть нічого — саме на цьому померла попередня
+// конструкція «ранній/пізній замах» (виграш оракула +0.0 за матрицею).
+//
+// Перевіряємо буквально: цілі, що рухається, два стилі мусять цілити по РІЗНІ БОКИ від
+// неї, і кожен мусить бити свій варіант її подальшого руху.
+func TestAimStylesAreMutuallyExclusive(t *testing.T) {
+	saved := dashStyleMirror
+	defer func() { dashStyleMirror = saved }()
+
+	from := &Pixel{X: 100, Y: 300}
+	// Ціль праворуч від нападника, ЛЕТИТЬ угору (−Y).
+	target := &Pixel{X: 300, Y: 300, VelY: -0.6}
+
+	dashStyleMirror = false
+	lx, ly := dashAimAt(from, target)
+	dashStyleMirror = true
+	mx, my := dashAimAt(from, target)
+
+	if ly >= 0 {
+		t.Errorf("ВЕДУЧИЙ цілить не вперед по руху цілі: dy = %.1f, чекали відʼємне", ly)
+	}
+	if my <= 0 {
+		t.Errorf("ДЗЕРКАЛЬНИЙ цілить не в бік розвороту: dy = %.1f, чекали додатне", my)
+	}
+	if lx <= 0 || mx <= 0 {
+		t.Errorf("обидва стилі мусять дивитись У БІК цілі по X: %.1f, %.1f", lx, mx)
+	}
+
+	// Відстань між точками прицілу мусить перевищувати КОРПУС — інакше промах
+	// несправжній: ривок зачепить ціль обома стилями, і вибір нічого не вирішує.
+	sep := 2 * dashLeadFrames * 0.6 // ±lead від позиції цілі
+	if sep <= pixelSize {
+		t.Errorf("точки прицілу розходяться лише на %.0fpx при корпусі %d — промах "+
+			"несправжній, обидва стилі влучатимуть", sep, pixelSize)
+	}
+	t.Logf("розведення точок прицілу %.0fpx при корпусі %d", sep, pixelSize)
+}
+
+// TestOracleTakesSlot14AndHidesAim — Фаза 0 міняє перцепцію рівно у двох місцях.
+func TestOracleTakesSlot14AndHidesAim(t *testing.T) {
+	savedMap := tileMap
+	saved := [3]bool{featDashStyle, featDashAim, dashStyleMirror}
+	tileMap = [boidMapH][boidMapW]bool{}
+	defer func() {
+		featDashStyle, featDashAim, dashStyleMirror = saved[0], saved[1], saved[2]
+		tileMap = savedMap
+	}()
+
+	player := &Pixel{X: 300, Y: 300}
+	startDash(player, 1, 0)
+	for i := 0; i < dashWindup/2; i++ {
+		advanceDash(player)
+	}
+	unit := func() *Pixel { return &Pixel{X: 340, Y: 300, HP: 5, MaxHP: 5, Cfg: ConfigWarden} }
+
+	// Телеграф БЕЗ прицілу: значення мусить бути суто прогресом, тобто ДОДАТНИМ навіть
+	// коли ривок летить геть. Інакше агент читає напрямок і передбачати нема чого.
+	featDashAim = false
+	away := &Pixel{X: 300, Y: 300}
+	startDash(away, -1, 0)
+	for i := 0; i < dashWindup/2; i++ {
+		advanceDash(away)
+	}
+	if v := GatherInputs(unit(), away)[inDashAtMe]; v <= 0 {
+		t.Errorf("телеграф без прицілу дав %.3f для ривка ГЕТЬ — напрямок усе ще протікає", v)
+	}
+
+	// Оракул займає слот 14 і несе САМЕ стиль.
+	featDashStyle = true
+	dashStyleMirror = false
+	if v := GatherInputs(unit(), player)[inDashOpen]; v != 0 {
+		t.Errorf("ведучий стиль дав %.3f, чекали 0", v)
+	}
+	dashStyleMirror = true
+	if v := GatherInputs(unit(), player)[inDashOpen]; v != 1 {
+		t.Errorf("дзеркальний стиль дав %.3f, чекали 1", v)
+	}
+	// Без оракула слот 14 повертається до вікна покарання.
+	featDashStyle = false
+	for player.DashPhase != dashPhaseRecovery {
+		advanceDash(player)
+	}
+	if v := GatherInputs(unit(), player)[inDashOpen]; v <= 0 {
+		t.Errorf("без оракула слот 14 мусить нести вікно покарання, дав %.3f", v)
+	}
+}
+
 // TestRewardFitsUnderErrorClip — найбільша штатна подія мусить лізти під кліп помилки.
 //
 // tdUpdate обрізає TD-помилку до [−1,1]. Поки нагорода за влучний ривок була

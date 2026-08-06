@@ -61,6 +61,10 @@ type benchCfg struct {
 	gskip  int     // [RNN] важіль BPTT: раз на скільки кадрів GRU думає; 0 = 1
 	askip  int     // [ПОВТОР ДІЇ] раз на скільки кадрів вирішує СТЕК-шлях; 0 = 1
 
+	// [ФАЗА 0] Замір стилів прицілу.
+	styles bool // гравець перемикає стиль; телеграф показує ТАЙМІНГ, не напрямок
+	oracle bool // слот 14 несе стиль прямо у вхід — СТЕЛЯ задачі
+
 	// [КОНТРОЛІ] Дві комірки-відповіді на питання «це поведінка чи пружина».
 	// [СУПУТНИКИ] Скільки СКРИПТОВАНИХ переслідувачів союзної фракції додати на поле.
 	//
@@ -299,6 +303,33 @@ func TestMemoryBench(t *testing.T) {
 			// УВАГА: поріг удару = max(0.6×MaxSpeed, 0.4), тож піднявши швидкість, ми
 			// піднімаємо і планку. Влучати НЕ стане легше — виграш лише в ІНІЦІАТИВІ.
 			{name: "швидкість 1.2 (ініціатива)", base: &w, units: 1, speed: 1.2},
+		}
+	}
+	if os.Getenv("BENCH_SET") == "oracle" {
+		// [ФАЗА 0] Чи має задача про стиль прицілу розвʼязок УЗАГАЛІ?
+		//
+		// Даємо агентові стиль прямо у вхід (слот 14) і НЕ даємо памʼяті. Питання одне:
+		// чи той, хто ЗНАЄ стиль, б'є того, хто не знає?
+		//
+		//	не б'є → стилі не вимагають різних відповідей, задача порожня.
+		//	         Зупиняємось, не написавши жодного рядка про памʼять;
+		//	б'є   → задача має розвʼязок, і ми знаємо його СТЕЛЮ. Тоді Фаза 1 питає,
+		//	         скільки з тієї стелі забирає кожен вид памʼяті.
+		//
+		// Очікуваний виграш із матриці: ~4 одиниці шкоди за цикл (сліпий 50/50 = −4,
+		// оракул ~100% = 0). Якщо вийде ~0 — матриця десь бреше, і це теж результат.
+		//
+		// Телеграф у ОБОХ комірках показує лише ТАЙМІНГ: якби агент бачив напрямок
+		// ривка, він просто реагував би, і передбачати не було б чого.
+		if !combat || !benchDriveSeek || !benchArena {
+			t.Fatal("набір oracle вимагає BENCH_COMBAT=1 BENCH_SEEK=1 BENCH_ARENA=1")
+		}
+		w := ConfigWarden
+		cfgs = []benchCfg{
+			{name: "ОРАКУЛ: стиль у вході", base: &w, units: 1, frames: 1, skip: 10,
+				styles: true, oracle: true},
+			{name: "сліпий до стилю", base: &w, units: 1, frames: 1, skip: 10,
+				styles: true},
 		}
 	}
 	if os.Getenv("BENCH_SET") == "inertia" {
@@ -765,6 +796,17 @@ func benchList(v []float32) string {
 //
 // Швидкість як у справжнього союзника-переслідувача (1.4) — щоб задача мисливця була та
 // сама, що в грі, а не легша чи важча.
+// benchStyleSwitch — раз на скільки тіків скриптований гравець МІНЯЄ стиль прицілу.
+//
+// ⚠️ БЕЗ ПЕРЕМИКАННЯ ЗАМІР ПОРОЖНІЙ, і це найтонше місце всієї конструкції. Якби стиль
+// був сталий на весь прогін, агент БЕЗ ЖОДНОЇ памʼяті вивчив би його за 60000 кадрів
+// розігріву — просто запік би правильний контрзахід у ваги. Оракул не мав би переваги,
+// і ми б оголосили задачу порожньою, хоч порожнім був би замір.
+//
+// 2000 тіків: при каденції атак ~200 кадрів це ~10 атак на режим — досить, щоб стиль
+// БУЛО з чого вивести, і замало, щоб його запекти у ваги (за розігрів ~30 перемикань).
+const benchStyleSwitch = 2000
+
 func benchCompanion(n int) UnitConfig {
 	c := ConfigAllyChaser
 	c.IsLearner = false
@@ -797,7 +839,11 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving, combat bool) (live, 
 	savedInvuln := impactInvuln
 	savedFeats := [2]bool{featDashOpen, featDashAtMe}
 	savedForce := brainForce
+	savedStyle := dashStyleMirror
+	savedF2 := [2]bool{featDashStyle, featDashAim}
 	defer func() {
+		featDashStyle, featDashAim = savedF2[0], savedF2[1]
+		dashStyleMirror = savedStyle
 		brainForce = savedForce
 		featDashOpen, featDashAtMe = savedFeats[0], savedFeats[1]
 		impactInvuln = savedInvuln
@@ -825,6 +871,7 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving, combat bool) (live, 
 	}
 	sharedBrain = !c.indep
 	featDashOpen, featDashAtMe = !c.offDashOpen, !c.offDashAtMe
+	featDashStyle, featDashAim = c.oracle, !c.styles
 
 	// [КОНТРАКТ ПАМʼЯТІ] Тепер задається через КОНФІГ, а не через глобалі: памʼять
 	// стала властивістю мережі. Стенд від цього тільки чистіший — конфіг прогону
@@ -874,12 +921,21 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving, combat bool) (live, 
 	g := newBenchGame()
 	drive := benchDriver(moving, combat)
 
-	for i := 0; i < warmup; i++ {
+	tick := 0
+	step := func() {
+		if c.styles {
+			// Стиль ЖИВИЙ, а не сталий: інакше ваги його запечуть (див. benchStyleSwitch).
+			dashStyleMirror = (tick/benchStyleSwitch)%2 == 1
+		}
+		tick++
 		g.tickHeadless(drive, combat)
+	}
+	for i := 0; i < warmup; i++ {
+		step()
 	}
 	g.metrics.resetCounters()
 	for i := 0; i < measure; i++ {
-		g.tickHeadless(drive, combat)
+		step()
 	}
 	live = readBench(&g.metrics)
 
@@ -1007,11 +1063,13 @@ func benchDriver(moving, combat bool) func(*Game) {
 	// радіусом 120 раз на 10 кадрів, тобто невідворотно, і «отримано» міряло темп
 	// молотіння. Тепер кожна атака має 45 кадрів замаху, які агент може прочитати,
 	// і «отримано» вперше стає показником ПОЛІТИКИ.
-	dash := func(g *Game, dx, dy float32) bool {
+	dash := func(g *Game, t *Pixel) bool {
 		if !combat {
 			return false
 		}
-		return startDash(&g.player, dx, dy)
+		// [СТИЛЬ] Лінію удару обирає dashAimAt — ведучий або дзеркальний.
+		ax, ay := dashAimAt(&g.player, t)
+		return startDash(&g.player, ax, ay)
 	}
 
 	if benchDriveSeek {
@@ -1068,7 +1126,7 @@ func benchDriver(moving, combat bool) func(*Game) {
 				// Ривок ЗАВЖДИ по прямій до цілі, а не за полем: летимо, а не
 				// шукаємо шлях. У бойових замірах стін немає (BENCH_ARENA), тож
 				// різниці нема, але правило мусить бути явним.
-				if dash(g, ddx, ddy) {
+				if dash(g, t) {
 					return // замах почався — цього кадру вже не рухаємось
 				}
 			}
@@ -1089,7 +1147,7 @@ func benchDriver(moving, combat bool) func(*Game) {
 		if t := g.nearestTargetFor(&g.player); t != nil {
 			ddx, ddy := t.X-g.player.X, t.Y-g.player.Y
 			if d := float32(math.Sqrt(float64(ddx*ddx + ddy*ddy))); d < benchDashRange && d > 0.001 {
-				if dash(g, ddx/d, ddy/d) {
+				if dash(g, t) {
 					return
 				}
 			}
