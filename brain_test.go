@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"sort"
 	"sync"
 	"testing"
 )
@@ -1944,5 +1945,126 @@ func TestTelegraphReachesAgentInPlay(t *testing.T) {
 	}
 	if nOpen == 0 {
 		t.Error("агент ні разу не побачив вікна покарання")
+	}
+}
+
+// TestStyleOffsetIsRealAtWindup — [ДІАГНОСТИКА] чи стилі взагалі РІЗНІ на практиці.
+//
+// Зсув точки прицілу = швидкість цілі × dashLeadFrames. Якщо стражник у момент замаху
+// майже стоїть, обидва стилі цілять в ОДНУ точку, і біт стилю не несе інформації —
+// оракул нічого не дасть, скільки сідів не крути.
+//
+// Міряємо реальний розподіл швидкості стражника саме в кадри початку замаху.
+func TestStyleOffsetIsRealAtWindup(t *testing.T) {
+	savedRoster, savedMap := unitRoster, tileMap
+	savedSeek, savedArena := benchDriveSeek, benchArena
+	tileMap = [boidMapH][boidMapW]bool{}
+	benchDriveSeek, benchArena = true, true
+	defer func() {
+		unitRoster, tileMap = savedRoster, savedMap
+		benchDriveSeek, benchArena = savedSeek, savedArena
+	}()
+
+	w := ConfigWarden
+	w.Count, w.WeightsFile, w.Respawns = 1, "", -1
+	unitRoster = []UnitConfig{w}
+	g := newBenchGame()
+	drive := benchDriver(true, true)
+
+	var speeds []float64
+	prev := dashIdle
+	for i := 0; i < 30000; i++ {
+		g.tickHeadless(drive, true)
+		if g.player.DashPhase == dashPhaseWindup && prev != dashPhaseWindup && len(g.units) > 0 {
+			u := &g.units[0]
+			speeds = append(speeds, math.Hypot(float64(u.VelX), float64(u.VelY)))
+		}
+		prev = g.player.DashPhase
+	}
+	if len(speeds) == 0 {
+		t.Fatal("жодного замаху за 30000 кадрів")
+	}
+	sort.Float64s(speeds)
+	med := speeds[len(speeds)/2]
+	// Щоб два стилі цілили в РІЗНІ точки, зсув мусить перевищити пів корпуса.
+	need := float64(pixelSize) / 2 / dashLeadFrames
+	var ok int
+	for _, v := range speeds {
+		if v >= need {
+			ok++
+		}
+	}
+	t.Logf("замахів %d | медіанна швидкість стражника %.3f | потрібно ≥%.3f | "+
+		"розрізненних замахів %d%% | медіанний зсув прицілу %.1fpx (корпус %d)",
+		len(speeds), med, need, 100*ok/len(speeds), med*dashLeadFrames, pixelSize)
+	if 100*ok/len(speeds) < 50 {
+		t.Errorf("лише %d%% замахів мають зсув понад пів корпуса — у решті стилі цілять "+
+			"в ОДНУ точку, і біт стилю не несе інформації", 100*ok/len(speeds))
+	}
+}
+
+// TestStyleCountersAreAntiDiagonal — [ГЕОМЕТРІЯ] чи справді контрзаходи взаємовиключні.
+//
+// Уся конструкція Фази 0 тримається на одному твердженні: те, що рятує від ВЕДУЧОГО,
+// мусить ЛОВИТИ від ДЗЕРКАЛЬНОГО, і навпаки. Якщо таблиця не антидіагональна, задача
+// порожня механічно, і жодне навчання її не врятує.
+//
+// Симулюємо чисту геометрію без мозку: гравець замахується й летить, стражник рухається
+// із заданою сталою швидкістю. Перевіряємо, чи тіла перетнулись за активні кадри.
+func TestStyleCountersAreAntiDiagonal(t *testing.T) {
+	saved := dashStyleMirror
+	defer func() { dashStyleMirror = saved }()
+
+	// hit — чи влучить ривок, якщо стражник поводиться так, як задано keep.
+	hit := func(mirror, keep bool) bool {
+		dashStyleMirror = mirror
+		player := &Pixel{X: 300, Y: 300}
+		w := &Pixel{X: 330, Y: 300, VelX: 0, VelY: 0.6} // рухається ВНИЗ, поруч
+		ax, ay := dashAimAt(player, w)
+		startDash(player, ax, ay)
+
+		vy := float32(0.6)
+		if !keep {
+			vy = -0.6 // розвернувся
+		}
+		for f := 0; f < dashWindup+dashActive; f++ {
+			if player.DashPhase == dashPhaseActive {
+				sp := float32(playerBaseSpeed) * dashSpeedMulti
+				player.X += player.DashDirX * sp
+				player.Y += player.DashDirY * sp
+				if collides(player.X, player.Y, w.X, w.Y) {
+					return true
+				}
+			}
+			w.Y += vy
+			advanceDash(player)
+		}
+		return false
+	}
+
+	type row struct {
+		name string
+		mirr bool
+		keep bool
+		want bool
+	}
+	cases := []row{
+		{"ВЕДУЧИЙ × продовжує", false, true, true},       // цілив уперед — влучив
+		{"ВЕДУЧИЙ × розвернувся", false, false, false},   // пішов проти прицілу — промах
+		{"ДЗЕРКАЛЬНИЙ × продовжує", true, true, false},   // цілив назад — промах
+		{"ДЗЕРКАЛЬНИЙ × розвернувся", true, false, true}, // пішов у приціл — влучив
+	}
+	bad := 0
+	for _, c := range cases {
+		got := hit(c.mirr, c.keep)
+		mark := "OK"
+		if got != c.want {
+			mark, bad = "← НЕ ТАК", bad+1
+		}
+		t.Logf("%-28s влучив=%-5v чекали=%-5v %s", c.name, got, c.want, mark)
+	}
+	if bad > 0 {
+		t.Errorf("таблиця НЕ антидіагональна (%d з 4 не так): контрзаходи не "+
+			"взаємовиключні, задача порожня механічно", bad)
 	}
 }
