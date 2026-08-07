@@ -1144,3 +1144,162 @@ func TestLadderFaithful(t *testing.T) {
 	}
 	t.Logf("для порівняння зі СТАРОЮ (нечесною) конструкцією: 39.3%% / 78.9%%")
 }
+
+// ladderCapacity — скільки шкоди від заповнювачів залежить від того, ЩО в них.
+//
+// Прямий свіп ємності неможливий без рефакторингу: brainHidden1/2 — константи, що
+// задають розміри масивів у Net. Тому міряємо те саме питання з іншого боку.
+//
+//	diversity = 0   заповнювачі ОДНАКОВІ (один сталий стан)
+//	diversity = 1   заповнювачі грубі (зміщення квантоване до 3 значень)
+//	diversity = 2   заповнювачі повні (як у чесній драбині)
+//
+// Розведення в УСІХ трьох однакове: 65 з 66 переходів — заповнювачі. Змінюється лише
+// те, скільки РІЗНИХ пар (стан, дія) мережа мусить підігнати.
+//
+//	прірва зникає з падінням diversity → шкодить ТЕ, ЩО в заповнювачах (ємність)
+//	прірва лишається                   → шкодить САМ ФАКТ оновлень на них
+//
+// Це не «свіп ємності» в буквальному сенсі, і я не називаю його так.
+func ladderCapacity(diversity, batch, delay int, gamma float32, steps int) (hit float32) {
+	savedE, savedB := qEpsilonConst, qBatch
+	qEpsilonConst, qBatch = 0.05, batch
+	defer func() { qEpsilonConst, qBatch = savedE, savedB }()
+
+	n := NewNet()
+	n.mem = resolveMemContract(MemoryStack, 1, 10, 0, 0)
+	n.mem.nStep = delay + 1
+	n.gamma, n.clip = resolveHorizon(gamma, 0)
+	b := NewBrainWith(n)
+
+	quant := func(v float32) float32 {
+		switch diversity {
+		case 0:
+			return 0 // усі заповнювачі однакові
+		case 1:
+			if v > 0.3 {
+				return 1
+			} else if v < -0.3 {
+				return -1
+			}
+			return 0
+		}
+		return v
+	}
+	st := func(style, dir, phase int, ox, oy float32) [brainInputs]float32 {
+		var s [brainInputs]float32
+		s[0] = float32(style)
+		s[1], s[2] = dirs8[dir][0], dirs8[dir][1]
+		if phase > 0 && diversity == 0 {
+			// Єдиний сталий заповнювач: ні фази, ні зміщення, ні контексту.
+			var f [brainInputs]float32
+			f[3] = 1
+			return f
+		}
+		if phase > 0 {
+			s[3] = quant(float32(phase) / float32(delay+1))
+			s[4], s[5] = quant(ox), quant(oy)
+		}
+		return s
+	}
+	want := func(style, dir int) int {
+		if style == 0 {
+			return (dir + brainActions/2) % brainActions
+		}
+		return dir
+	}
+
+	done, right, total := 0, 0, 0
+	for done < steps {
+		style, dir := rand.Intn(2), rand.Intn(brainActions)
+		s0 := st(style, dir, 0, 0, 0)
+		a0 := b.selectAction(s0)
+		committed := -1
+		if a0 == want(style, dir) {
+			committed = 1
+		}
+		if done > steps/2 {
+			total++
+			if committed == 1 {
+				right++
+			}
+		}
+		buf := &nStepBuf{n: delay + 1, gamma: n.gamma, net: n}
+		ox, oy := dirs8[a0][0], dirs8[a0][1]
+		prev, prevA := s0, a0
+		for ph := 1; ph <= delay; ph++ {
+			cur := st(style, dir, ph, ox/float32(delay), oy/float32(delay))
+			buf.push(prev, prevA, 0, cur)
+			n.train(qBatch)
+			done++
+			prevA = b.selectAction(cur)
+			ox += dirs8[prevA][0]
+			oy += dirs8[prevA][1]
+			prev = cur
+		}
+		buf.push(prev, prevA, float32(committed), prev)
+		buf.flush(prev)
+		n.train(qBatch)
+		done++
+	}
+	if total > 0 {
+		hit = 100 * float32(right) / float32(total)
+	}
+	return hit
+}
+
+// TestLadderCapacity — розведення СТАЛЕ, міняється лише різноманіття заповнювачів
+// і бюджет навчання.
+func TestLadderCapacity(t *testing.T) {
+	ladderSkip(t)
+	const runs, steps = 3, 120000
+	t.Logf("Розведення СТАЛЕ (65 з 66 — заповнювачі). Міняється, що в них і скільки вчимо.")
+	t.Logf("%22s %8s %12s", "заповнювачі", "qBatch", "точність")
+	names := []string{"однакові", "грубі (3 знач.)", "повні"}
+	for d := 0; d < 3; d++ {
+		for _, bt := range []int{16, 64} {
+			acc := float32(0)
+			for r := 0; r < runs; r++ {
+				acc += ladderCapacity(d, bt, 65, 0.99, steps)
+			}
+			mark := ""
+			if d == 2 && bt == 16 {
+				mark = "  ← поточна гра"
+			}
+			t.Logf("%22s %8d %10.1f%%%s", names[d], bt, acc/float32(runs), mark)
+		}
+	}
+	t.Logf("орієнтири: лише переходи рішення 70.4%%, випадковий рівень 12.5%%")
+}
+
+// TestLadderRetention — чи закриває прірву просто БІЛЬШИЙ буфер.
+//
+// Буфер кільцевий на qReplaySize. У розведеному режимі 1 з 66 переходів — рішення, тож
+// у 4096 їх лишається ~62. Це ~4 приклади на кожен із 16 випадків, і їх постійно
+// затирає. Жодне семплювання цього не виправить: не можна взяти те, чого немає.
+//
+// Якщо прірва закривається зі зростанням буфера — причина УТРИМАННЯ, і це ліки прямої
+// дії, які в грі коштують лише памʼяті.
+func TestLadderRetention(t *testing.T) {
+	ladderSkip(t)
+	const runs, steps = 3, 120000
+	savedCap := qReplaySize
+	defer func() { qReplaySize = savedCap }()
+
+	t.Logf("Розведений буфер (1 з 66 — рішення), чесні заповнювачі, добуток + затримка 65")
+	t.Logf("%12s %14s %12s", "буфер", "рішень у нім", "точність")
+	for _, cap := range []int{4096, 32768, 262144} {
+		qReplaySize = cap
+		acc := float32(0)
+		for r := 0; r < runs; r++ {
+			h, _ := ladderFaithful(65, 0.99, steps, false)
+			acc += h
+		}
+		mark := ""
+		if cap == 4096 {
+			mark = "  ← поточна гра"
+		}
+		t.Logf("%12d %14d %10.1f%%%s", cap, cap/66, acc/float32(runs), mark)
+	}
+	t.Logf("орієнтир: лише переходи рішення (4096 з них) 70.4%%")
+}
