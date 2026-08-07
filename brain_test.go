@@ -2562,3 +2562,67 @@ func TestTentacleWaveTravelsDownTheChain(t *testing.T) {
 		}
 	}
 }
+
+// TestFurKnobsAreReal — [ВОРС] коліна, товщина й довжина стали справжніми ручками.
+//
+// Було зашито: 2 суглоби, товщина 2 і 1, корінь у ЦЕНТРІ тіла. Тепер усе це константи, і
+// тест стежить, щоб узагальнення не зламало три речі, кожна з яких псується молча:
+//
+//  1. корінь ВГОРІ, а не в центрі — інакше ворс стирчить із середини;
+//  2. загальна довжина НЕ залежить від кількості колін (сегмент = furLen/furJoints) —
+//     інакше покрутивши коліна, ти б несподівано міняв і розмір;
+//  3. ланцюжок вирівнюється в пряму в спокої — ворс мусить стирчати, а не обвисати
+//     (саме цим він відрізняється від щупальця).
+func TestFurKnobsAreReal(t *testing.T) {
+	u := &Pixel{X: 400, Y: 400, HP: 1, MaxHP: 1}
+	u.resetFur()
+	cx, cy := u.X+pixelSize/2, u.Y+pixelSize/2
+
+	// 1) Корінь вище центру тіла.
+	fx, fy := furRoot(cx, cy)
+	if fy >= cy {
+		t.Errorf("корінь ворсу не вгорі: %.1f при центрі %.1f", fy, cy)
+	}
+	if math.Abs(float64(fx-cx)) > 1e-4 {
+		t.Errorf("корінь ворсу зсунутий по горизонталі: %.2f проти %.2f", fx, cx)
+	}
+
+	// 2) Кінчик лежить на відстані furLen від КОРЕНЯ — незалежно від furJoints.
+	//    Беремо напрямок 2 (строго вправо), щоб не мати справи з діагоналями.
+	tip := u.Fur[2][furJoints-1]
+	d := math.Hypot(float64(tip[0]-fx), float64(tip[1]-fy))
+	if math.Abs(d-furLen) > 0.01 {
+		t.Errorf("довжина ворсинки %.2f, а furLen = %g — довжина поїхала від кількості "+
+			"колін", d, float64(furLen))
+	}
+
+	// 3) У спокої ланцюжок прямий: усі суглоби на одній лінії від кореня.
+	for j := 0; j < furJoints; j++ {
+		jx, jy := u.Fur[2][j][0], u.Fur[2][j][1]
+		if math.Abs(float64(jy-fy)) > 0.01 {
+			t.Errorf("суглоб %d не на прямій напрямку 2: y = %.2f, корінь %.2f", j, jy, fy)
+		}
+		if jx <= fx {
+			t.Errorf("суглоб %d не витягнувся вправо: %.2f при корені %.2f", j, jx, fx)
+		}
+	}
+
+	// 4) Після руху ворс ВІДСТАЄ, а після зупинки — вирівнюється назад.
+	before := u.Fur[2][furJoints-1]
+	u.X += 30
+	updateFur(u)
+	if u.Fur[2][furJoints-1] == before {
+		t.Error("кінчик не зрушив за тілом зовсім")
+	}
+	for f := 0; f < 500; f++ {
+		updateFur(u)
+	}
+	cx = u.X + pixelSize/2
+	fx, fy = furRoot(cx, cy)
+	tip = u.Fur[2][furJoints-1]
+	if d := math.Hypot(float64(tip[0]-fx), float64(tip[1]-fy)); math.Abs(d-furLen) > 0.6 {
+		t.Errorf("після зупинки ворсинка не вирівнялась: довжина %.2f проти %g", d, float64(furLen))
+	}
+	t.Logf("коліна %d, довжина %g, товщина %g→%g, корінь на %.1fpx вище центру",
+		furJoints, float64(furLen), float64(furWidthRoot), float64(furWidthTip), cy-fy)
+}

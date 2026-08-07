@@ -543,27 +543,29 @@ func updateFur(u *Pixel) {
 		stiff *= k
 	}
 
-	half := length * 0.5
+	seg := length / furJoints
+	fx, fy := furRoot(cx, cy)
 	for i := 0; i < furStrands; i++ {
+		// Ланцюжок: кожен суглоб тягнеться за ПОПЕРЕДНІМ, ПРОДОВЖУЮЧИ його напрямок від
+		// кореня. Саме з цього ворсинка ВИГИНАЄТЬСЯ, а не лишається прямою палицею.
+		//
+		// Відмінність від щупальця принципова: там ціль це «попередній плюс сегмент
+		// УНИЗ», бо щупальце мусить обвисати. Ворс же стирчить навсібіч і в спокої має
+		// лишатись прямим, тож ціль — «попередній плюс сегмент У ТОМУ Ж НАПРЯМКУ».
+		px, py := fx, fy
 		dx, dy := dirs8[i][0], dirs8[i][1]
+		for j := 0; j < furJoints; j++ {
+			jx := &u.Fur[i][j][0]
+			jy := &u.Fur[i][j][1]
+			*jx += (px + dx*seg - *jx) * stiff
+			*jy += (py + dy*seg - *jy) * stiff
 
-		// Суглоб 1 (середина) тягнеться до точки на пів-довжини від центру.
-		mx := &u.Fur[i][0][0]
-		my := &u.Fur[i][0][1]
-		*mx += (cx + dx*half - *mx) * stiff
-		*my += (cy + dy*half - *my) * stiff
-
-		// Суглоб 2 (кінчик) тягнеться за СЕРЕДИНОЮ, продовжуючи її напрямок від
-		// центру — саме тому ворсинка ВИГИНАЄТЬСЯ, а не лишається прямою палицею.
-		ex, ey := *mx-cx, *my-cy
-		if l := float32(math.Sqrt(float64(ex*ex + ey*ey))); l > 0.001 {
-			ex, ey = ex/l, ey/l
-		} else {
-			ex, ey = dx, dy
+			// Напрямок для наступного суглоба — від попереднього до цього.
+			ex, ey := *jx-px, *jy-py
+			if l := float32(math.Sqrt(float64(ex*ex + ey*ey))); l > 0.001 {
+				dx, dy = ex/l, ey/l
+			}
+			px, py = *jx, *jy
 		}
-		tx := &u.Fur[i][1][0]
-		ty := &u.Fur[i][1][1]
-		*tx += (*mx + ex*half - *tx) * stiff
-		*ty += (*my + ey*half - *ty) * stiff
 	}
 }

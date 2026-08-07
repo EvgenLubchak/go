@@ -147,11 +147,17 @@ func drawFur(screen *ebiten.Image, p *Pixel) {
 	}
 	cx := p.X + pixelSize/2
 	cy := p.Y + pixelSize/2
+	fx, fy := furRoot(cx, cy)
 	for i := 0; i < furStrands; i++ {
-		mx, my := p.Fur[i][0][0], p.Fur[i][0][1]
-		tx, ty := p.Fur[i][1][0], p.Fur[i][1][1]
-		vector.StrokeLine(screen, cx, cy, mx, my, 2, col, false)
-		vector.StrokeLine(screen, mx, my, tx, ty, 1, col, false)
+		px, py := fx, fy
+		for j := 0; j < furJoints; j++ {
+			// Звуження від кореня до кінчика: волосина, а не дріт.
+			t := float32(j) / float32(furJoints)
+			w := furWidthRoot + (furWidthTip-furWidthRoot)*t
+			jx, jy := p.Fur[i][j][0], p.Fur[i][j][1]
+			vector.StrokeLine(screen, px, py, jx, jy, w, col, false)
+			px, py = jx, jy
+		}
 	}
 }
 

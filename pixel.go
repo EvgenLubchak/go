@@ -634,7 +634,7 @@ type Pixel struct {
 	// [ВОРС] Позиції суглобів кожної ворсинки у СВІТОВИХ координатах:
 	// Fur[ворсинка][суглоб][x,y], суглоб 0 = середина, 1 = кінчик.
 	// Світові (а не локальні) саме тому, що відставання має бути від РУХУ юніта.
-	Fur [furStrands][2][2]float32
+	Fur [furStrands][furJoints][2]float32
 
 	// [КУЛЬКИ] Позиції кульок у СВІТОВИХ координатах — так само, як ворс. Світові, а не
 	// локальні, саме тому, що відставання має бути від РУХУ юніта: локальні координати
@@ -664,10 +664,14 @@ func (p *Pixel) resetFur() {
 
 	cx := p.X + pixelSize/2
 	cy := p.Y + pixelSize/2
+	fx, fy := furRoot(cx, cy)
+	seg := float32(furLen) / furJoints
 	for i := 0; i < furStrands; i++ {
 		dx, dy := dirs8[i][0], dirs8[i][1]
-		p.Fur[i][0][0], p.Fur[i][0][1] = cx+dx*furLen*0.5, cy+dy*furLen*0.5
-		p.Fur[i][1][0], p.Fur[i][1][1] = cx+dx*furLen, cy+dy*furLen
+		for j := 0; j < furJoints; j++ {
+			d := seg * float32(j+1)
+			p.Fur[i][j][0], p.Fur[i][j][1] = fx+dx*d, fy+dy*d
+		}
 	}
 	for i := 0; i < ballCount; i++ {
 		bx, by := ballHome(i, cx, cy)
@@ -687,6 +691,15 @@ func (p *Pixel) resetFur() {
 // смикнеться на першому ж кадрі.
 func tentRoot(cx, cy float32) (float32, float32) {
 	return cx, cy + pixelSize/2
+}
+
+// furRoot — точка, з якої росте ворс: ВЕРХ тіла, а не центр.
+//
+// Окремою функцією з тієї ж причини, що ballHome і tentRoot: потрібна у спавні,
+// оновленні, малюванні й тесті. Розʼїхатись вони не мають права — ворс, чий корінь у
+// малюванні відрізняється від кореня в оновленні, візуально «відірветься» від тіла.
+func furRoot(cx, cy float32) (float32, float32) {
+	return cx, cy - pixelSize/2*furRootUp
 }
 
 // ballHome — точка, до якої тягнеться кулька i: під тілом, рознесені по горизонталі.
