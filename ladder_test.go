@@ -719,3 +719,428 @@ func TestLadderPrioritized(t *testing.T) {
 	}
 	t.Logf("%28s %10.1f%%", "(чистий буфер, для порівняння)", 77.6)
 }
+
+// ladderRung3Grid — 2×2: ЯРЛИК × РОЗВЕДЕННЯ, усе інше однакове.
+//
+// Розділяє два фактори, які в попередніх тестах мінялись РАЗОМ:
+//
+//	ЯРЛИК       чи несуть проміжні стани committed («рішення вже правильне») — ознаку,
+//	            що прямо каже відповідь і пояснює 98.5% буфера;
+//	РОЗВЕДЕННЯ  чи лежать у буфері заповнювачі (65 з 66 переходів) чи лише рішення.
+//
+// Кредит в ОБОХ випадках доносить n-step на весь епізод, тож затримка тут не фактор —
+// її вже виключено (n = 66 не змінив нічого).
+//
+// Бюджет навчання РІВНИЙ: train() щокроку в усіх комірках. Перша версія тесту на
+// розведення цього не мала — щільна комірка отримала у 66 разів менше градієнтних
+// кроків, і я мало не оголосив розведення непричетним.
+//
+// Комірка «без ярлика, без розведення» — контроль: якщо задача не розвʼязується навіть
+// там, значить ярлик робив УСЮ роботу, і 77.6% були ілюзією.
+func ladderRung3Grid(shortcut, dense bool, delay int, gamma float32, steps int) (hit float32, allOK bool) {
+	saved := qEpsilonConst
+	qEpsilonConst = 0.05
+	defer func() { qEpsilonConst = saved }()
+
+	n := NewNet()
+	n.mem = resolveMemContract(MemoryStack, 1, 10, 0, 0)
+	n.mem.nStep = delay + 1
+	n.gamma, n.clip = resolveHorizon(gamma, 0)
+	b := NewBrainWith(n)
+
+	st := func(style, dir, phase, committed int) [brainInputs]float32 {
+		var s [brainInputs]float32
+		s[0] = float32(style)
+		s[1], s[2] = dirs8[dir][0], dirs8[dir][1]
+		s[3] = float32(phase) / float32(delay+1)
+		if shortcut {
+			s[4] = float32(committed)
+		}
+		return s
+	}
+	want := func(style, dir int) int {
+		if style == 0 {
+			return (dir + brainActions/2) % brainActions
+		}
+		return dir
+	}
+	// Дисконт нагороди на всю затримку — однаковий в обох гілках.
+	var pow float32 = 1
+	for i := 0; i < delay; i++ {
+		pow *= n.gamma
+	}
+
+	done, right, total := 0, 0, 0
+	for done < steps {
+		style, dir := rand.Intn(2), rand.Intn(brainActions)
+		s0 := st(style, dir, 0, 0)
+		a0 := b.selectAction(s0)
+		committed := -1
+		if a0 == want(style, dir) {
+			committed = 1
+		}
+		if done > steps/2 {
+			total++
+			if committed == 1 {
+				right++
+			}
+		}
+		var buf *nStepBuf
+		if !dense {
+			buf = &nStepBuf{n: delay + 1, gamma: n.gamma, net: n}
+		}
+		prev, prevA := s0, a0
+		for ph := 1; ph <= delay; ph++ {
+			cur := st(style, dir, ph, committed)
+			if !dense {
+				buf.push(prev, prevA, 0, cur)
+			}
+			n.train(qBatch) // рівний бюджет в ОБОХ гілках
+			done++
+			prev, prevA = cur, b.selectAction(cur)
+		}
+		if dense {
+			// Лише перехід РІШЕННЯ, з тією самою дисконтованою нагородою.
+			n.remember(transition{s: s0, a: a0, r: pow * float32(committed),
+				s2: prev, terminal: true})
+		} else {
+			buf.push(prev, prevA, float32(committed), prev)
+			buf.flush(prev)
+		}
+		n.train(qBatch)
+		done++
+	}
+
+	ok := 0
+	for style := 0; style < 2; style++ {
+		for dir := 0; dir < brainActions; dir++ {
+			q, _, _ := n.forwardQ(st(style, dir, 0, 0))
+			if argmaxQ(q) == want(style, dir) {
+				ok++
+			}
+		}
+	}
+	if total > 0 {
+		hit = 100 * float32(right) / float32(total)
+	}
+	return hit, ok == 2*brainActions
+}
+
+// TestLadderGrid — ЯРЛИК × РОЗВЕДЕННЯ, повний 2×2.
+func TestLadderGrid(t *testing.T) {
+	ladderSkip(t)
+	const runs, steps = 4, 120000
+	t.Logf("ДОБУТОК 2×8 + затримка 65, γ0.99, кредит доносить n-step у ВСІХ комірках")
+	t.Logf("%10s %14s %12s %10s", "ярлик", "буфер", "точність", "усі 16")
+	for _, sc := range []bool{true, false} {
+		for _, dense := range []bool{false, true} {
+			acc, ok := float32(0), 0
+			for r := 0; r < runs; r++ {
+				h, a := ladderRung3Grid(sc, dense, 65, 0.99, steps)
+				acc += h
+				if a {
+					ok++
+				}
+			}
+			lblS, lblB := "є", "розведений"
+			if !sc {
+				lblS = "НЕМАЄ"
+			}
+			if dense {
+				lblB = "лише рішення"
+			}
+			t.Logf("%10s %14s %10.1f%% %6d з %d", lblS, lblB, acc/float32(runs), ok, runs)
+		}
+	}
+	t.Logf("випадковий рівень 12.5%%")
+}
+
+// trainPER — пріоритетний реплей за |TD-помилкою|. Справжня версія, а не сурогат.
+//
+// Попередня спроба (trainStratified) семплила за НАГОРОДОЮ і дала нуль. Причина не в
+// ідеї, а в ознаці: у грі кожен кадр є рішенням, поділу на «рішення» й «заповнювач»
+// немає, і нагорода зовсім не там, де важлива дія. Єдине, що це виражає, — наскільки
+// перехід ще ДИВУЄ мережу, тобто |TD|.
+//
+// Спрощення проти канонічного PER: без дерева сум і без importance-sampling ваг.
+// Пріоритет оновлюється на кожному навчанні переходу, нові переходи входять із
+// максимальним (щоб їх узагалі побачили хоч раз). alpha = 0 дає рівномірний семплінг —
+// це наша базова лінія в тій самій функції, без окремого шляху коду.
+type perBuf struct {
+	prio []float32
+}
+
+func (p *perBuf) train(n *Net, k int, alpha float32) {
+	m := n.replayLen()
+	if m < qMinReplay {
+		return
+	}
+	for len(p.prio) < m {
+		p.prio = append(p.prio, 1e9) // новий перехід — максимальний пріоритет
+	}
+	// Сума ваг (prio^alpha). При alpha = 0 усі ваги 1 → рівномірно.
+	var total float32
+	w := make([]float32, m)
+	for i := 0; i < m; i++ {
+		v := p.prio[i]
+		if v > 1e8 {
+			v = 10 // стеля для «ще не бачених», щоб вони не з'їдали весь батч
+		}
+		if alpha == 0 {
+			w[i] = 1
+		} else {
+			w[i] = v + 0.01 // епсілон, щоб нульові помилки все ще мали шанс
+		}
+		total += w[i]
+	}
+	for s := 0; s < k; s++ {
+		r, idx := rand.Float32()*total, m-1
+		var acc float32
+		for i := 0; i < m; i++ {
+			acc += w[i]
+			if acc >= r {
+				idx = i
+				break
+			}
+		}
+		t := n.replay[idx]
+		td := n.tdUpdate(t.s, t.a, t.r, t.s2, t.terminal)
+		if td < 0 {
+			td = -td
+		}
+		p.prio[idx] = td
+	}
+}
+
+// ladderRung3PER — розведений буфер, БЕЗ ярлика, з пріоритетним реплеєм.
+//
+// Це рівно та комірка, що дала 41.7% при рівномірному семплінгу, тоді як чистий буфер
+// дає 78.9%. Питання: чи закриває PER цю прірву, не викидаючи заповнювачі — бо в грі
+// їх не викинеш, кадри відбуваються.
+func ladderRung3PER(alpha float32, delay int, gamma float32, steps int) (hit float32, allOK bool) {
+	saved := qEpsilonConst
+	qEpsilonConst = 0.05
+	defer func() { qEpsilonConst = saved }()
+
+	n := NewNet()
+	n.mem = resolveMemContract(MemoryStack, 1, 10, 0, 0)
+	n.mem.nStep = delay + 1
+	n.gamma, n.clip = resolveHorizon(gamma, 0)
+	b := NewBrainWith(n)
+	per := &perBuf{}
+
+	st := func(style, dir, phase int) [brainInputs]float32 {
+		var s [brainInputs]float32
+		s[0] = float32(style)
+		s[1], s[2] = dirs8[dir][0], dirs8[dir][1]
+		s[3] = float32(phase) / float32(delay+1)
+		return s // ярлика НЕМАЄ навмисно
+	}
+	want := func(style, dir int) int {
+		if style == 0 {
+			return (dir + brainActions/2) % brainActions
+		}
+		return dir
+	}
+
+	done, right, total := 0, 0, 0
+	for done < steps {
+		style, dir := rand.Intn(2), rand.Intn(brainActions)
+		s0 := st(style, dir, 0)
+		a0 := b.selectAction(s0)
+		committed := -1
+		if a0 == want(style, dir) {
+			committed = 1
+		}
+		if done > steps/2 {
+			total++
+			if committed == 1 {
+				right++
+			}
+		}
+		buf := &nStepBuf{n: delay + 1, gamma: n.gamma, net: n}
+		prev, prevA := s0, a0
+		for ph := 1; ph <= delay; ph++ {
+			cur := st(style, dir, ph)
+			buf.push(prev, prevA, 0, cur)
+			per.train(n, qBatch, alpha)
+			done++
+			prev, prevA = cur, b.selectAction(cur)
+		}
+		buf.push(prev, prevA, float32(committed), prev)
+		buf.flush(prev)
+		per.train(n, qBatch, alpha)
+		done++
+	}
+
+	ok := 0
+	for style := 0; style < 2; style++ {
+		for dir := 0; dir < brainActions; dir++ {
+			q, _, _ := n.forwardQ(st(style, dir, 0))
+			if argmaxQ(q) == want(style, dir) {
+				ok++
+			}
+		}
+	}
+	if total > 0 {
+		hit = 100 * float32(right) / float32(total)
+	}
+	return hit, ok == 2*brainActions
+}
+
+// TestLadderPER — чи закриває пріоритетний реплей прірву 41.7% → 78.9%.
+func TestLadderPER(t *testing.T) {
+	ladderSkip(t)
+	const runs, steps = 3, 60000
+	t.Logf("Розведений буфер, БЕЗ ярлика, добуток + затримка 65, γ0.99")
+	t.Logf("%10s %12s %10s", "alpha", "точність", "усі 16")
+	for _, a := range []float32{0, 1} {
+		acc, ok := float32(0), 0
+		for r := 0; r < runs; r++ {
+			h, all := ladderRung3PER(a, 65, 0.99, steps)
+			acc += h
+			if all {
+				ok++
+			}
+		}
+		lbl := "рівномірно"
+		if a > 0 {
+			lbl = "за |TD|"
+		}
+		t.Logf("%10s %10.1f%% %6d з %d", lbl, acc/float32(runs), ok, runs)
+	}
+	t.Logf("орієнтири: чистий буфер 78.9%%, випадковий рівень 12.5%%")
+}
+
+// ladderFaithful — драбина з ЧЕСНИМИ проміжними станами.
+//
+// [ЩО БУЛО НЕ ТАК] У попередніх щаблях заповнювачі відрізнялись від стану рішення лише
+// слотом фази: s0 мав phase = 0, s1 — 1/66 = 0.015. Для гладкого апроксиматора це майже
+// той самий вхід. А цілі в заповнювачах ~нуль (стан не кодує гілку, тож ±0.52
+// усереднюються), і 65 із 66 навчальних кроків тягнули до нуля область, яка ЗБІГАЄТЬСЯ
+// зі станом рішення. Сигнал розмивався через УЗАГАЛЬНЕННЯ, а не через рідкість.
+//
+// Саме тому нічого не давали ні n-step, ні пріоритетний реплей: обидва бʼють у частоту
+// й кредит, а проблема була в ІНТЕРФЕРЕНЦІЇ. І саме тому висновок «розведення буфера —
+// причина» довелось відкликати вдруге: обидва тести, що його «підтверджували», ділили
+// цю ваду.
+//
+// [ЯК ЧЕСНО] У грі за 65 кадрів позиція юніта змінюється СИЛЬНО, і стани не бувають
+// майже тотожними. Тут так само: агент рухається згідно з обраними діями, і зміщення
+// входить у стан. Це НЕ ярлик — воно каже, ЩО агент зробив, а не ЧИ це було правильно
+// (саме цим грішив committed).
+func ladderFaithful(delay int, gamma float32, steps int, dense bool) (hit float32, allOK bool) {
+	saved := qEpsilonConst
+	qEpsilonConst = 0.05
+	defer func() { qEpsilonConst = saved }()
+
+	n := NewNet()
+	n.mem = resolveMemContract(MemoryStack, 1, 10, 0, 0)
+	n.mem.nStep = delay + 1
+	n.gamma, n.clip = resolveHorizon(gamma, 0)
+	b := NewBrainWith(n)
+
+	// state: [0]=стиль, [1..2]=напрямок «руху цілі», [3]=фаза, [4..5]=ВЛАСНЕ зміщення
+	st := func(style, dir, phase int, ox, oy float32) [brainInputs]float32 {
+		var s [brainInputs]float32
+		s[0] = float32(style)
+		s[1], s[2] = dirs8[dir][0], dirs8[dir][1]
+		s[3] = float32(phase) / float32(delay+1)
+		s[4], s[5] = ox, oy
+		return s
+	}
+	want := func(style, dir int) int {
+		if style == 0 {
+			return (dir + brainActions/2) % brainActions
+		}
+		return dir
+	}
+
+	done, right, total := 0, 0, 0
+	for done < steps {
+		style, dir := rand.Intn(2), rand.Intn(brainActions)
+		s0 := st(style, dir, 0, 0, 0)
+		a0 := b.selectAction(s0)
+		committed := -1
+		if a0 == want(style, dir) {
+			committed = 1
+		}
+		if done > steps/2 {
+			total++
+			if committed == 1 {
+				right++
+			}
+		}
+		var buf *nStepBuf
+		if !dense {
+			buf = &nStepBuf{n: delay + 1, gamma: n.gamma, net: n}
+		}
+		// Зміщення накопичується з РЕАЛЬНО обраних дій — як позиція юніта в грі.
+		ox, oy := dirs8[a0][0], dirs8[a0][1]
+		prev, prevA := s0, a0
+		for ph := 1; ph <= delay; ph++ {
+			cur := st(style, dir, ph, ox/float32(delay), oy/float32(delay))
+			if !dense {
+				buf.push(prev, prevA, 0, cur)
+			}
+			n.train(qBatch)
+			done++
+			prevA = b.selectAction(cur)
+			ox += dirs8[prevA][0]
+			oy += dirs8[prevA][1]
+			prev = cur
+		}
+		if dense {
+			var pow float32 = 1
+			for i := 0; i < delay; i++ {
+				pow *= n.gamma
+			}
+			n.remember(transition{s: s0, a: a0, r: pow * float32(committed),
+				s2: prev, terminal: true})
+		} else {
+			buf.push(prev, prevA, float32(committed), prev)
+			buf.flush(prev)
+		}
+		n.train(qBatch)
+		done++
+	}
+
+	ok := 0
+	for style := 0; style < 2; style++ {
+		for dir := 0; dir < brainActions; dir++ {
+			q, _, _ := n.forwardQ(st(style, dir, 0, 0, 0))
+			if argmaxQ(q) == want(style, dir) {
+				ok++
+			}
+		}
+	}
+	if total > 0 {
+		hit = 100 * float32(right) / float32(total)
+	}
+	return hit, ok == 2*brainActions
+}
+
+// TestLadderFaithful — чи лишається провал, коли заповнювачі перестають бути
+// майже-копіями стану рішення.
+func TestLadderFaithful(t *testing.T) {
+	ladderSkip(t)
+	const runs, steps = 4, 120000
+	t.Logf("ЧЕСНІ заповнювачі: стан несе ВЛАСНЕ зміщення від обраних дій")
+	t.Logf("%16s %12s %10s", "буфер", "точність", "усі 16")
+	for _, dense := range []bool{false, true} {
+		acc, ok := float32(0), 0
+		for r := 0; r < runs; r++ {
+			h, a := ladderFaithful(65, 0.99, steps, dense)
+			acc += h
+			if a {
+				ok++
+			}
+		}
+		lbl := "розведений"
+		if dense {
+			lbl = "лише рішення"
+		}
+		t.Logf("%16s %10.1f%% %6d з %d", lbl, acc/float32(runs), ok, runs)
+	}
+	t.Logf("для порівняння зі СТАРОЮ (нечесною) конструкцією: 39.3%% / 78.9%%")
+}

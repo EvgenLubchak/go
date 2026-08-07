@@ -290,7 +290,9 @@ func (b *Brain) shiftFrames(cur [baseInputs]float32) {
 // Далі — backprop цієї помилки. ВАЖЛИВО: помилку має ЛИШЕ дія, яку реально
 // зробили. "Semi-gradient": target вважаємо КОНСТАНТОЮ (по target-мережі).
 // Пише ваги → викликається лише з train() (однопотокова фаза).
-func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainInputs]float32, terminal bool) {
+// Повертає СИРУ (необрізану) TD-помилку — вона потрібна пріоритетному реплею як міра
+// «наскільки цей перехід ще здивував мережу». Решта викликів її ігнорують.
+func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainInputs]float32, terminal bool) float32 {
 	// Ціль за Беллманом по TARGET-мережі (max Q наступного стану — як константа).
 	q2 := n.forwardQTarget(s2)
 	maxNext := q2[argmaxQ(q2)]
@@ -355,6 +357,7 @@ func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainI
 		n.syncTarget()
 		n.syncCounter = 0
 	}
+	return rawTD
 }
 
 // clipWeights обрізає всі ваги до [-brainMaxWeight, +brainMaxWeight].
