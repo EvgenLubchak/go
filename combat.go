@@ -211,7 +211,10 @@ func impactThreshold(ownMaxSpeed float32) float32 {
 // сировина для бойової нагороди (rewardFor споживає й обнуляє їх наступного
 // кадру). attacker може бути nil (напр. шкода не від агента).
 func applyImpactDamage(attacker, target *Pixel, dmg int) {
-	if target.InvulnTimer > 0 {
+	// [УХИЛЕННЯ] Активне ухилення захищає так само, як невразливість після удару.
+	// Окремим таймером, а не через InvulnTimer: у них різна тривалість і різний сенс,
+	// і змішувати їх означало б, що вдалий ухил дає ще й 45 кадрів безкарності.
+	if target.InvulnTimer > 0 || target.DodgeTimer > 0 {
 		return
 	}
 	target.HP -= dmg

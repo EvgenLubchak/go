@@ -199,7 +199,7 @@ func drawBody(screen *ebiten.Image, p Pixel, col color.RGBA) {
 	var mean float32
 	hasQ := p.Brain != nil
 	if hasQ {
-		for i := 0; i < brainActions; i++ {
+		for i := 0; i < brainWhiskers; i++ {
 			mean += p.Brain.lastQ[i]
 		}
 		mean /= brainActions
@@ -207,7 +207,7 @@ func drawBody(screen *ebiten.Image, p Pixel, col color.RGBA) {
 
 	// Вісім вершин контуру.
 	var vx, vy [brainActions]float32
-	for i := 0; i < brainActions; i++ {
+	for i := 0; i < brainWhiskers; i++ {
 		r := bodyRestRadius(i) * scale
 		if hasQ {
 			r *= 1 + bodyQStretch*tanh((p.Brain.lastQ[i]-mean)/bodyQScale)
@@ -231,7 +231,7 @@ func drawBody(screen *ebiten.Image, p Pixel, col color.RGBA) {
 	path := &vector.Path{}
 	sx, sy := mid(brainActions-1, 0)
 	path.MoveTo(sx, sy)
-	for i := 0; i < brainActions; i++ {
+	for i := 0; i < brainWhiskers; i++ {
 		nx, ny := mid(i, (i+1)%brainActions)
 		path.QuadTo(vx[i], vy[i], nx, ny) // вершина = контрольна точка
 	}

@@ -200,7 +200,7 @@ func (b *Brain) stepGRU(cur [baseInputs]float32, hitWall bool) int {
 	// й СПОЖИВАЄ бойові лічильники (dmgDealt/Taken/kills), тож пропустити його виклик
 	// означало б і втратити шкоду, і залишити лічильники брудними на наступний кадр.
 	if b.hasPrev {
-		r := b.rewardFor(hitWall, b.gruPrevX[inWhisker0+b.prevAction])
+		r := b.rewardFor(hitWall, b.whiskerOf(b.gruPrevX[:], b.prevAction))
 		b.gruAcc += b.gruAccPow * r
 		b.gruAccPow *= b.net.gamma
 	}

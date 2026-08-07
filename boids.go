@@ -182,8 +182,25 @@ func (g *Game) calcAcceleration() {
 					}
 					action := e.Brain.Step(state, e.HitWall)
 
-					e.AccX += dirs8[action][0] * brainForce * g.difficulty
-					e.AccY += dirs8[action][1] * brainForce * g.difficulty
+					// [УХИЛЕННЯ] Девʼята дія не має напрямку: вона дає вікно
+					// невразливості, а не прискорення. І поки воно триває, юніт НЕ
+					// прискорюється зовсім — це і є ціна дії.
+					//
+					// Без ціни «тиснути щойно перезарядилось» було б слабко домінантною
+					// СТАЛОЮ політикою: агент отримав би 10% пом'якшення, нічого не
+					// вивчивши. З ціною виникає справжній компроміс — ухилення коштує
+					// втраченої швидкості зближення, тобто втраченого удару.
+					if action == actionDodge {
+						if e.DodgeCooldown == 0 {
+							e.DodgeTimer = dodgeInvuln
+							e.DodgeCooldown = dodgeCooldown
+						}
+						// Перезарядка ще йде — дію змарновано. Це навмисно: інакше
+						// спам був би безкарний.
+					} else if e.DodgeTimer == 0 {
+						e.AccX += dirs8[action][0] * brainForce * g.difficulty
+						e.AccY += dirs8[action][1] * brainForce * g.difficulty
+					}
 
 					// [СТИГМЕРГІЯ] Відштовхування від слідів фрустрації навколо (лише
 					// якщо феромони ввімкнені): рій уникає місць, де вже застрягав.
@@ -213,6 +230,17 @@ func (g *Game) calcAcceleration() {
 // updateUnits застосовує блукання, burst, прискорення, damping, рух і відбивання.
 func (g *Game) updateUnits() {
 	g.decayFrustration() // [СТИГМЕРГІЯ] сліди тануть щокадру (однопотоково)
+
+	// [УХИЛЕННЯ] Таймери дії. Окремим циклом до фізики: DodgeTimer читає
+	// applyImpactDamage, і він мусить бачити стан ЦЬОГО кадру.
+	for i := range g.units {
+		if g.units[i].DodgeTimer > 0 {
+			g.units[i].DodgeTimer--
+		}
+		if g.units[i].DodgeCooldown > 0 {
+			g.units[i].DodgeCooldown--
+		}
+	}
 
 	for i := range g.units {
 		e := &g.units[i]

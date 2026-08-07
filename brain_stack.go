@@ -187,7 +187,7 @@ func (b *Brain) stepStack(cur [baseInputs]float32, hitWall bool) int {
 			}
 		}
 		// Вус напрямку, в який агент пішов, беремо з ПЕРШОГО кадру стану рішення.
-		r := b.rewardFor(hitWall, b.prevState[inWhisker0+b.prevAction])
+		r := b.rewardFor(hitWall, b.whiskerOf(b.prevState[:], b.prevAction))
 		b.actAcc += b.actAccPow * r
 		b.actAccPow *= b.net.gamma
 	}

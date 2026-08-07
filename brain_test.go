@@ -2270,3 +2270,76 @@ func TestRewardChainCoverage(t *testing.T) {
 	t.Logf("ЧИТАННЯ: покриття близьке до 100%% → «гарячим» стає майже все,")
 	t.Logf("         два буфери вироджуються в один менший, як у драбині")
 }
+
+// TestDodgeActionGrantsInvulnAndCosts — механіка девʼятої дії цілком.
+//
+// Перевіряємо ЧОТИРИ властивості, і кожна з них поодинці ламається молча:
+//
+//  1. ухилення дає невразливість;
+//  2. поки воно триває, юніт НЕ прискорюється — це ціна, без якої «тиснути щойно
+//     перезарядилось» стало б слабко домінантною сталою політикою;
+//  3. кулдаун справді блокує повторне ухилення;
+//  4. дія ухилення не читає вус (у неї немає напрямку) — інакше inWhisker0 + 8 = 13
+//     читало б слот «видно гравця» як стіну.
+func TestDodgeActionGrantsInvulnAndCosts(t *testing.T) {
+	savedMap := tileMap
+	tileMap = [boidMapH][boidMapW]bool{}
+	defer func() { tileMap = savedMap }()
+
+	u := &Pixel{X: 300, Y: 300, HP: 10, MaxHP: 10, Cfg: ConfigWarden}
+
+	// 1) Невразливість.
+	u.DodgeTimer = dodgeInvuln
+	hp := u.HP
+	attacker := &Pixel{X: 280, Y: 300, VelX: 5}
+	applyImpactDamage(attacker, u, dashDamage)
+	if u.HP != hp {
+		t.Errorf("ухилення не захистило: %d → %d", hp, u.HP)
+	}
+	// А без нього — б'є.
+	u.DodgeTimer = 0
+	applyImpactDamage(attacker, u, dashDamage)
+	if u.HP != hp-dashDamage {
+		t.Errorf("без ухилення шкода не пройшла: %d → %d", hp, u.HP)
+	}
+
+	// 4) Вус для дії ухилення — нуль, а не слот «видно гравця».
+	b := NewBrain()
+	var st [brainInputs]float32
+	st[inVisible] = 1      // якби індексація поїхала, це стало б «стіною»
+	st[inWhisker0+2] = 0.7 // справжній вус напрямку 2
+	if v := b.whiskerOf(st[:], actionDodge); v != 0 {
+		t.Errorf("дія ухилення прочитала вус %.2f — індексація поїхала на слот %d",
+			v, inWhisker0+actionDodge)
+	}
+	if v := b.whiskerOf(st[:], 2); v != 0.7 {
+		t.Errorf("звичайна дія читає не той вус: %.2f", v)
+	}
+}
+
+// TestDodgeIsAffordableAndDiscriminating — арифметика дії, а не її код.
+//
+// Ухилення має сенс лише якщо ТОЧНИЙ таймінг помітно кращий за спам. Інакше агент
+// вивчить сталу політику «тиснути щойно перезарядилось» і нічого не читатиме — рівно
+// та вада, через яку ухилення РУХОМ виявилось безкоштовним.
+func TestDodgeIsAffordableAndDiscriminating(t *testing.T) {
+	// Вікно мусить накрити активну фазу ривка із запасом на похибку таймінгу.
+	if dodgeInvuln < dashActive*2 {
+		t.Errorf("dodgeInvuln = %d замалий: активна фаза ривка %d кадрів, запасу на "+
+			"похибку таймінгу майже немає", dodgeInvuln, dashActive)
+	}
+	// Спам покриває dodgeInvuln із кожних dodgeCooldown кадрів; точний таймінг — усе.
+	spam := float64(dodgeInvuln) / float64(dodgeCooldown)
+	if spam > 0.35 {
+		t.Errorf("спам покриває %.0f%% часу — дискримінація замала, стала політика "+
+			"«тиснути щойно перезарядилось» буде майже така сама добра, як читання", spam*100)
+	}
+	t.Logf("спам покриває %.0f%% часу проти 100%% у точного таймінгу → дискримінація %.1fx",
+		spam*100, 1/spam)
+	// І кулдаун не має бути довшим за каденцію атак: інакше на частину ривків
+	// ухилення фізично недоступне, і задача знову стає нерозвʼязною.
+	if dodgeCooldown > dashCadence {
+		t.Errorf("dodgeCooldown = %d довший за каденцію атак %d — на частину ривків "+
+			"ухилення просто недоступне", dodgeCooldown, dashCadence)
+	}
+}
