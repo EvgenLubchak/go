@@ -66,6 +66,14 @@ func (g *Game) handleFirstPersonInput() {
 func (g *Game) updatePrey() {
 	state := GatherPreyInputs(&g.player, g.units)
 	action := g.player.Brain.Step(state, g.player.HitWall)
+	// [УХИЛЕННЯ] Девʼята дія без напрямку — те саме правило, що в юнітів.
+	if action == actionDodge {
+		if g.player.DodgeCooldown == 0 {
+			g.player.DodgeTimer = dodgeInvuln
+			g.player.DodgeCooldown = dodgeCooldown
+		}
+		return
+	}
 	g.player.VelX += dirs8[action][0] * playerAccel
 	g.player.VelY += dirs8[action][1] * playerAccel
 }

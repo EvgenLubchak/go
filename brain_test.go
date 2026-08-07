@@ -88,8 +88,12 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 			state := GatherInputs(enemy, player)
 			action := b.Step(state, false)
 			b.net.train(qBatch) // Step лише збирає досвід; тренуємо явно (як g.trainBrains)
-			enemy.VelX += dirs8[action][0] * brainForce
-			enemy.VelY += dirs8[action][1] * brainForce
+			// [УХИЛЕННЯ] Девʼята дія без напрямку — юніт просто не прискорюється,
+			// як і в calcAcceleration. Без цієї перевірки тест падає на dirs8[8].
+			if action < brainWhiskers {
+				enemy.VelX += dirs8[action][0] * brainForce
+				enemy.VelY += dirs8[action][1] * brainForce
+			}
 			spd := float32(math.Sqrt(float64(enemy.VelX*enemy.VelX + enemy.VelY*enemy.VelY)))
 			if spd > maxSpd {
 				enemy.VelX = enemy.VelX / spd * maxSpd
@@ -110,6 +114,9 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 		q, _, _ := b.net.forwardQ(b.net.stackSteady(state)) // [ПАМ'ЯТЬ] проба усталеним стеком
 		a := argmaxQ(q)
 		n := float32(math.Sqrt(float64(off[0]*off[0] + off[1]*off[1])))
+		if a >= brainWhiskers {
+			continue // ухилення напрямку не має, у скалярний добуток не входить
+		}
 		sumDot += dirs8[a][0]*off[0]/n + dirs8[a][1]*off[1]/n
 	}
 	avgDot := sumDot / float32(len(offsets))
@@ -514,7 +521,10 @@ func TestFrozenPolicyStopsLearning(t *testing.T) {
 // квадрата з півсторо́ною pixelSize/2, тобто max(|x|,|y|) == R.
 func TestBodyRestShapeIsTheSquare(t *testing.T) {
 	const R = pixelSize / 2
-	for i := 0; i < brainActions; i++ {
+	// НАПРЯМКІВ вісім, а ДІЙ девʼять — після появи ухилення це різні числа, і геометрія
+	// рахується по перших. Раніше тут стояло brainActions і працювало лише тому, що
+	// dirs8 був оголошений на brainActions із мовчазним нулем у девʼятому елементі.
+	for i := 0; i < brainWhiskers; i++ {
 		r := bodyRestRadius(i)
 		x := dirs8[i][0] * r
 		y := dirs8[i][1] * r
@@ -2341,5 +2351,46 @@ func TestDodgeIsAffordableAndDiscriminating(t *testing.T) {
 	if dodgeCooldown > dashCadence {
 		t.Errorf("dodgeCooldown = %d довший за каденцію атак %d — на частину ривків "+
 			"ухилення просто недоступне", dodgeCooldown, dashCadence)
+	}
+}
+
+// TestBodyVerticesHaveNoHole — регресія на візуальну ваду від девʼятої дії.
+//
+// Масив вершин був оголошений як [brainActions] (9), а заповнювався на brainWhiskers
+// (8). Девʼята лишалась у ПОЧАТКУ КООРДИНАТ, і крива йшла через неї — контур тіла
+// тягнувся в лівий верхній кут екрана через пів карти.
+//
+// Причина глибша за один масив: dirs8 теж був оголошений на brainActions і мовчки
+// віддавав dirs8[8] = {0,0} замість того, щоб упасти. Тепер він рівно на 8, тож будь-яке
+// індексування дією ухилення падає ОДРАЗУ й у правильному місці.
+//
+// Тест перевіряє геометрію, а не малювання: усі вершини мусять лежати БІЛЯ юніта.
+func TestBodyVerticesHaveNoHole(t *testing.T) {
+	if len(dirs8) != brainWhiskers {
+		t.Fatalf("dirs8 має %d елементів, а напрямків %d — саме така розбіжність і "+
+			"давала мовчазний {0,0}", len(dirs8), brainWhiskers)
+	}
+
+	p := Pixel{X: 900, Y: 500, BodyScale: 1}
+	cx, cy := p.X+pixelSize/2, p.Y+pixelSize/2
+	// З мозком і НЕРІВНОЮ Q — щоб деформація була максимальною.
+	b := NewBrain()
+	for i := range b.lastQ {
+		b.lastQ[i] = float32(i) * 0.5
+	}
+	p.Brain = b
+
+	vx, vy := bodyVertices(p, cx, cy, 1)
+	maxR := float32(pixelSize) * (1 + bodyQStretch) * 1.5 // з великим запасом
+	for i := range vx {
+		dx, dy := vx[i]-cx, vy[i]-cy
+		r := float32(math.Hypot(float64(dx), float64(dy)))
+		if r > maxR {
+			t.Errorf("вершина %d за %.0fpx від центра (стеля %.0f) — діра в контурі",
+				i, r, maxR)
+		}
+		if vx[i] == 0 && vy[i] == 0 {
+			t.Errorf("вершина %d у початку координат — незаповнений елемент масиву", i)
+		}
 	}
 }

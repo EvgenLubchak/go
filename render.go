@@ -30,11 +30,14 @@ func (g *Game) drawInputDirs(screen *ebiten.Image) {
 
 	if aiPlayer && g.player.Brain != nil {
 		// [SELF-PLAY] Напрямок з дії мережі: розкладаємо вектор dirs8 на осі.
-		d := dirs8[g.player.Brain.lastAction]
-		on[0] = d[1] < -0.01
-		on[1] = d[1] > 0.01
-		on[2] = d[0] < -0.01
-		on[3] = d[0] > 0.01
+		// [УХИЛЕННЯ] У девʼятої дії напрямку немає — хрест лишається порожнім.
+		if a := g.player.Brain.lastAction; a < brainWhiskers {
+			d := dirs8[a]
+			on[0] = d[1] < -0.01
+			on[1] = d[1] > 0.01
+			on[2] = d[0] < -0.01
+			on[3] = d[0] > 0.01
+		}
 	} else {
 		on[0] = ebiten.IsKeyPressed(ebiten.KeyArrowUp) || ebiten.IsKeyPressed(ebiten.KeyW)
 		on[1] = ebiten.IsKeyPressed(ebiten.KeyArrowDown) || ebiten.IsKeyPressed(ebiten.KeyS)
@@ -186,6 +189,35 @@ func bodyRestRadius(i int) float32 {
 //
 // Масштаб від пружини (updateBody) — скаляр, він не конфліктує з напрямком форми:
 // розмір говорить про рух, форма — про намір.
+// bodyVertices — вісім вершин контуру тіла. Винесено з drawBody НЕ заради краси:
+// саме тут жила вада, коли масив мав розмір brainActions (9), а заповнювався на 8 —
+// девʼята вершина лишалась у початку координат, і тіло тягнулось у кут екрана.
+//
+// Окремою функцією, бо це єдиний спосіб перевірити геометрію тестом: малювання
+// відразу йде в ebiten і назовні нічого не віддає.
+//
+// Розмір масиву — brainWhiskers (кількість НАПРЯМКІВ), а не brainActions (кількість
+// ДІЙ). З появою ухилення це різні числа, і плутати їх не можна ніде.
+func bodyVertices(p Pixel, cx, cy, scale float32) (vx, vy [brainWhiskers]float32) {
+	var mean float32
+	hasQ := p.Brain != nil
+	if hasQ {
+		for i := 0; i < brainWhiskers; i++ {
+			mean += p.Brain.lastQ[i]
+		}
+		mean /= brainWhiskers
+	}
+	for i := 0; i < brainWhiskers; i++ {
+		r := bodyRestRadius(i) * scale
+		if hasQ {
+			r *= 1 + bodyQStretch*tanh((p.Brain.lastQ[i]-mean)/bodyQScale)
+		}
+		vx[i] = cx + dirs8[i][0]*r
+		vy[i] = cy + dirs8[i][1]*r
+	}
+	return vx, vy
+}
+
 func drawBody(screen *ebiten.Image, p Pixel, col color.RGBA) {
 	cx := p.X + pixelSize/2
 	cy := p.Y + pixelSize/2
@@ -195,26 +227,7 @@ func drawBody(screen *ebiten.Image, p Pixel, col color.RGBA) {
 		scale = 1 // юніт, створений в обхід resetFur (тести)
 	}
 
-	// Середнє Q — точка відліку: цікавить ПЕРЕВАГА дії над іншими, а не абсолют.
-	var mean float32
-	hasQ := p.Brain != nil
-	if hasQ {
-		for i := 0; i < brainWhiskers; i++ {
-			mean += p.Brain.lastQ[i]
-		}
-		mean /= brainActions
-	}
-
-	// Вісім вершин контуру.
-	var vx, vy [brainActions]float32
-	for i := 0; i < brainWhiskers; i++ {
-		r := bodyRestRadius(i) * scale
-		if hasQ {
-			r *= 1 + bodyQStretch*tanh((p.Brain.lastQ[i]-mean)/bodyQScale)
-		}
-		vx[i] = cx + dirs8[i][0]*r
-		vy[i] = cy + dirs8[i][1]*r
-	}
+	vx, vy := bodyVertices(p, cx, cy, scale)
 
 	// [ОРГАНІКА] Зʼєднуємо вершини НЕ прямими, а квадратичними кривими: сама
 	// вершина стає контрольною точкою, а крива проходить через СЕРЕДИНИ ребер.
@@ -229,10 +242,10 @@ func drawBody(screen *ebiten.Image, p Pixel, col color.RGBA) {
 		return (vx[i] + vx[j]) / 2, (vy[i] + vy[j]) / 2
 	}
 	path := &vector.Path{}
-	sx, sy := mid(brainActions-1, 0)
+	sx, sy := mid(brainWhiskers-1, 0)
 	path.MoveTo(sx, sy)
 	for i := 0; i < brainWhiskers; i++ {
-		nx, ny := mid(i, (i+1)%brainActions)
+		nx, ny := mid(i, (i+1)%brainWhiskers)
 		path.QuadTo(vx[i], vy[i], nx, ny) // вершина = контрольна точка
 	}
 	path.Close()

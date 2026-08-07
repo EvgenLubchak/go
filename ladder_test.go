@@ -41,6 +41,17 @@ func ladderSkip(t *testing.T) {
 	}
 }
 
+// ladderDir — напрямок дії; для ДІЇ УХИЛЕННЯ напрямку немає, тож нуль.
+//
+// Драбина моделює рух від обраних дій, а девʼята дія тіла не рухає. Без цієї
+// перевірки dirs8[actionDodge] падає — і це правильно, бо масив тепер рівно на 8.
+func ladderDir(a int) (float32, float32) {
+	if a >= brainWhiskers {
+		return 0, 0
+	}
+	return dirs8[a][0], dirs8[a][1]
+}
+
 // ladderState — вхід мережі для щабля 1: умова в слоті 0, решта нулі.
 // Один слот навмисно: рівно так само в грі подавався біт стилю.
 func ladderState(bit int) [brainInputs]float32 {
@@ -1077,7 +1088,7 @@ func ladderFaithful(delay int, gamma float32, steps int, dense bool) (hit float3
 			buf = &nStepBuf{n: delay + 1, gamma: n.gamma, net: n}
 		}
 		// Зміщення накопичується з РЕАЛЬНО обраних дій — як позиція юніта в грі.
-		ox, oy := dirs8[a0][0], dirs8[a0][1]
+		ox, oy := ladderDir(a0)
 		prev, prevA := s0, a0
 		for ph := 1; ph <= delay; ph++ {
 			cur := st(style, dir, ph, ox/float32(delay), oy/float32(delay))
@@ -1087,8 +1098,9 @@ func ladderFaithful(delay int, gamma float32, steps int, dense bool) (hit float3
 			n.train(qBatch)
 			done++
 			prevA = b.selectAction(cur)
-			ox += dirs8[prevA][0]
-			oy += dirs8[prevA][1]
+			dx, dy := ladderDir(prevA)
+			ox += dx
+			oy += dy
 			prev = cur
 		}
 		if dense {
@@ -1226,7 +1238,7 @@ func ladderCapacity(diversity, batch, delay int, gamma float32, steps int) (hit 
 			}
 		}
 		buf := &nStepBuf{n: delay + 1, gamma: n.gamma, net: n}
-		ox, oy := dirs8[a0][0], dirs8[a0][1]
+		ox, oy := ladderDir(a0)
 		prev, prevA := s0, a0
 		for ph := 1; ph <= delay; ph++ {
 			cur := st(style, dir, ph, ox/float32(delay), oy/float32(delay))
@@ -1234,8 +1246,9 @@ func ladderCapacity(diversity, batch, delay int, gamma float32, steps int) (hit 
 			n.train(qBatch)
 			done++
 			prevA = b.selectAction(cur)
-			ox += dirs8[prevA][0]
-			oy += dirs8[prevA][1]
+			dx, dy := ladderDir(prevA)
+			ox += dx
+			oy += dy
 			prev = cur
 		}
 		buf.push(prev, prevA, float32(committed), prev)
@@ -1415,7 +1428,7 @@ func ladderSplit(hotCap, coldCap, delay int, gamma, hotFrac float32, steps int) 
 				right++
 			}
 		}
-		ox, oy := dirs8[a0][0], dirs8[a0][1]
+		ox, oy := ladderDir(a0)
 		prev, prevA := s0, a0
 		for ph := 1; ph <= delay; ph++ {
 			cur := st(style, dir, ph, ox/float32(delay), oy/float32(delay))
@@ -1423,8 +1436,9 @@ func ladderSplit(hotCap, coldCap, delay int, gamma, hotFrac float32, steps int) 
 			sb.train(n, qBatch, hotFrac)
 			done++
 			prevA = b.selectAction(cur)
-			ox += dirs8[prevA][0]
-			oy += dirs8[prevA][1]
+			dx, dy := ladderDir(prevA)
+			ox += dx
+			oy += dy
 			prev = cur
 		}
 		sb.push(transition{s: prev, a: prevA, r: float32(committed), s2: prev, terminal: true})
