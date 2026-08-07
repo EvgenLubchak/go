@@ -268,7 +268,7 @@ var (
 		Count:           5,
 		Faction:         factionPlayer, // ← свій; рій його атакує, він рій
 		WeightsFile:     allyFile,
-		Respawns:        5,
+		Respawns:        2,
 		MaxHP:           3,
 		Color:           color.RGBA{80, 170, 255, 255}, // блакитний — свої
 		Label:           "",
@@ -298,7 +298,7 @@ var (
 		Count:           3,
 		Faction:         factionPlayer,
 		WeightsFile:     allyKillerFile,
-		Respawns:        3,
+		Respawns:        2,
 		MaxHP:           15,
 		Color:           color.RGBA{140, 100, 255, 255}, // фіолетовий — твій вбивця
 		Label:           "≡_≡",
@@ -418,7 +418,7 @@ var (
 		Faction:         factionEnemy,
 		WeightsFile:     wardenFile,
 		Respawns:        1,  // [РЕСПАУН] три життя: щоб бойовий досвід набирався, а не обривався першою смертю
-		MaxHP:           21, // удар пробілом обходить невразливість
+		MaxHP:           31, // удар пробілом обходить невразливість
 		//                                                  і дає ~12 шкоди/с → це ~10 секунд бою
 		Color:     color.RGBA{255, 215, 90, 255}, // золотий — не сплутати ні з ким
 		Label:     "W_W",
