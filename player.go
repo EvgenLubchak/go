@@ -206,5 +206,6 @@ func (g *Game) updatePlayer() {
 	// ворс завис би на місці спавну, а смуги розтяглись би через пів карти.
 	updateFur(&g.player)
 	updateBalls(&g.player)
+	updateTentacle(&g.player)
 	updateBody(&g.player) // [ТІЛО] у гравця немає мозку → лише пружина, без Q-форми
 }

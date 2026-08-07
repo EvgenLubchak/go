@@ -2499,3 +2499,66 @@ func TestBallsLagBehindTheBody(t *testing.T) {
 		}
 	}
 }
+
+// TestTentacleWaveTravelsDownTheChain — [ВІДРОСТОК] дві властивості, на яких тримається
+// вся анімація щупальця, і кожна ламається молча.
+//
+//  1. кожен суглоб тягнеться за ПОПЕРЕДНІМ, а не за тілом — тому хвиля біжить згори
+//     вниз, а не смикає всі точки одночасно;
+//  2. жорсткість ПАДАЄ вниз по ланцюжку — кінчик відстає сильніше за основу, і саме з
+//     цієї різниці виходить S-подібний вигин на поворотах.
+func TestTentacleWaveTravelsDownTheChain(t *testing.T) {
+	u := &Pixel{X: 500, Y: 500}
+	u.resetFur()
+
+	// На спавні висить прямо вниз від НИЗУ тіла, без стрибка.
+	cx, cy := u.X+pixelSize/2, u.Y+pixelSize/2
+	rx, ry := tentRoot(cx, cy)
+	if ry <= cy {
+		t.Errorf("корінь відростка не під тілом: %.1f при центрі %.1f", ry, cy)
+	}
+	for i := 0; i < tentJoints; i++ {
+		wantY := ry + tentSeg*float32(i+1)
+		if math.Abs(float64(u.Tent[i][1]-wantY)) > 1e-4 || math.Abs(float64(u.Tent[i][0]-rx)) > 1e-4 {
+			t.Errorf("суглоб %d на спавні не на місці: (%.1f, %.1f) проти (%.1f, %.1f)",
+				i, u.Tent[i][0], u.Tent[i][1], rx, wantY)
+		}
+	}
+
+	// Різко зсуваємо тіло вбік і робимо ОДИН кадр.
+	before := u.Tent
+	u.X += 40
+	updateTentacle(u)
+
+	// 1) Хвиля йде згори вниз: перший суглоб зрушив більше за останній.
+	move := make([]float64, tentJoints)
+	for i := 0; i < tentJoints; i++ {
+		move[i] = math.Abs(float64(u.Tent[i][0] - before[i][0]))
+	}
+	for i := 1; i < tentJoints; i++ {
+		if move[i] >= move[i-1] {
+			t.Errorf("суглоб %d зрушив на %.3f, а попередній лише на %.3f — хвиля не "+
+				"йде вниз по ланцюжку", i, move[i], move[i-1])
+		}
+	}
+	t.Logf("зсув за кадр по ланцюжку: %.2f → %.2f → %.2f", move[0], move[1], move[2])
+
+	// 2) Кінчик мусить помітно ВІДСТАВАТИ від основи — інакше це палиця, а не щупальце.
+	if move[tentJoints-1] > move[0]*0.5 {
+		t.Errorf("кінчик відстає замало (%.3f проти %.3f у основи) — вигину не буде",
+			move[tentJoints-1], move[0])
+	}
+
+	// 3) І все ж вирівнюється, якщо тіло стоїть.
+	for f := 0; f < 400; f++ {
+		updateTentacle(u)
+	}
+	cx = u.X + pixelSize/2
+	rx, ry = tentRoot(cx, cy)
+	for i := 0; i < tentJoints; i++ {
+		if math.Abs(float64(u.Tent[i][0]-rx)) > 0.5 {
+			t.Errorf("суглоб %d не вирівнявся під коренем: %.2f проти %.2f",
+				i, u.Tent[i][0], rx)
+		}
+	}
+}

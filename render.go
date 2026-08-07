@@ -167,6 +167,21 @@ func drawBalls(screen *ebiten.Image, p *Pixel) {
 	}
 }
 
+// drawTentacle — [ВІДРОСТОК] ламана від низу тіла крізь суглоби, з кулькою на кінці.
+//
+// Малюємо ПЕРЕД кульками, але ПІСЛЯ тіла: відросток має виходити з-під корпуса, а
+// кульки лишатись поверх усього.
+func drawTentacle(screen *ebiten.Image, p *Pixel) {
+	cx := p.X + pixelSize/2
+	cy := p.Y + pixelSize/2
+	px, py := tentRoot(cx, cy)
+	for i := 0; i < tentJoints; i++ {
+		vector.StrokeLine(screen, px, py, p.Tent[i][0], p.Tent[i][1], tentWidth, p.Color, true)
+		px, py = p.Tent[i][0], p.Tent[i][1]
+	}
+	vector.FillCircle(screen, px, py, tentTipBall, p.Color, true)
+}
+
 // bodyRestRadius — радіус «спокійного» контуру вздовж напрямку dirs8[i].
 //
 // Відстань від центра до контуру КВАДРАТА з півстороною R уздовж одиничного
@@ -430,10 +445,12 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			}
 			drawFur(screen, &g.units[i])
 			drawPixel(screen, e)
+			drawTentacle(screen, &g.units[i])
 			drawBalls(screen, &g.units[i])
 		}
 		drawFur(screen, &g.player)
 		drawPixel(screen, g.player)
+		drawTentacle(screen, &g.player)
 		drawBalls(screen, &g.player)
 
 		drawDash(screen, &g.player)
