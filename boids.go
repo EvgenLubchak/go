@@ -194,6 +194,7 @@ func (g *Game) calcAcceleration() {
 						if e.DodgeCooldown == 0 {
 							e.DodgeTimer = dodgeInvuln
 							e.DodgeCooldown = dodgeCooldown
+							dodgeBurst(e, target)
 						}
 						// Перезарядка ще йде — дію змарновано. Це навмисно: інакше
 						// спам був би безкарний.
@@ -273,6 +274,12 @@ func (g *Game) updateUnits() {
 		if e.KnockTimer > 0 {
 			e.KnockTimer--
 			currentMaxSpeed *= knockSpeedMulti
+		}
+		// [ВІДКИД] Поки триває ухилення, стеля піднята — інакше кліп зʼїв би стрибок за
+		// один кадр, точно як він зʼїдав би віддачу удару. Та сама механіка, інша
+		// причина, тож окремий множник, а не спільний із knockSpeedMulti.
+		if e.DodgeTimer > 0 && dodgeDashSpeed > currentMaxSpeed {
+			currentMaxSpeed = dodgeDashSpeed
 		}
 		speed := float32(math.Sqrt(float64(e.VelX*e.VelX + e.VelY*e.VelY)))
 		if speed > currentMaxSpeed {
@@ -403,6 +410,34 @@ func (g *Game) nearestTargetFor(u *Pixel) *Pixel {
 		return &g.player
 	}
 	return best
+}
+
+// dodgeBurst — [ВІДКИД] стрибок убік від лінії загрози.
+//
+// ПЕРПЕНДИКУЛЯРНО, а не «геть»: ривок гравця криє 50px, тож відхід назад його не
+// рятує — він просто дожене. Убік вистачає корпуса.
+//
+// НАПРЯМОК ОБИРАЄ ФІЗИКА, а не мережа, і це принципово. Якби бік вибирала мережа, у
+// задачу повернувся б ДОБУТОК (дія = f(телеграф, геометрія)) — а ми щойно виміряли, що
+// саме добуток із затримкою її й ламає (драбина: 0 з 4 проти 95.6% без затримки).
+// Рішення лишається суто ЧАСОВИМ — тим режимом, який учень бере.
+//
+// Агент при цьому не позбавлений впливу: бік визначається тим, куди юніт УЖЕ хилиться,
+// тобто його власним позиціюванням до моменту ухилення.
+func dodgeBurst(e *Pixel, threat *Pixel) {
+	if threat == nil {
+		return
+	}
+	tx, ty := e.X-threat.X, e.Y-threat.Y
+	d := float32(math.Sqrt(float64(tx*tx + ty*ty)))
+	if d < 0.001 {
+		return // збіглись у точку — перпендикуляра немає
+	}
+	px, py := -ty/d, tx/d // поворот на 90°
+	if e.VelX*px+e.VelY*py < 0 {
+		px, py = -px, -py // у той бік, куди вже рухався
+	}
+	e.VelX, e.VelY = px*dodgeDashSpeed, py*dodgeDashSpeed
 }
 
 // updateFur — [ВОРС] один крок фізики хутра.

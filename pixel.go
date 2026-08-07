@@ -212,8 +212,8 @@ var (
 		Count:       0, // скільки їх на полі
 		Faction:     factionEnemy,
 		WeightsFile: brainFile,
-		MaxHP:       2,                            // живучий — більше часу на навчання
-		Respawns:    0,                            // [РЕСПАУН] безкінечно: стала популяція = порівнянні метрики
+		MaxHP:       10,                           // живучий — більше часу на навчання
+		Respawns:    1,                            // [РЕСПАУН] безкінечно: стала популяція = порівнянні метрики
 		Color:       color.RGBA{0, 255, 100, 255}, // зелений — учень
 		Label:       "",
 		IsLearner:   true, // ← саме це вмикає мозок, а не мітка
@@ -240,8 +240,8 @@ var (
 		Count:           0, // мало: вони сильніші за рій
 		Faction:         factionEnemy,
 		WeightsFile:     killerFile,
-		Respawns:        0,                            // [РЕСПАУН] безкінечно — вони частина сталого складу
-		MaxHP:           8,                            // витримує на удар більше за рій
+		Respawns:        3,                            // [РЕСПАУН] безкінечно — вони частина сталого складу
+		MaxHP:           10,                           // витримує на удар більше за рій
 		Color:           color.RGBA{255, 90, 60, 255}, // червоний — щоб одразу вирізняти
 		Label:           "",
 		IsLearner:       true,
@@ -295,10 +295,10 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           0,
+		Count:           1,
 		Faction:         factionPlayer,
 		WeightsFile:     allyKillerFile,
-		Respawns:        1,
+		Respawns:        0,
 		MaxHP:           10,
 		Color:           color.RGBA{140, 100, 255, 255}, // фіолетовий — твій вбивця
 		Label:           "≡_≡",
@@ -418,7 +418,7 @@ var (
 		Faction:         factionEnemy,
 		WeightsFile:     wardenFile,
 		Respawns:        1,  // [РЕСПАУН] три життя: щоб бойовий досвід набирався, а не обривався першою смертю
-		MaxHP:           20, // удар пробілом обходить невразливість
+		MaxHP:           31, // удар пробілом обходить невразливість
 		//                                                  і дає ~12 шкоди/с → це ~10 секунд бою
 		Color:     color.RGBA{255, 215, 90, 255}, // золотий — не сплутати ні з ким
 		Label:     "",

@@ -2394,3 +2394,56 @@ func TestBodyVerticesHaveNoHole(t *testing.T) {
 		}
 	}
 }
+
+// TestDodgeBurstClearsTheLine — [ВІДКИД] стрибок мусить ЗНІМАТИ тіло з лінії удару.
+//
+// Суто часове ухилення мало вікно 20 кадрів із циклу 200 — 10% часу, стільки ж дає
+// випадкове натискання. Зміряно: навчений блокував лише 16% ривків, ледве вибиваючись
+// за випадок. Відкид розширює вікно, бо промах у таймінгу компенсується тим, що тіла
+// вже немає на лінії.
+func TestDodgeBurstClearsTheLine(t *testing.T) {
+	// Загроза ліворуч, юніт праворуч від неї.
+	threat := &Pixel{X: 300, Y: 300}
+	e := &Pixel{X: 360, Y: 300, Cfg: ConfigWarden, VelY: 0.3} // хилиться вниз
+	dodgeBurst(e, threat)
+
+	// 1) Перпендикулярно: загроза по осі X, отже відкид мусить бути по Y.
+	if math.Abs(float64(e.VelX)) > 0.01 {
+		t.Errorf("відкид не перпендикулярний: VelX = %.2f, чекали ~0", e.VelX)
+	}
+	// 2) У той бік, куди юніт УЖЕ хилився.
+	if e.VelY <= 0 {
+		t.Errorf("відкид проти власного руху: VelY = %.2f при нахилі +0.3", e.VelY)
+	}
+	// 3) Швидкість — саме відкидна.
+	sp := math.Hypot(float64(e.VelX), float64(e.VelY))
+	if math.Abs(sp-dodgeDashSpeed) > 0.01 {
+		t.Errorf("швидкість відкиду %.2f, чекали %.2f", sp, dodgeDashSpeed)
+	}
+
+	// 4) За час невразливості тіло мусить зійти щонайменше на КОРПУС.
+	v, dist := float32(dodgeDashSpeed), float32(0)
+	cover := -1
+	for f := 0; f < dodgeInvuln; f++ {
+		dist += v
+		v *= damping
+		if cover < 0 && dist >= pixelSize {
+			cover = f + 1
+		}
+	}
+	if dist < pixelSize {
+		t.Errorf("за %d кадрів відкид дав %.1fpx при корпусі %d — лінія не звільняється",
+			dodgeInvuln, dist, pixelSize)
+	}
+	t.Logf("корпус (%dpx) покрито за %d кадрів, усього %.1fpx за %d кадрів",
+		pixelSize, cover, dist, dodgeInvuln)
+
+	// 5) Вікно натискання мусить ПОМІТНО розширитись проти суто часового.
+	oldWin, newWin := dodgeInvuln, dashWindup-cover
+	if newWin <= oldWin {
+		t.Errorf("вікно не розширилось: було %d кадрів, стало %d", oldWin, newWin)
+	}
+	t.Logf("вікно натискання: %d → %d кадрів (%.0f%% → %.0f%% циклу %d)",
+		oldWin, newWin, 100*float64(oldWin)/dashCadence,
+		100*float64(newWin)/dashCadence, dashCadence)
+}
