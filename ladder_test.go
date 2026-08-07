@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math/rand"
 	"os"
 	"testing"
@@ -1302,4 +1303,167 @@ func TestLadderRetention(t *testing.T) {
 		t.Logf("%12d %14d %10.1f%%%s", cap, cap/66, acc/float32(runs), mark)
 	}
 	t.Logf("орієнтир: лише переходи рішення (4096 з них) 70.4%%")
+}
+
+// splitBuf — ДВА буфери: гарячий для ланцюжків, що привели до нагороди, і холодний для
+// решти. Разом займають стільки ж, скільки один буфер поточного розміру.
+//
+// [ЯКА ОЗНАКА «ГАРЯЧЕ»] Не «має нагороду»: перехід, де ухвалюється РІШЕННЯ, має нагороду
+// НУЛЬ — вона приходить через delay кадрів. Саме на цьому провалилась стратифікація.
+// Тому ознака РЕТРОАКТИВНА: коли нагорода приходить, у гарячий буфер іде весь ланцюжок
+// кадрів, що до неї привів.
+type splitBuf struct {
+	hot, cold   []transition
+	hotCap      int
+	coldCap     int
+	hi, ci      int
+	hotN, coldN int
+	window      []transition // останні кадри, ще не віднесені до жодного буфера
+	winCap      int
+}
+
+func newSplitBuf(hotCap, coldCap, winCap int) *splitBuf {
+	return &splitBuf{
+		hot: make([]transition, hotCap), cold: make([]transition, coldCap),
+		hotCap: hotCap, coldCap: coldCap, winCap: winCap,
+	}
+}
+
+func (b *splitBuf) push(t transition) {
+	b.window = append(b.window, t)
+	hasReward := t.r > 0.001 || t.r < -0.001
+	if hasReward {
+		// Нагорода прийшла — увесь ланцюжок, що до неї привів, стає гарячим.
+		for _, w := range b.window {
+			b.hot[b.hi] = w
+			b.hi = (b.hi + 1) % b.hotCap
+			if b.hotN < b.hotCap {
+				b.hotN++
+			}
+		}
+		b.window = b.window[:0]
+		return
+	}
+	if len(b.window) > b.winCap {
+		// Вікно переповнилось без нагороди — найстаріший кадр іде в холодний.
+		b.cold[b.ci] = b.window[0]
+		b.ci = (b.ci + 1) % b.coldCap
+		if b.coldN < b.coldCap {
+			b.coldN++
+		}
+		b.window = b.window[1:]
+	}
+}
+
+func (b *splitBuf) train(n *Net, k int, hotFrac float32) {
+	if b.hotN+b.coldN < qMinReplay {
+		return
+	}
+	for i := 0; i < k; i++ {
+		var t transition
+		if b.hotN > 0 && (b.coldN == 0 || rand.Float32() < hotFrac) {
+			t = b.hot[rand.Intn(b.hotN)]
+		} else {
+			t = b.cold[rand.Intn(b.coldN)]
+		}
+		n.tdUpdate(t.s, t.a, t.r, t.s2, t.terminal)
+	}
+}
+
+// ladderSplit — та сама задача, але з двома буферами й БЕЗ n-step.
+//
+// Без n-step навмисно: так само, як у грі, де перехід рішення має нагороду нуль, а
+// кредит мусить пройти ланцюжком. Це найсуворіший варіант.
+func ladderSplit(hotCap, coldCap, delay int, gamma, hotFrac float32, steps int) (hit float32) {
+	saved := qEpsilonConst
+	qEpsilonConst = 0.05
+	defer func() { qEpsilonConst = saved }()
+
+	n := NewNet()
+	n.mem = resolveMemContract(MemoryStack, 1, 10, 0, 0)
+	n.gamma, n.clip = resolveHorizon(gamma, 0)
+	b := NewBrainWith(n)
+	sb := newSplitBuf(hotCap, coldCap, delay+2)
+
+	st := func(style, dir, phase int, ox, oy float32) [brainInputs]float32 {
+		var s [brainInputs]float32
+		s[0] = float32(style)
+		s[1], s[2] = dirs8[dir][0], dirs8[dir][1]
+		s[3] = float32(phase) / float32(delay+1)
+		s[4], s[5] = ox, oy
+		return s
+	}
+	want := func(style, dir int) int {
+		if style == 0 {
+			return (dir + brainActions/2) % brainActions
+		}
+		return dir
+	}
+
+	done, right, total := 0, 0, 0
+	for done < steps {
+		style, dir := rand.Intn(2), rand.Intn(brainActions)
+		s0 := st(style, dir, 0, 0, 0)
+		a0 := b.selectAction(s0)
+		committed := -1
+		if a0 == want(style, dir) {
+			committed = 1
+		}
+		if done > steps/2 {
+			total++
+			if committed == 1 {
+				right++
+			}
+		}
+		ox, oy := dirs8[a0][0], dirs8[a0][1]
+		prev, prevA := s0, a0
+		for ph := 1; ph <= delay; ph++ {
+			cur := st(style, dir, ph, ox/float32(delay), oy/float32(delay))
+			sb.push(transition{s: prev, a: prevA, r: 0, s2: cur})
+			sb.train(n, qBatch, hotFrac)
+			done++
+			prevA = b.selectAction(cur)
+			ox += dirs8[prevA][0]
+			oy += dirs8[prevA][1]
+			prev = cur
+		}
+		sb.push(transition{s: prev, a: prevA, r: float32(committed), s2: prev, terminal: true})
+		sb.train(n, qBatch, hotFrac)
+		done++
+	}
+	if total > 0 {
+		hit = 100 * float32(right) / float32(total)
+	}
+	return hit
+}
+
+// TestLadderSplitBuffer — два буфери проти простого більшого, при РІВНІЙ памʼяті.
+func TestLadderSplitBuffer(t *testing.T) {
+	ladderSkip(t)
+	const runs, steps = 3, 120000
+	savedCap := qReplaySize
+	defer func() { qReplaySize = savedCap }()
+
+	t.Logf("Розведений буфер, чесні заповнювачі, добуток + затримка 65, γ0.99, БЕЗ n-step")
+	t.Logf("%34s %12s", "схема (памʼять у переходах)", "точність")
+
+	// Базові лінії: один кільцевий буфер.
+	for _, cap := range []int{4096, 16384} {
+		qReplaySize = cap
+		acc := float32(0)
+		for r := 0; r < runs; r++ {
+			h, _ := ladderFaithful(65, 0.99, steps, false)
+			acc += h
+		}
+		t.Logf("%34s %10.1f%%", fmt.Sprintf("один буфер %d", cap), acc/float32(runs))
+	}
+	// Два буфери тієї самої сумарної місткості.
+	for _, c := range []struct{ hot, cold int }{{3072, 1024}, {12288, 4096}} {
+		acc := float32(0)
+		for r := 0; r < runs; r++ {
+			acc += ladderSplit(c.hot, c.cold, 65, 0.99, 0.75, steps)
+		}
+		t.Logf("%34s %10.1f%%",
+			fmt.Sprintf("гарячий %d + холодний %d", c.hot, c.cold), acc/float32(runs))
+	}
 }
