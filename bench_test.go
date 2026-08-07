@@ -116,6 +116,9 @@ type benchCfg struct {
 	// всередині одного прогону цієї підлоги не має.
 	warmup int
 
+	// [УТРИМАННЯ] Місткість буфера досвіду; 0 = конфігова/глобальна.
+	replayCap int
+
 	speed  float32 // MaxSpeed типу. qClip масштабується автоматично
 	sight  float32 // sightRange; 0 = лишити поточний
 	indep  bool    // true = sharedBrain=false (у кожного юніта СВОЯ мережа)
@@ -337,6 +340,31 @@ func TestMemoryBench(t *testing.T) {
 			{name: "separation ВИМКНЕНО", frames: 4, skip: 10, units: 8, noSeparation: true},
 			{name: "одинак: separation як є", frames: 4, skip: 10, units: 1},
 			{name: "одинак: separation ВИМКНЕНО", frames: 4, skip: 10, units: 1, noSeparation: true},
+		}
+	}
+	if os.Getenv("BENCH_SET") == "retention" {
+		// [УТРИМАННЯ] Переносимо з драбини в гру головну знахідку.
+		//
+		// Буфер кільцевий. Стражник отримує подію приблизно в 0.7% кадрів, тож у
+		// стандартних 4096 лишається ~29 бойових подій на всю задачу. Драбина
+		// (TestLadderRetention) показала монотонне сходження до орієнтира зі зростанням
+		// утримання, і що жоден спосіб семплювання цього не замінює.
+		//
+		// ⚠️ Драбина каже «причина знайдена ТАМ», а не «в грі спрацює». Стан гри значно
+		// багатший, подій менше, а вплив буфера на неї ми не міряли ЖОДНОГО разу.
+		// Комірки відрізняються РІВНО одним числом — місткістю.
+		//
+		// Показник — ОТРИМАНО (менше = краще): у грі захисна половина досі стояла
+		// мертво (44%, p = 0.335 навченого проти невченого), і якщо утримання щось
+		// змінює, то саме там.
+		if !combat || !benchDriveSeek || !benchArena {
+			t.Fatal("набір retention вимагає BENCH_COMBAT=1 BENCH_SEEK=1 BENCH_ARENA=1")
+		}
+		w := ConfigWarden
+		cfgs = []benchCfg{
+			{name: "буфер 4096 (як було)", base: &w, units: 1, replayCap: 4096},
+			{name: "буфер 16384", base: &w, units: 1, replayCap: 16384},
+			{name: "буфер 65536 (нове)", base: &w, units: 1, replayCap: 65536},
 		}
 	}
 	if os.Getenv("BENCH_SET") == "oracle" {
@@ -948,6 +976,9 @@ func runBenchTrial(c benchCfg, warmup, measure int, moving, combat bool) (live, 
 	learner.Count = c.units
 	if c.noSeparation {
 		learner.SeparationRate = 0
+	}
+	if c.replayCap > 0 {
+		learner.ReplayCap = c.replayCap
 	}
 	learner.WeightsFile = "" // ефемерні ваги: стенд не читає й не пише файли на диск
 	// [РЕСПАУН] Стенд ЗАВЖДИ ставить безкінечний респаун, хоч би що стояло в конфізі

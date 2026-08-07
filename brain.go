@@ -562,7 +562,19 @@ type Net struct {
 	syncCounter int
 
 	// [DQN: EXPERIENCE REPLAY] кільцевий буфер переходів (frame-stacking шлях).
-	replay     []transition
+	replay []transition
+
+	// [УТРИМАННЯ] Місткість кільця ЦІЄЇ мережі; 0 = глобальний qReplaySize.
+	//
+	// Персонально, а не глобаллю, бо потреба різна на порядки. Рій має щільну нагороду
+	// — у нього кожен кадр несе сигнал, і 4096 вистачає з головою. Розріджений бойовий
+	// тип отримує ~0.7% кадрів із подією, тож у тих самих 4096 лишається ~29 бойових
+	// подій на всю задачу.
+	//
+	// Драбина (див. TestLadderRetention) показала, що керує саме УТРИМАННЯ, а не
+	// семплювання: точність 34.4% при 62 утриманих переходах рішення, 62.3% при 496,
+	// 69.7% при 3971 — монотонно й до орієнтира.
+	replayCap  int
 	replayHead int
 	replayFull bool
 
@@ -773,7 +785,7 @@ func sigmoid(x float32) float32 {
 func NewNet() *Net {
 	// Дефолтний контракт — із глобалей. Так поводяться мережі без конфігу:
 	// мозок-жертва в self-play і всі тести, що створюють Net напряму.
-	n := &Net{mem: resolveMemContract(MemoryDefault, 0, 0, 0, 0)}
+	n := &Net{mem: resolveMemContract(MemoryDefault, 0, 0, 0, 0), replayCap: qReplaySize}
 	n.gamma, n.clip = resolveHorizon(0, 0) // дефолт із глобалей
 	s1 := float32(math.Sqrt(1.0 / brainInputs))
 	for j := range n.W1 {

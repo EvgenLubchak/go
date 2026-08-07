@@ -131,11 +131,15 @@ func (n *Net) forwardQTarget(state [brainInputs]float32) [brainActions]float32 {
 // нема. (У незалежному режимі замок завжди вільний → майже безкоштовний.)
 func (n *Net) remember(t transition) {
 	n.mu.Lock()
+	cap := n.replayCap
+	if cap <= 0 {
+		cap = qReplaySize // мережа, створена в обхід NewNet (тести)
+	}
 	if n.replay == nil {
-		n.replay = make([]transition, qReplaySize)
+		n.replay = make([]transition, cap)
 	}
 	n.replay[n.replayHead] = t
-	n.replayHead = (n.replayHead + 1) % qReplaySize
+	n.replayHead = (n.replayHead + 1) % cap
 	if n.replayHead == 0 {
 		n.replayFull = true
 	}
@@ -145,7 +149,7 @@ func (n *Net) remember(t transition) {
 // replayLen — скільки переходів реально лежить у буфері.
 func (n *Net) replayLen() int {
 	if n.replayFull {
-		return qReplaySize
+		return len(n.replay)
 	}
 	return n.replayHead
 }
