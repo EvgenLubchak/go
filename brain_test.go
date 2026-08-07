@@ -2626,3 +2626,59 @@ func TestFurKnobsAreReal(t *testing.T) {
 	t.Logf("коліна %d, довжина %g, товщина %g→%g, корінь на %.1fpx вище центру",
 		furJoints, float64(furLen), float64(furWidthRoot), float64(furWidthTip), cy-fy)
 }
+
+// TestKnockRecoilIsPerType — [ВІДСІЧ] персональна, і саме в НАПАДНИКА.
+//
+// Відсіч — навʼязаний рух: агент її не обирав. А progress, з якого росте щільна нагорода
+// «наближайся», рахується з ВЛАСНОЇ швидкості. При глобальних 1.99 відсіч дає до 2.4
+// проти brainForce 0.3 — увосьмеро більше за те, що агент вирішує, тобто нагорода за
+// зближення стає нагородою за те, що його відкинуло.
+//
+// Тест стежить за двома речами: відсіч береться в того, ХТО БʼЄ (а не в цілі), і типи з
+// щільною нагородою справді лишились на низькій.
+func TestKnockRecoilIsPerType(t *testing.T) {
+	// 1) Береться в нападника.
+	slow := &Pixel{X: 100, Y: 100, KnockRecoil: 0.1}
+	fast := &Pixel{X: 130, Y: 100, KnockRecoil: 3.0}
+
+	target := &Pixel{X: 130, Y: 100, HP: 99, MaxHP: 99}
+	applyImpactDamage(slow, target, 1)
+	slowRecoil := math.Hypot(float64(slow.VelX), float64(slow.VelY))
+
+	target2 := &Pixel{X: 100, Y: 100, HP: 99, MaxHP: 99}
+	applyImpactDamage(fast, target2, 1)
+	fastRecoil := math.Hypot(float64(fast.VelX), float64(fast.VelY))
+
+	if !(fastRecoil > slowRecoil*5) {
+		t.Errorf("відсіч не персональна: %.2f проти %.2f при коефіцієнтах 3.0 і 0.1",
+			fastRecoil, slowRecoil)
+	}
+
+	// 2) Нуль = глобальний дефолт.
+	def := &Pixel{X: 100, Y: 100}
+	t3 := &Pixel{X: 130, Y: 100, HP: 99, MaxHP: 99}
+	applyImpactDamage(def, t3, 1)
+	want := knockbackImpulse * knockbackRecoil
+	if got := math.Hypot(float64(def.VelX), float64(def.VelY)); math.Abs(got-want) > 0.01 {
+		t.Errorf("без персональної відсічі взято %.2f, а глобальна дає %.2f", got, want)
+	}
+
+	// 3) ПРАВИЛО: типи зі щільною нагородою «наближайся» мусять мати НИЗЬКУ відсіч.
+	//    Саме тут ловиться недогляд, якщо новому типу забудуть її поставити.
+	for _, c := range []struct {
+		name string
+		cfg  UnitConfig
+	}{
+		{"Learner", ConfigLearner}, {"Killer", ConfigKiller},
+		{"AllyChaser", ConfigAllyChaser}, {"AllyKiller", ConfigAllyKiller},
+		{"Boss", ConfigBoss},
+	} {
+		if c.cfg.CombatOnly {
+			continue // цим щільної нагороди немає, велика відсіч їм не шкодить
+		}
+		if c.cfg.KnockRecoil == 0 || c.cfg.KnockRecoil > 1 {
+			t.Errorf("%s має щільну нагороду «наближайся», але відсіч %.2f — навʼязаний "+
+				"рух перекриє власний (brainForce 0.3)", c.name, c.cfg.KnockRecoil)
+		}
+	}
+}

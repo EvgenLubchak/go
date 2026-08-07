@@ -230,7 +230,13 @@ func applyImpactDamage(attacker, target *Pixel, dmg int) {
 			// Потрібен для «важких» типів: стражник, який відлітає на три корпуси від
 			// кожного удару, перестає бути стражником — його задача тримати місце.
 			tImp := knockbackImpulse * (1 - target.KnockResist)
-			aImp := knockbackImpulse * knockbackRecoil * (1 - attacker.KnockResist)
+			// [ВІДСІЧ] Персональна, якщо тип її задав. Береться в НАПАДНИКА — це його
+			// власна віддача від удару, а не властивість цілі.
+			recoil := float32(knockbackRecoil)
+			if attacker.KnockRecoil > 0 {
+				recoil = attacker.KnockRecoil
+			}
+			aImp := knockbackImpulse * recoil * (1 - attacker.KnockResist)
 
 			target.VelX += nx * tImp
 			target.VelY += ny * tImp
