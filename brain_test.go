@@ -2682,3 +2682,65 @@ func TestKnockRecoilIsPerType(t *testing.T) {
 		}
 	}
 }
+
+// TestStingShootsAtVictimAndCoolsDown — [ЖАЛО] постріл відростка в момент удару.
+//
+// Три речі, і кожна ламається молча:
+//
+//  1. жало летить У ЖЕРТВУ, а не абикуди;
+//  2. КУЛДАУН тримає: наступний удар під час пострілу НЕ перезапускає анімацію —
+//     інакше в щільному бою відросток завис би витягнутим і смикався;
+//  3. після відходу все повертається до обвисання САМО, без окремого коду повернення.
+func TestStingShootsAtVictimAndCoolsDown(t *testing.T) {
+	att := &Pixel{X: 300, Y: 300, HP: 9, MaxHP: 9}
+	att.resetFur()
+	victim := &Pixel{X: 380, Y: 300, HP: 9, MaxHP: 9} // строго праворуч
+
+	applyImpactDamage(att, victim, 1)
+
+	// 1) Напрямок заморожено в бік жертви.
+	if att.StingDirX <= 0.9 || math.Abs(float64(att.StingDirY)) > 0.1 {
+		t.Errorf("жало націлене не в жертву: (%.2f, %.2f), чекали ~(1, 0)",
+			att.StingDirX, att.StingDirY)
+	}
+	if att.StingTimer != stingFrames+stingCooldown {
+		t.Errorf("лічильник %d, чекали %d", att.StingTimer, stingFrames+stingCooldown)
+	}
+
+	// 2) Кулдаун: удар в ІНШИЙ бік під час пострілу не перецілює жало.
+	other := &Pixel{X: 220, Y: 300, HP: 9, MaxHP: 9} // ліворуч
+	applyImpactDamage(att, other, 1)
+	if att.StingDirX <= 0 {
+		t.Error("другий удар перецілив жало — кулдаун не тримає, анімація рватиметься")
+	}
+
+	// 3) Під час активної фази відросток тягнеться ВПРАВО, а не вниз.
+	rootX, _ := tentRoot(att.X+pixelSize/2, att.Y+pixelSize/2)
+	for f := 0; f < stingFrames; f++ {
+		updateTentacle(att)
+	}
+	tipX := att.Tent[tentJoints-1][0]
+	if tipX <= rootX+float32(tentSeg) {
+		t.Errorf("жало не вистрілило: кінчик на %.1f при корені %.1f", tipX, rootX)
+	}
+	t.Logf("виліт за %d кадрів: кінчик на %.0fpx від кореня (у спокої %.0f)",
+		stingFrames, tipX-rootX, float64(tentSeg)*tentJoints)
+
+	// 4) Після відходу повертається до обвисання — саме, без коду повернення.
+	for f := 0; f < stingCooldown+300; f++ {
+		updateTentacle(att)
+	}
+	_, rootY := tentRoot(att.X+pixelSize/2, att.Y+pixelSize/2)
+	tip := att.Tent[tentJoints-1]
+	if math.Abs(float64(tip[0]-rootX)) > 1 {
+		t.Errorf("відросток не повернувся під тіло: x = %.1f при корені %.1f", tip[0], rootX)
+	}
+	if tip[1] <= rootY {
+		t.Errorf("відросток не обвис: y = %.1f при корені %.1f", tip[1], rootY)
+	}
+
+	// 5) Тепер жало знову готове.
+	if att.StingTimer != 0 {
+		t.Errorf("лічильник не обнулився: %d", att.StingTimer)
+	}
+}

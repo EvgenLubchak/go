@@ -248,6 +248,15 @@ func applyImpactDamage(attacker, target *Pixel, dmg int) {
 		}
 	}
 
+	// [ЖАЛО] Постріл відростка в бік жертви. Лише якщо попередній уже відпрацював:
+	// інакше щільний бій перезапускав би анімацію щокадру й жало висіло б витягнутим.
+	if attacker != nil && attacker.StingTimer == 0 {
+		if nx, ny, ok := unitTo(attacker.X, attacker.Y, target.X, target.Y); ok {
+			attacker.StingDirX, attacker.StingDirY = nx, ny
+			attacker.StingTimer = stingFrames + stingCooldown
+		}
+	}
+
 	if attacker != nil && attacker.Brain != nil {
 		attacker.Brain.dmgDealt += dmg
 		attacker.Brain.mDmgDealt += dmg // [МЕТРИКИ] не споживається rewardFor

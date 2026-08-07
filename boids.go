@@ -440,13 +440,27 @@ func updateBalls(u *Pixel) {
 // як у ворсі: ворс стирчить навсібіч і має лишатись прямим у спокої, а щупальце мусить
 // ОБВИСАТИ. З «уніз» у спокої воно висить рівно, а на русі відставання саме вигинає його.
 func updateTentacle(u *Pixel) {
+	if u.StingTimer > 0 {
+		u.StingTimer--
+	}
+
 	cx := u.X + pixelSize/2
 	cy := u.Y + pixelSize/2
 	px, py := tentRoot(cx, cy)
-	stiff := float32(tentStiff)
+
+	// [ЖАЛО] У спокої відросток ОБВИСАЄ (сегмент униз), під час удару — ВИСТРІЛЮЄ в
+	// заморожений напрямок, довшає й твердне. Повернення програмувати не треба: щойно
+	// лічильник вийде, ціль знову «вниз», і те саме відставання поверне його з розмаху.
+	dx, dy := float32(0), float32(1)
+	seg, stiff := float32(tentSeg), float32(tentStiff)
+	if u.StingTimer > stingCooldown {
+		dx, dy = u.StingDirX, u.StingDirY
+		seg, stiff = tentSeg*stingReach, stingStiff
+	}
+
 	for i := 0; i < tentJoints; i++ {
-		u.Tent[i][0] += (px - u.Tent[i][0]) * stiff
-		u.Tent[i][1] += (py + tentSeg - u.Tent[i][1]) * stiff
+		u.Tent[i][0] += (px + dx*seg - u.Tent[i][0]) * stiff
+		u.Tent[i][1] += (py + dy*seg - u.Tent[i][1]) * stiff
 		px, py = u.Tent[i][0], u.Tent[i][1]
 		stiff *= tentFalloff
 	}
