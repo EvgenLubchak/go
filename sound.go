@@ -94,6 +94,10 @@ func generateBeatFromPattern(p drumPattern, difficulty float32) []byte {
 	if bpm > maxBPM {
 		bpm = maxBPM
 	}
+	// [ТЕМП] Єдине місце в проєкті, де є РЕАЛЬНИЙ час: sixteenthSec нижче — секунди, а
+	// не кадри. Тож при зміні gameTPS ритм треба переганяти разом із грою, інакше
+	// половинна швидкість гри й незмінний біт розʼїдуться.
+	bpm *= tpsScale()
 
 	// шістнадцята нота = чверть від чвертної ноти
 	sixteenthSec := (60.0 / bpm) / 4.0
@@ -143,6 +147,12 @@ func writeSamples(buf []byte, startSample int, freq, durationSec, amplitude floa
 		buf[pos+2], buf[pos+3] = lo, hi // правий канал
 	}
 }
+
+// tpsScale — у скільки разів поточний темп швидший за базові 120 тіків.
+//
+// Живе тут, поруч із єдиним споживачем: більше в проєкті реального часу немає, і
+// заводити для цього загальний хелпер означало б натякати, що він є.
+func tpsScale() float64 { return float64(gameTPS) / 120.0 }
 
 // startBeat зупиняє поточний програвач і запускає наступний патерн у циклі.
 // На рестарті — викликати з попереднім скиданням currentPatternIdx = 0.

@@ -479,6 +479,12 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	drawText(screen, fmt.Sprintf("SPD %.1f", playerSpeed), 10, screenWidth-32, 10, cyan)
 	drawText(screen, fmt.Sprintf("DIF %.1f", g.difficulty), 10, screenWidth-32, 25, color.RGBA{255, 140, 50, 255})
 	drawText(screen, fmt.Sprintf("FPS %.0f", fps), 10, screenWidth/2, 10, color.RGBA{150, 150, 150, 255})
+	// [ТЕМП] Цільовий TPS поруч із фактичним: коли вони розходяться, це просадка, а коли
+	// цільовий не той, що очікуєш, — ти просто забув, що перемкнув темп клавішею T.
+	if gameTPS != 120 {
+		drawText(screen, fmt.Sprintf("ТЕМП %d", gameTPS), 10, screenWidth/2+90, 10,
+			color.RGBA{240, 200, 90, 255})
+	}
 
 	// [ЗАМІРИ] TPS окремо від FPS — це РІЗНІ речі, і плутанина між ними вже раз
 	// зіпсувала висновок. FPS = частота МАЛЮВАННЯ (Draw, темп монітора), TPS =

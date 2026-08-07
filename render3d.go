@@ -22,11 +22,17 @@ import (
 // ==========================================================================
 
 const (
-	rayFOV       = math.Pi / 3 // поле зору ~60°
-	rayColW      = 4           // ширина смуги в пікселях (менше = чіткіше, дорожче)
-	rayMaxCell   = 80          // стеля кроків DDA (щоб не зациклитись)
-	rayViewCells = 26.0        // дальність для затемнення (клітинки)
-	spriteScale  = 0.8         // розмір ворога-спрайта відносно стіни-клітинки
+	rayFOV = math.Pi / 3 // поле зору ~60°
+	// Ширина смуги в пікселях. 1 = піксельна чіткість країв замість сходинок.
+	//
+	// Коштує це менше, ніж здається: DDA долітає до стіни за ~10 кроків, тож 1700
+	// променів це ~17 тисяч операцій за кадр — на тлі 60 юнітів із ворсом дрібниця.
+	// Дорогими стали б СПРАЙТИ (один прямокутник на колонку), тому drawSprites малює їх
+	// ПАКЕТАМИ суміжних видимих колонок, а не по одній.
+	rayColW      = 1
+	rayMaxCell   = 80   // стеля кроків DDA (щоб не зациклитись)
+	rayViewCells = 26.0 // дальність для затемнення (клітинки)
+	spriteScale  = 0.8  // розмір ворога-спрайта відносно стіни-клітинки
 )
 
 // castColumn — DDA-марш променя по сітці стін. Повертає ПЕРПЕНДИКУЛЯРНУ відстань
@@ -98,9 +104,7 @@ func castColumn(posX, posY, rayDirX, rayDirY float32) (perpDist float32, side in
 // drawFirstPerson малює сцену від першої особи (крок 1: лише стіни; вороги-
 // спрайти — крок 2). Симуляція не чіпається — це суто інший РЕНДЕР тих самих даних.
 func (g *Game) drawFirstPerson(screen *ebiten.Image) {
-	// Небо (верх) і підлога (низ).
-	vector.FillRect(screen, 0, 0, screenWidth, screenHeight/2, color.RGBA{22, 22, 38, 255}, false)
-	vector.FillRect(screen, 0, screenHeight/2, screenWidth, screenHeight/2, color.RGBA{32, 32, 38, 255}, false)
+	drawSkyAndFloor(screen)
 
 	posX := (g.player.X + pixelSize/2) / pixelSize
 	posY := (g.player.Y + pixelSize/2) / pixelSize
@@ -127,26 +131,64 @@ func (g *Game) drawFirstPerson(screen *ebiten.Image) {
 		lineH := float32(screenHeight) / perpDist
 		y0 := (float32(screenHeight) - lineH) / 2
 
-		// Затемнення: далі → темніше; горизонтальна грань (side==1) ще темніша.
+		// [ТУМАН] Далі → ближче до кольору ГОРИЗОНТУ, а не до чорного. Затемнення в
+		// нуль читається як «темно», а розчинення в горизонті — як «далеко»; це і є
+		// атмосферна перспектива, і коштує вона рівно стільки ж.
 		shade := 1 - perpDist/rayViewCells
-		if shade < 0.15 {
-			shade = 0.15
+		if shade < 0 {
+			shade = 0
 		}
 		if side == 1 {
-			shade *= 0.7
+			shade *= 0.72 // горизонтальна грань темніша → ребра стін читаються
 		}
-		var col color.RGBA
+		near := color.RGBA{150, 150, 195, 255} // звичайна стіна зблизька
 		if boundary {
-			// Межа рівня (крізь неї працює wrap) — тепла бурштинова позначка.
-			col = color.RGBA{uint8(160*shade) + 50, uint8(95*shade) + 25, uint8(25*shade) + 10, 255}
-		} else {
-			// Звичайна стіна — сіро-блакитна.
-			col = color.RGBA{uint8(110*shade) + 30, uint8(110*shade) + 30, uint8(150*shade) + 40, 255}
+			near = color.RGBA{205, 130, 45, 255} // межа рівня — тепла бурштинова
 		}
+		col := fogMix(near, shade)
 		vector.FillRect(screen, float32(c*rayColW), y0, rayColW, lineH, col, false)
 	}
 
 	g.drawSprites(screen, zbuf[:], posX, posY, dirX, dirY, planeX, planeY)
+}
+
+// drawSkyAndFloor — градієнт замість двох плоских заливок.
+//
+// Той самий прийом, що в drawSea: рівний колір читається як «пофарбоване тло», а перехід
+// — як ГЛИБИНА. Обидва градієнти сходяться до кольору ГОРИЗОНТУ, у якому розчиняються й
+// далекі стіни (fogMix), тож сцена змикається в одну атмосферу замість трьох окремих смуг.
+func drawSkyAndFloor(screen *ebiten.Image) {
+	h := float32(screenHeight) / 2 / rayBands
+	for i := 0; i < rayBands; i++ {
+		t := float32(i) / (rayBands - 1) // 0 = зеніт, 1 = горизонт
+		sky := color.RGBA{
+			uint8(float32(skyTopR) + (fogR-skyTopR)*t),
+			uint8(float32(skyTopG) + (fogG-skyTopG)*t),
+			uint8(float32(skyTopB) + (fogB-skyTopB)*t), 255,
+		}
+		vector.FillRect(screen, 0, float32(i)*h, screenWidth, h+1, sky, false)
+
+		// Підлога дзеркально: від горизонту вниз, до ближчого й темнішого.
+		floor := color.RGBA{
+			uint8(float32(floorFarR) + (floorNearR-floorFarR)*t),
+			uint8(float32(floorFarG) + (floorNearG-floorFarG)*t),
+			uint8(float32(floorFarB) + (floorNearB-floorFarB)*t), 255,
+		}
+		vector.FillRect(screen, 0, screenHeight/2+float32(i)*h, screenWidth, h+1, floor, false)
+	}
+}
+
+// fogMix — колір на відстані: від кольору горизонту (shade 0) до near (shade 1).
+func fogMix(near color.RGBA, shade float32) color.RGBA {
+	if shade > 1 {
+		shade = 1
+	}
+	return color.RGBA{
+		uint8(float32(fogR) + (float32(near.R)-fogR)*shade),
+		uint8(float32(fogG) + (float32(near.G)-fogG)*shade),
+		uint8(float32(fogB) + (float32(near.B)-fogB)*shade),
+		255,
+	}
 }
 
 // drawSprites малює ворогів як БІЛБОРДИ (пласкі спрайти, завжди «обличчям» до
@@ -191,31 +233,77 @@ func (g *Game) drawSprites(screen *ebiten.Image, zbuf []float32, posX, posY, dir
 		startY := float32(screenHeight)/2 - size/2
 
 		shade := 1 - tY/rayViewCells
-		if shade < 0.2 {
-			shade = 0.2
+		if shade < 0 {
+			shade = 0
 		}
 		base := e.Color
 		if e.HitTimer > 0 {
 			base = color.RGBA{255, 255, 255, 255} // спалах після удару
 		}
-		col := color.RGBA{
-			uint8(float32(base.R) * shade),
-			uint8(float32(base.G) * shade),
-			uint8(float32(base.B) * shade),
-			255,
-		}
 
-		// Вертикальні смуги з тестом глибини проти стін.
+		// [ПАКЕТУВАННЯ] Один прямокутник на КОЛОНКУ був би 400 викликів на близького
+		// юніта при rayColW = 1. Замість цього йдемо колонками й накопичуємо СУМІЖНІ
+		// видимі — малюємо кожен такий пробіг одним разом. Видимість міняється лише на
+		// краях стін, тож пробігів зазвичай один-два.
 		s0 := int(startX) / rayColW
 		s1 := int(startX+size) / rayColW
-		for strip := s0; strip <= s1; strip++ {
-			if strip < 0 || strip >= len(zbuf) {
-				continue
+		runStart := -1
+		flush := func(from, to int) {
+			if from < 0 {
+				return
 			}
-			if tY >= zbuf[strip] {
-				continue // за стіною → не малюємо
-			}
-			vector.FillRect(screen, float32(strip*rayColW), startY, rayColW, size, col, false)
+			x := float32(from * rayColW)
+			w := float32((to - from + 1) * rayColW)
+			drawSpriteSlab(screen, x, startY, w, size, base, shade, e)
 		}
+		for strip := s0; strip <= s1; strip++ {
+			vis := strip >= 0 && strip < len(zbuf) && tY < zbuf[strip]
+			switch {
+			case vis && runStart < 0:
+				runStart = strip
+			case !vis && runStart >= 0:
+				flush(runStart, strip-1)
+				runStart = -1
+			}
+		}
+		flush(runStart, s1)
 	}
+}
+
+// drawSpriteSlab — шматок спрайта: вертикальний градієнт плюс смужка HP згори.
+//
+// Градієнт (світліше згори, темніше знизу) коштує spriteBands прямокутників на пробіг і
+// прибирає головну ваду 3D-виду: юніт перестає бути ПЛИТКОЮ кольору й отримує обʼєм.
+// Смужка HP — той самий сигнал, що у виді зверху, тільки тут він потрібніший: у 3D не
+// видно ні ворсу, ні форми тіла, тобто стану юніта не прочитати ніяк інакше.
+func drawSpriteSlab(screen *ebiten.Image, x, y, w, h float32, base color.RGBA, shade float32, e *Pixel) {
+	bh := h / spriteBands
+	for b := 0; b < spriteBands; b++ {
+		t := float32(b) / (spriteBands - 1) // 0 = верх, 1 = низ
+		k := spriteTopMul + (spriteBotMul-spriteTopMul)*t
+		lit := color.RGBA{
+			uint8(min32(float32(base.R)*k, 255)),
+			uint8(min32(float32(base.G)*k, 255)),
+			uint8(min32(float32(base.B)*k, 255)), 255,
+		}
+		vector.FillRect(screen, x, y+float32(b)*bh, w, bh+1, fogMix(lit, shade), false)
+	}
+
+	if e.MaxHP <= 0 {
+		return
+	}
+	frac := float32(e.HP) / float32(e.MaxHP)
+	if frac < 0 {
+		frac = 0
+	}
+	hpH := h * spriteHPH
+	vector.FillRect(screen, x, y-hpH*1.6, w, hpH, fogMix(color.RGBA{40, 40, 50, 255}, shade), false)
+	vector.FillRect(screen, x, y-hpH*1.6, w*frac, hpH, fogMix(color.RGBA{80, 230, 90, 255}, shade), false)
+}
+
+func min32(a, b float32) float32 {
+	if a < b {
+		return a
+	}
+	return b
 }
