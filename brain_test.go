@@ -2447,3 +2447,55 @@ func TestDodgeBurstClearsTheLine(t *testing.T) {
 		oldWin, newWin, 100*float64(oldWin)/dashCadence,
 		100*float64(newWin)/dashCadence, dashCadence)
 }
+
+// TestBallsLagBehindTheBody — [КУЛЬКИ] уся анімація тримається на ВІДСТАВАННІ.
+//
+// Кулька підтягується до своєї точки під тілом лише на частку шляху за кадр, тож при
+// русі юніта вона принципово не встигає. Якби вона трималась жорстко, не було б ані
+// розгойдування на поворотах, ані відкиду назад при розгоні — тобто анімації взагалі.
+//
+// Заодно ловимо розʼїзд ballHome між спавном і оновленням: якби вони давали різні точки,
+// кулька стрибала б на першому ж кадрі.
+func TestBallsLagBehindTheBody(t *testing.T) {
+	u := &Pixel{X: 500, Y: 500}
+	u.resetFur()
+
+	// На спавні кульки СТОЯТЬ у своїх домівках — без стрибка.
+	cx, cy := u.X+pixelSize/2, u.Y+pixelSize/2
+	for i := 0; i < ballCount; i++ {
+		hx, hy := ballHome(i, cx, cy)
+		if math.Abs(float64(u.Balls[i][0]-hx)) > 1e-4 || math.Abs(float64(u.Balls[i][1]-hy)) > 1e-4 {
+			t.Errorf("кулька %d на спавні не в домівці: (%.2f, %.2f) проти (%.2f, %.2f)",
+				i, u.Balls[i][0], u.Balls[i][1], hx, hy)
+		}
+	}
+
+	// Різко зсуваємо тіло — кульки мусять ВІДСТАТИ, а не телепортуватись.
+	before := u.Balls
+	u.X += 40
+	updateBalls(u)
+	cx = u.X + pixelSize/2
+	for i := 0; i < ballCount; i++ {
+		hx, _ := ballHome(i, cx, cy)
+		moved := u.Balls[i][0] - before[i][0]
+		if moved <= 0 {
+			t.Errorf("кулька %d не рушила за тілом зовсім: %.2f", i, moved)
+		}
+		if u.Balls[i][0] >= hx-1 {
+			t.Errorf("кулька %d наздогнала домівку за ОДИН кадр (%.1f при цілі %.1f) — "+
+				"відставання немає, анімації не буде", i, u.Balls[i][0], hx)
+		}
+	}
+
+	// І все ж доганяє, якщо тіло стоїть: інакше кульки відірвались би назавжди.
+	for f := 0; f < 200; f++ {
+		updateBalls(u)
+	}
+	for i := 0; i < ballCount; i++ {
+		hx, hy := ballHome(i, cx, cy)
+		d := math.Hypot(float64(u.Balls[i][0]-hx), float64(u.Balls[i][1]-hy))
+		if d > 0.5 {
+			t.Errorf("кулька %d не наздогнала за 200 кадрів: відстань %.2f", i, d)
+		}
+	}
+}

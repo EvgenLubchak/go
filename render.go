@@ -155,6 +155,18 @@ func drawFur(screen *ebiten.Image, p *Pixel) {
 	}
 }
 
+// drawBalls — [КУЛЬКИ] дві кульки, що бовтаються під тілом.
+//
+// Малюємо ПІСЛЯ тіла, а не до: вони мають лишатись видимими цілком, коли підтягуються
+// під корпус. Ворс навпаки йде до тіла, щоб корені ховались — різні цілі, різний порядок.
+//
+// Колір — тіла, без прозорості: кульки читаються як частина істоти, а не як ефект.
+func drawBalls(screen *ebiten.Image, p *Pixel) {
+	for i := 0; i < ballCount; i++ {
+		vector.FillCircle(screen, p.Balls[i][0], p.Balls[i][1], ballRadius, p.Color, true)
+	}
+}
+
 // bodyRestRadius — радіус «спокійного» контуру вздовж напрямку dirs8[i].
 //
 // Відстань від центра до контуру КВАДРАТА з півстороною R уздовж одиничного
@@ -418,9 +430,11 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			}
 			drawFur(screen, &g.units[i])
 			drawPixel(screen, e)
+			drawBalls(screen, &g.units[i])
 		}
 		drawFur(screen, &g.player)
 		drawPixel(screen, g.player)
+		drawBalls(screen, &g.player)
 
 		drawDash(screen, &g.player)
 	} // кінець топ-даун-гілки

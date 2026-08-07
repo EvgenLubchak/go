@@ -265,10 +265,10 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           0,
+		Count:           5,
 		Faction:         factionPlayer, // ← свій; рій його атакує, він рій
 		WeightsFile:     allyFile,
-		Respawns:        1,
+		Respawns:        5,
 		MaxHP:           3,
 		Color:           color.RGBA{80, 170, 255, 255}, // блакитний — свої
 		Label:           "",
@@ -295,11 +295,11 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           1,
+		Count:           3,
 		Faction:         factionPlayer,
 		WeightsFile:     allyKillerFile,
-		Respawns:        0,
-		MaxHP:           10,
+		Respawns:        3,
+		MaxHP:           15,
 		Color:           color.RGBA{140, 100, 255, 255}, // фіолетовий — твій вбивця
 		Label:           "≡_≡",
 		IsLearner:       true,
@@ -414,14 +414,14 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           3,
+		Count:           6,
 		Faction:         factionEnemy,
 		WeightsFile:     wardenFile,
 		Respawns:        1,  // [РЕСПАУН] три життя: щоб бойовий досвід набирався, а не обривався першою смертю
-		MaxHP:           31, // удар пробілом обходить невразливість
+		MaxHP:           21, // удар пробілом обходить невразливість
 		//                                                  і дає ~12 шкоди/с → це ~10 секунд бою
 		Color:     color.RGBA{255, 215, 90, 255}, // золотий — не сплутати ні з ким
-		Label:     "",
+		Label:     "W_W",
 		IsLearner: true,
 		//                                             найдорожча ручка експерименту:
 		UsesFlowField: false, // без поля — інакше памʼяті нічого робити
@@ -636,6 +636,11 @@ type Pixel struct {
 	// Світові (а не локальні) саме тому, що відставання має бути від РУХУ юніта.
 	Fur [furStrands][2][2]float32
 
+	// [КУЛЬКИ] Позиції кульок у СВІТОВИХ координатах — так само, як ворс. Світові, а не
+	// локальні, саме тому, що відставання має бути від РУХУ юніта: локальні координати
+	// рухались би разом із тілом і не відставали б ні від чого.
+	Balls [ballCount][2]float32
+
 	// [ТІЛО] Стан пружини розміру: поточний масштаб і його швидкість. Пульс медузи
 	// виникає з перельоту цієї пружини, а не з намальованого циклу.
 	BodyScale float32
@@ -660,6 +665,20 @@ func (p *Pixel) resetFur() {
 		p.Fur[i][0][0], p.Fur[i][0][1] = cx+dx*furLen*0.5, cy+dy*furLen*0.5
 		p.Fur[i][1][0], p.Fur[i][1][1] = cx+dx*furLen, cy+dy*furLen
 	}
+	for i := 0; i < ballCount; i++ {
+		bx, by := ballHome(i, cx, cy)
+		p.Balls[i][0], p.Balls[i][1] = bx, by
+	}
+}
+
+// ballHome — точка, до якої тягнеться кулька i: під тілом, рознесені по горизонталі.
+//
+// Окремою функцією, бо її треба ТРИ рази (спавн, оновлення, тест), і розʼїхатись вони
+// не мають права: кулька, чия домівка на спавні відрізняється від домівки в оновленні,
+// на першому ж кадрі стрибне.
+func ballHome(i int, cx, cy float32) (float32, float32) {
+	side := float32(2*i) - float32(ballCount-1) // для двох: -1 і +1
+	return cx + side*ballOffX, cy + ballDrop
 }
 
 // reviveAt повертає юніта до життя на його посту.
