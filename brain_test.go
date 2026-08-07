@@ -2205,3 +2205,68 @@ func TestWardenMotionAngleAtWindup(t *testing.T) {
 	}
 	t.Logf("→ замахів, де стиль не несе інформації: %d%% (%d з %d)", 100*mute/n, mute, n)
 }
+
+// TestRewardChainCoverage — [ПЕРЕДУМОВА] яка частка кадрів належить ланцюжку нагороди.
+//
+// Ідея двох буферів (гарячий для ланцюжків, що привели до нагороди) має сенс ЛИШЕ якщо
+// значна частина кадрів до жодного ланцюжка не належить — інакше «гарячим» стає майже
+// все, і схема вироджується в один МЕНШИЙ буфер. Саме це сталось у драбині, де кожен
+// епізод закінчувався нагородою.
+//
+// Тут міряємо покриття на СПРАВЖНЬОМУ стражнику зі скриптованим гравцем: для кожного
+// кадру дивимось, чи є нагорода в наступних window кадрах.
+func TestRewardChainCoverage(t *testing.T) {
+	savedRoster, savedMap := unitRoster, tileMap
+	savedSeek, savedArena := benchDriveSeek, benchArena
+	tileMap = [boidMapH][boidMapW]bool{}
+	benchDriveSeek, benchArena = true, true
+	defer func() {
+		unitRoster, tileMap = savedRoster, savedMap
+		benchDriveSeek, benchArena = savedSeek, savedArena
+	}()
+
+	w := ConfigWarden
+	w.Count, w.WeightsFile, w.Respawns = 1, "", -1
+	unitRoster = []UnitConfig{w}
+	g := newBenchGame()
+	drive := benchDriver(true, true)
+
+	const frames = 40000
+	hasReward := make([]bool, frames)
+	for i := 0; i < frames; i++ {
+		before := 0
+		if len(g.units) > 0 && g.units[0].Brain != nil {
+			before = g.units[0].Brain.mDmgDealt + g.units[0].Brain.mDmgTaken
+		}
+		g.tickHeadless(drive, true)
+		if len(g.units) > 0 && g.units[0].Brain != nil {
+			if g.units[0].Brain.mDmgDealt+g.units[0].Brain.mDmgTaken > before {
+				hasReward[i] = true
+			}
+		}
+	}
+	events := 0
+	for _, v := range hasReward {
+		if v {
+			events++
+		}
+	}
+	t.Logf("подій нагороди: %d на %d кадрів (%.1f на 1000)",
+		events, frames, 1000*float64(events)/frames)
+	t.Logf("%10s %14s %16s", "вікно", "покриття", "стиснення")
+	for _, win := range []int{30, 65, 100, 200} {
+		covered := 0
+		for i := 0; i < frames; i++ {
+			for j := i; j < i+win && j < frames; j++ {
+				if hasReward[j] {
+					covered++
+					break
+				}
+			}
+		}
+		frac := 100 * float64(covered) / frames
+		t.Logf("%10d %12.1f%% %14.1fx", win, frac, 100/frac)
+	}
+	t.Logf("ЧИТАННЯ: покриття близьке до 100%% → «гарячим» стає майже все,")
+	t.Logf("         два буфери вироджуються в один менший, як у драбині")
+}
