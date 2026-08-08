@@ -135,6 +135,17 @@ func (g *Game) Update() error {
 		startBeat(g.difficulty)
 	}
 
+	// [ЗУМ] +/− наближають і віддаляють вид зверху. Камера тягнеться за гравцем із
+	// відставанням і відсікається до меж світу — тож на 1.0 вона сама стає в центр
+	// карти, і картинка тотожна тій, що була завжди. Окремого випадку не потрібно.
+	if inpututil.IsKeyJustPressed(ebiten.KeyEqual) || inpututil.IsKeyJustPressed(ebiten.KeyKPAdd) {
+		cam.zoom = clamp(cam.zoom+camZoomStep, camZoomMin, camZoomMax)
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyMinus) || inpututil.IsKeyJustPressed(ebiten.KeyKPSubtract) {
+		cam.zoom = clamp(cam.zoom-camZoomStep, camZoomMin, camZoomMax)
+	}
+	cam.follow(g.player.X+pixelSize/2, g.player.Y+pixelSize/2)
+
 	// T — темп гри: 120 ↔ 60 тіків. Усе в грі рахується в КАДРАХ, тож це рівномірне
 	// сповільнення всього одразу; біт переганяємо, бо він єдиний живе в реальних
 	// секундах (див. gameTPS у main.go).

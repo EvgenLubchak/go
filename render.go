@@ -162,8 +162,8 @@ func drawFur(screen *ebiten.Image, p *Pixel) {
 		for j := 0; j < furJoints; j++ {
 			g := j * furWidthGroups / furJoints
 			jx, jy := p.Fur[i][j][0], p.Fur[i][j][1]
-			paths[g].MoveTo(px, py)
-			paths[g].LineTo(jx, jy)
+			paths[g].MoveTo(cam.px(px), cam.py(py))
+			paths[g].LineTo(cam.px(jx), cam.py(jy))
 			px, py = jx, jy
 		}
 	}
@@ -172,7 +172,7 @@ func drawFur(screen *ebiten.Image, p *Pixel) {
 	for g := 0; g < furWidthGroups; g++ {
 		t := float32(g) / float32(furWidthGroups-1)
 		vector.StrokePath(screen, &paths[g],
-			&vector.StrokeOptions{Width: furWidthRoot + (furWidthTip-furWidthRoot)*t}, &op)
+			&vector.StrokeOptions{Width: cam.s(furWidthRoot + (furWidthTip-furWidthRoot)*t)}, &op)
 	}
 }
 
@@ -184,7 +184,7 @@ func drawFur(screen *ebiten.Image, p *Pixel) {
 // Колір — тіла, без прозорості: кульки читаються як частина істоти, а не як ефект.
 func drawBalls(screen *ebiten.Image, p *Pixel) {
 	for i := 0; i < ballCount; i++ {
-		vector.FillCircle(screen, p.Balls[i][0], p.Balls[i][1], ballRadius, p.Color, true)
+		vector.FillCircle(screen, cam.px(p.Balls[i][0]), cam.py(p.Balls[i][1]), cam.s(ballRadius), p.Color, true)
 	}
 }
 
@@ -200,14 +200,14 @@ func drawLimbs(screen *ebiten.Image, p *Pixel) {
 	var path vector.Path
 	for i := 0; i < limbCount; i++ {
 		rx, ry := limbRoot(i, cx, cy, bodyScaleOf(p))
-		path.MoveTo(rx, ry)
-		path.LineTo(p.Limbs[i][0], p.Limbs[i][1])
+		path.MoveTo(cam.px(rx), cam.py(ry))
+		path.LineTo(cam.px(p.Limbs[i][0]), cam.py(p.Limbs[i][1]))
 	}
 	var op vector.DrawPathOptions
 	op.ColorScale.ScaleWithColor(p.Color)
-	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: limbWidth}, &op)
+	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: cam.s(limbWidth)}, &op)
 	for i := 0; i < limbCount; i++ {
-		vector.FillCircle(screen, p.Limbs[i][0], p.Limbs[i][1], limbTipDot, p.Color, false)
+		vector.FillCircle(screen, cam.px(p.Limbs[i][0]), cam.py(p.Limbs[i][1]), cam.s(limbTipDot), p.Color, false)
 	}
 }
 
@@ -220,15 +220,15 @@ func drawTentacle(screen *ebiten.Image, p *Pixel) {
 	cy := p.Y + pixelSize/2
 	px, py := tentRoot(cx, cy, bodyScaleOf(p))
 	var path vector.Path
-	path.MoveTo(px, py)
+	path.MoveTo(cam.px(px), cam.py(py))
 	for i := 0; i < tentJoints; i++ {
-		path.LineTo(p.Tent[i][0], p.Tent[i][1])
+		path.LineTo(cam.px(p.Tent[i][0]), cam.py(p.Tent[i][1]))
 		px, py = p.Tent[i][0], p.Tent[i][1]
 	}
 	var op vector.DrawPathOptions
 	op.ColorScale.ScaleWithColor(p.Color)
-	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: tentWidth}, &op)
-	vector.FillCircle(screen, px, py, tentTipBall, p.Color, false)
+	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: cam.s(tentWidth)}, &op)
+	vector.FillCircle(screen, cam.px(px), cam.py(py), cam.s(tentTipBall), p.Color, false)
 }
 
 // bodyRestRadius — радіус «спокійного» контуру вздовж напрямку dirs8[i].
@@ -319,10 +319,10 @@ func drawBody(screen *ebiten.Image, p Pixel, col color.RGBA) {
 	}
 	path := &vector.Path{}
 	sx, sy := mid(brainWhiskers-1, 0)
-	path.MoveTo(sx, sy)
+	path.MoveTo(cam.px(sx), cam.py(sy))
 	for i := 0; i < brainWhiskers; i++ {
 		nx, ny := mid(i, (i+1)%brainWhiskers)
-		path.QuadTo(vx[i], vy[i], nx, ny) // вершина = контрольна точка
+		path.QuadTo(cam.px(vx[i]), cam.py(vy[i]), cam.px(nx), cam.py(ny)) // вершина = контрольна
 	}
 	path.Close()
 
@@ -356,14 +356,14 @@ func drawDash(screen *ebiten.Image, p *Pixel) {
 	case dashPhaseWindup:
 		f := dashWindupProgress(p)
 		ln := reach * f
-		vector.StrokeLine(screen, cx, cy, cx+p.DashDirX*ln, cy+p.DashDirY*ln,
-			1+2*f, color.RGBA{255, uint8(220 - 140*f), 60, uint8(90 + 150*f)}, true)
+		vector.StrokeLine(screen, cam.px(cx), cam.py(cy), cam.px(cx+p.DashDirX*ln), cam.py(cy+p.DashDirY*ln),
+			cam.s(1+2*f), color.RGBA{255, uint8(220 - 140*f), 60, uint8(90 + 150*f)}, true)
 	case dashPhaseActive:
-		vector.StrokeLine(screen, cx-p.DashDirX*reach, cy-p.DashDirY*reach, cx, cy,
-			4, color.RGBA{255, 255, 200, 210}, true)
+		vector.StrokeLine(screen, cam.px(cx-p.DashDirX*reach), cam.py(cy-p.DashDirY*reach), cam.px(cx), cam.py(cy),
+			cam.s(4), color.RGBA{255, 255, 200, 210}, true)
 	default:
 		a := uint8(120 * p.DashTimer / dashRecovery)
-		vector.StrokeCircle(screen, cx, cy, pixelSize*0.9, 1.5, color.RGBA{120, 170, 255, a}, true)
+		vector.StrokeCircle(screen, cam.px(cx), cam.py(cy), cam.s(pixelSize*0.9), cam.s(1.5), color.RGBA{120, 170, 255, a}, true)
 	}
 }
 
@@ -386,7 +386,7 @@ func drawPixel(screen *ebiten.Image, p Pixel) {
 		}
 		barX := p.X + (pixelSize-bw)/2
 		barY := p.Y - barH - 1
-		vector.FillRect(screen, barX, barY, bw, barH, color.RGBA{80, 0, 0, 200}, false)
+		vector.FillRect(screen, cam.px(barX), cam.py(barY), cam.s(bw), cam.s(barH), color.RGBA{80, 0, 0, 200}, false)
 		hpRatio := float32(p.HP) / float32(p.MaxHP)
 		filled := bw * hpRatio
 		barColor := color.RGBA{
@@ -394,13 +394,13 @@ func drawPixel(screen *ebiten.Image, p Pixel) {
 			G: uint8(220 * hpRatio),
 			B: 0, A: 255,
 		}
-		vector.FillRect(screen, barX, barY, filled, barH, barColor, false)
+		vector.FillRect(screen, cam.px(barX), cam.py(barY), cam.s(filled), cam.s(barH), barColor, false)
 	}
 
 	if p.Label != "" {
-		cx := float64(p.X) + pixelSize/2
-		cy := float64(p.Y) + pixelSize/2
-		drawText(screen, p.Label, labelFontSize, cx, cy, color.RGBA{0, 0, 0, 255})
+		cx := float64(cam.px(p.X + pixelSize/2))
+		cy := float64(cam.py(p.Y + pixelSize/2))
+		drawText(screen, p.Label, labelFontSize*float64(cam.zoom), cx, cy, color.RGBA{0, 0, 0, 255})
 	}
 }
 
@@ -418,12 +418,12 @@ func drawBrainSensors(screen *ebiten.Image, e Pixel, cx, cy float32) {
 		ex := cx + dirs8[i][0]*length
 		ey := cy + dirs8[i][1]*length
 		col := color.RGBA{R: uint8(60 + 195*w), G: uint8(200 * (1 - w)), B: 60, A: 150}
-		vector.StrokeLine(screen, cx, cy, ex, ey, 1, col, false)
+		vector.StrokeLine(screen, cam.px(cx), cam.py(cy), cam.px(ex), cam.py(ey), cam.s(1), col, false)
 	}
 	// Обрана дія — яскрава жовта стрілка.
 	a := e.Brain.lastAction
-	vector.StrokeLine(screen, cx, cy, cx+dirs8[a][0]*45, cy+dirs8[a][1]*45, 2,
-		color.RGBA{255, 255, 0, 255}, false)
+	vector.StrokeLine(screen, cam.px(cx), cam.py(cy), cam.px(cx+dirs8[a][0]*45), cam.py(cy+dirs8[a][1]*45),
+		cam.s(2), color.RGBA{255, 255, 0, 255}, false)
 }
 
 // Draw малює поточний стан на екрані.
@@ -441,9 +441,12 @@ func (g *Game) Draw(screen *ebiten.Image) {
 				if tileMap[row][col] {
 					x := float32(col * pixelSize)
 					y := float32(row * pixelSize)
-					vector.FillRect(screen, x, y, pixelSize, pixelSize, wallFill, false)
+					if !cam.visible(x, y) {
+						continue // [ЗУМ] за кадром — не платимо за те, чого не видно
+					}
+					vector.FillRect(screen, cam.px(x), cam.py(y), cam.s(pixelSize), cam.s(pixelSize), wallFill, false)
 					// Тонкий контур стіни для об'єму
-					vector.StrokeRect(screen, x, y, pixelSize, pixelSize, 1, wallEdge, false)
+					vector.StrokeRect(screen, cam.px(x), cam.py(y), cam.s(pixelSize), cam.s(pixelSize), cam.s(1), wallEdge, false)
 				}
 			}
 		}
@@ -454,7 +457,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		// Раніше вона була бурштиновою й позначала wrap-перехід («гравець протікає на
 		// інший бік»). Wrap-around прибрано давно, а колір лишився й читався як border
 		// з верстки — позначка механіки, якої вже немає.
-		vector.StrokeRect(screen, 1, 1, screenWidth-2, screenHeight-2, 2, wallEdge, false)
+		vector.StrokeRect(screen, cam.px(1), cam.py(1), cam.s(screenWidth-2), cam.s(screenHeight-2),
+			cam.s(2), wallEdge, false)
 
 		// [СТИГМЕРГІЯ] Теплова карта феромонів фрустрації (під ворогами).
 		// Чим яскравіше-червоніше — тим сильніший слід «тут застрягали».
@@ -471,7 +475,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 					}
 					x := float32(col * pixelSize)
 					y := float32(row * pixelSize)
-					vector.FillRect(screen, x, y, pixelSize, pixelSize, color.RGBA{255, 80, 0, uint8(a)}, false)
+					vector.FillRect(screen, cam.px(x), cam.py(y), cam.s(pixelSize), cam.s(pixelSize),
+						color.RGBA{255, 80, 0, uint8(a)}, false)
 				}
 			}
 		}
@@ -487,10 +492,14 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			cx := e.X + pixelSize/2
 			cy := e.Y + pixelSize/2
 			if showDetectionCircle {
-				vector.StrokeCircle(screen, cx, cy, e.Cfg.DetectionRange, 1, color.RGBA{255, 255, 255, 5}, false)
+				vector.StrokeCircle(screen, cam.px(cx), cam.py(cy), cam.s(e.Cfg.DetectionRange), cam.s(1),
+					color.RGBA{255, 255, 255, 5}, false)
 			}
 			if showWhiskers && e.Brain != nil {
 				drawBrainSensors(screen, e, cx, cy)
+			}
+			if !cam.visible(e.X, e.Y) {
+				continue // [ЗУМ] за кадром: при 4× це 15/16 світу
 			}
 			drawFur(screen, &g.units[i])
 			drawLimbs(screen, &g.units[i])
