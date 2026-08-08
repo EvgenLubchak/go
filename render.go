@@ -539,6 +539,13 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		drawText(screen, fmt.Sprintf("temp %d", gameTPS), 10, screenWidth/2+90, 10,
 			color.RGBA{240, 200, 90, 255})
 	}
+	// [КАМЕРА] Те саме правило, що для темпу: показуємо, лише коли зум НЕ типовий.
+	// Інакше при 200% нічого не пояснює, чому поле раптом вужче — а це не баг, а
+	// заплачена ціна за наближення.
+	if cam.zoom != camZoomMin {
+		drawText(screen, fmt.Sprintf("zoom %.0f%%", cam.zoom*100), 10, screenWidth/2+90, 25,
+			color.RGBA{240, 200, 90, 255})
+	}
 
 	// [ЗАМІРИ] TPS окремо від FPS — це РІЗНІ речі, і плутанина між ними вже раз
 	// зіпсувала висновок. FPS = частота МАЛЮВАННЯ (Draw, темп монітора), TPS =
