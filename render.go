@@ -148,16 +148,31 @@ func drawFur(screen *ebiten.Image, p *Pixel) {
 	cx := p.X + pixelSize/2
 	cy := p.Y + pixelSize/2
 	fx, fy := furRoot(cx, cy)
+
+	// [ПАКЕТУВАННЯ] Замість StrokeLine на КОЖЕН сегмент (8×furJoints викликів) збираємо
+	// сегменти в спільні шляхи за товщиною й малюємо один StrokePath на групу.
+	//
+	// Товщина в StrokeOptions одна на шлях, тому групи й потрібні: неперервне звуження
+	// довелось би малювати посегментно. Три сходинки на волосині 2→1px оком не
+	// відрізнити від плавного переходу, а викликів стає в furJoints/furWidthGroups разів
+	// менше — при 14 колінах це 37×.
+	var paths [furWidthGroups]vector.Path
 	for i := 0; i < furStrands; i++ {
 		px, py := fx, fy
 		for j := 0; j < furJoints; j++ {
-			// Звуження від кореня до кінчика: волосина, а не дріт.
-			t := float32(j) / float32(furJoints)
-			w := furWidthRoot + (furWidthTip-furWidthRoot)*t
+			g := j * furWidthGroups / furJoints
 			jx, jy := p.Fur[i][j][0], p.Fur[i][j][1]
-			vector.StrokeLine(screen, px, py, jx, jy, w, col, false)
+			paths[g].MoveTo(px, py)
+			paths[g].LineTo(jx, jy)
 			px, py = jx, jy
 		}
+	}
+	var op vector.DrawPathOptions
+	op.ColorScale.ScaleWithColor(col)
+	for g := 0; g < furWidthGroups; g++ {
+		t := float32(g) / float32(furWidthGroups-1)
+		vector.StrokePath(screen, &paths[g],
+			&vector.StrokeOptions{Width: furWidthRoot + (furWidthTip-furWidthRoot)*t}, &op)
 	}
 }
 
@@ -181,11 +196,18 @@ func drawBalls(screen *ebiten.Image, p *Pixel) {
 func drawLimbs(screen *ebiten.Image, p *Pixel) {
 	cx := p.X + pixelSize/2
 	cy := p.Y + pixelSize/2
+	// Усі чотири кінцівки — один шлях: товщина в них однакова, тож ділити нема на що.
+	var path vector.Path
 	for i := 0; i < limbCount; i++ {
 		rx, ry := limbRoot(i, cx, cy)
-		tx, ty := p.Limbs[i][0], p.Limbs[i][1]
-		vector.StrokeLine(screen, rx, ry, tx, ty, limbWidth, p.Color, true)
-		vector.FillCircle(screen, tx, ty, limbTipDot, p.Color, true)
+		path.MoveTo(rx, ry)
+		path.LineTo(p.Limbs[i][0], p.Limbs[i][1])
+	}
+	var op vector.DrawPathOptions
+	op.ColorScale.ScaleWithColor(p.Color)
+	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: limbWidth}, &op)
+	for i := 0; i < limbCount; i++ {
+		vector.FillCircle(screen, p.Limbs[i][0], p.Limbs[i][1], limbTipDot, p.Color, false)
 	}
 }
 
@@ -197,11 +219,16 @@ func drawTentacle(screen *ebiten.Image, p *Pixel) {
 	cx := p.X + pixelSize/2
 	cy := p.Y + pixelSize/2
 	px, py := tentRoot(cx, cy)
+	var path vector.Path
+	path.MoveTo(px, py)
 	for i := 0; i < tentJoints; i++ {
-		vector.StrokeLine(screen, px, py, p.Tent[i][0], p.Tent[i][1], tentWidth, p.Color, true)
+		path.LineTo(p.Tent[i][0], p.Tent[i][1])
 		px, py = p.Tent[i][0], p.Tent[i][1]
 	}
-	vector.FillCircle(screen, px, py, tentTipBall, p.Color, true)
+	var op vector.DrawPathOptions
+	op.ColorScale.ScaleWithColor(p.Color)
+	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: tentWidth}, &op)
+	vector.FillCircle(screen, px, py, tentTipBall, p.Color, false)
 }
 
 // bodyRestRadius — радіус «спокійного» контуру вздовж напрямку dirs8[i].

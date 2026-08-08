@@ -750,7 +750,7 @@ var limbSpec = [limbCount]struct{ rx, ry, dx, dy float32 }{
 // limbRoot — кут корпуса, з якого росте кінцівка i.
 func limbRoot(i int, cx, cy float32) (float32, float32) {
 	sp := limbSpec[i]
-	return cx + sp.rx*pixelSize/2, cy + sp.ry*pixelSize/2
+	return cx + sp.rx*limbRootIn*pixelSize/2, cy + sp.ry*limbRootIn*pixelSize/2
 }
 
 // limbHome — куди тягнеться кінчик кінцівки i у спокої.
