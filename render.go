@@ -63,7 +63,7 @@ func (g *Game) drawInputDirs(screen *ebiten.Image) {
 		y0 := cy + d[1]*inputStickGap
 		x1 := cx + d[0]*(inputStickGap+inputStickLen)
 		y1 := cy + d[1]*(inputStickGap+inputStickLen)
-		vector.StrokeLine(screen, x0, y0, x1, y1, inputStickWidth, col, true)
+		vector.StrokeLine(screen, x0, y0, x1, y1, inputStickWidth, col, antiAlias)
 	}
 }
 
@@ -74,6 +74,90 @@ var (
 	wallEdge = color.RGBA{80, 80, 110, 255} // світліший контур — дає обʼєм
 )
 
+// ══════════════════════════════════════════════════════════════════════════
+// [ПАКЕТУВАННЯ] ДВА ШЛЯХИ ДО GPU, І ВОНИ НЕ ВЗАЄМОЗАМІННІ
+//
+// У ebiten 2.9 малювання вектора йде двома різними механізмами, і сплутати їх коштує
+// вдвічі більше кадру. Записую обидва, бо перевіряли на собі.
+//
+//	FillPath / StrokePath  — НЕ малюють одразу. Накопичують шляхи в спільному стані
+//	                         (fillPathsState) і віддають одним DrawTriangles, доки не
+//	                         зміняться antialias, blend або fillRule. Растеризація
+//	                         йде через АТЛАС — дорого за шлях, дешево за виклик.
+//	FillRect / FillCircle  — без згладжування йдуть повз цей стан, прямо в
+//	StrokeLine / …            DrawTriangles32: два-три десятки трикутників, і все.
+//	                         Дешево за фігуру, але СКИДАЄ накопичений батч шляхів.
+//
+// ЗВІДСИ ПРАВИЛО, і воно НЕ «все через шлях»:
+//
+//	складна геометрія (ворс, кінцівки, відросток, тіло, стіни) → шлях, і бажано
+//	   один шлях на групу: там виграш саме у кількості викликів;
+//	проста фігура (коло, прямокутник) → лишається негайною: як шлях вона стає
+//	   растеризацією в атлас замість двох трикутників.
+//
+// Ми це перевірили навпаки й програли. Переведення всіх кульок, долонь, смуг HP і
+// смуг моря на FillPath дало 30 FPS замість 63 — рівно вдвічі гірше. CPU при цьому не
+// змінився взагалі (0.441 мс проти 0.453 мс на 500 фігур), тобто ціна цілком на боці
+// GPU: 500 растеризацій шляху замість 500 пар трикутників.
+//
+// ЩО ЛИШАЄТЬСЯ ПРАВДОЮ: змішувати їх упереміш — найгірше з двох. Кожна проста фігура
+// між шляхами рве батч. Правильна відповідь тут не «переписати фігури», а не
+// перемішувати порядок малювання; це ще не зроблено й лишається наступним кроком.
+//
+// ТОЙ САМИЙ МЕХАНІЗМ ПОЯСНЮЄ ЦІНУ ЗГЛАДЖУВАННЯ. Коли AA стояв лише на тілі, кожен
+// юніт перемикав antialias з false на true й назад — тобто скидав батч двічі, ще й
+// заводив окремий офскрін-буфер подвійного розміру (див. antiAlias у main.go). Тому
+// прапорець тепер один на весь рендер: або згладжуємо все, або нічого.
+// ══════════════════════════════════════════════════════════════════════════
+
+// pathOpts — спільні опції малювання шляху. Єдине місце, де читається antiAlias:
+// якби кожна функція вирішувала сама, вони б розʼїхались і батч рвався б знову.
+func pathOpts(col color.RGBA) vector.DrawPathOptions {
+	var op vector.DrawPathOptions
+	op.AntiAlias = antiAlias
+	op.ColorScale.ScaleWithColor(col)
+	return op
+}
+
+// wallPath — шлях стін, що ПЕРЕВИКОРИСТОВУЄТЬСЯ між кадрами.
+//
+// Пакетна змінна, а не локальна: інакше кожен кадр алокував би шлях на кілька сотень
+// тайлів і віддавав його збирачу сміття. Reset() лишає ємність.
+var wallPath vector.Path
+
+// buildWallPath складає всі ВИДИМІ тайли стін в один шлях і повертає їхню кількість.
+//
+// Окремою функцією з тієї самої причини, що bodyVertices: малювання йде прямо в
+// ebiten і назовні не віддає нічого, тож перевірити відсікання тестом можна лише так.
+// Повернена кількість — не для малювання, вона існує рівно заради тесту.
+func buildWallPath(p *vector.Path) int {
+	n := 0
+	for row := 0; row < boidMapH; row++ {
+		for col := 0; col < boidMapW; col++ {
+			if !tileMap[row][col] {
+				continue
+			}
+			x := float32(col * pixelSize)
+			y := float32(row * pixelSize)
+			// [ЗУМ] За кадром — не платимо за те, чого не видно. Предикат ТОЙ САМИЙ, що
+			// для юнітів, хоча тайлу його запас завеликий (він розрахований на ворс).
+			// Це свідомо: одне правило відсікання на весь рендер, а зайвий запас тепер
+			// коштує лише вершин, а не викликів, — саме заради цього й пакетуємо.
+			if !cam.visible(x, y) {
+				continue
+			}
+			sx, sy, s := cam.px(x), cam.py(y), cam.s(pixelSize)
+			p.MoveTo(sx, sy)
+			p.LineTo(sx+s, sy)
+			p.LineTo(sx+s, sy+s)
+			p.LineTo(sx, sy+s)
+			p.Close() // замкнений підшлях = той самий контур, що давав StrokeRect
+			n++
+		}
+	}
+	return n
+}
+
 // drawSea малює фон-море: вертикальний градієнт від світлішого верху до темнішої
 // глибини. Смугами, а не пікселями — seaBands штук FillRect на кадр, тобто дешевше
 // за один намальований юніт.
@@ -82,18 +166,37 @@ var (
 // «пофарбоване тло», а вертикальний перехід — як ГЛИБИНА, і цього досить, щоб поле
 // перестало бути абстрактним аркушем. Текстуру можна буде покласти згори пізніше,
 // нічого тут не переписуючи.
+//
+// [КАМЕРА] Смуги прив'язані до СВІТОВОГО Y, а не до екранного. Поки світ дорівнював
+// вікну, різниці не було. Коли світ став удвічі вищим за вікно, екранна прив'язка
+// перетворила глибину на скайбокс: та сама світова клітинка світлішала й темнішала
+// залежно від того, де стоїть камера, тобто градієнт перестав щось означати.
+//
+// Зі світовою прив'язкою верх карти читається як мілина, низ — як глибина, і колір
+// клітинки не залежить від камери. Наслідок, який видно оком: рухаючись вертикально,
+// ти справді «занурюєшся». Ціна — за один кадр видно лише частину діапазону (при
+// зумі 1.0 половину, при 4× — восьму), тож повний розкид кольору мусив вирости
+// вдвічі, а seaBands — теж удвічі, щоб смуги лишились такими ж дрібними на екрані
+// (див. sea* у tuning_visual.go).
 func drawSea(screen *ebiten.Image) {
-	h := float32(screenHeight) / seaBands
+	bandH := float32(worldHeight) / seaBands // висота смуги у СВІТОВИХ пікселях
 	for i := 0; i < seaBands; i++ {
-		t := float32(i) / (seaBands - 1) // 0 = верх, 1 = глибина
+		// +1 екранний піксель: щоб між смугами не лишалось волосяних щілин
+		// через округлення. Саме екранний, а не світовий — щілина народжується
+		// при растеризації, тож і запас потрібен у пікселях екрана.
+		sy := cam.py(float32(i) * bandH)
+		h := cam.s(bandH) + 1
+		if sy+h < 0 || sy > screenHeight {
+			continue // [КАМЕРА] смуга за кадром — не платимо за те, чого не видно
+		}
+		t := float32(i) / (seaBands - 1) // 0 = поверхня, 1 = глибина
 		col := color.RGBA{
 			R: uint8(float32(seaTopR) + (seaBotR-seaTopR)*t),
 			G: uint8(float32(seaTopG) + (seaBotG-seaTopG)*t),
 			B: uint8(float32(seaTopB) + (seaBotB-seaTopB)*t),
 			A: 255,
 		}
-		// +1 до висоти: щоб між смугами не лишалось волосяних щілин через округлення.
-		vector.FillRect(screen, 0, float32(i)*h, screenWidth, h+1, col, false)
+		vector.FillRect(screen, 0, sy, screenWidth, h, col, false)
 	}
 }
 
@@ -167,8 +270,7 @@ func drawFur(screen *ebiten.Image, p *Pixel) {
 			px, py = jx, jy
 		}
 	}
-	var op vector.DrawPathOptions
-	op.ColorScale.ScaleWithColor(col)
+	op := pathOpts(col)
 	for g := 0; g < furWidthGroups; g++ {
 		t := float32(g) / float32(furWidthGroups-1)
 		vector.StrokePath(screen, &paths[g],
@@ -184,7 +286,7 @@ func drawFur(screen *ebiten.Image, p *Pixel) {
 // Колір — тіла, без прозорості: кульки читаються як частина істоти, а не як ефект.
 func drawBalls(screen *ebiten.Image, p *Pixel) {
 	for i := 0; i < ballCount; i++ {
-		vector.FillCircle(screen, cam.px(p.Balls[i][0]), cam.py(p.Balls[i][1]), cam.s(ballRadius), p.Color, true)
+		vector.FillCircle(screen, cam.px(p.Balls[i][0]), cam.py(p.Balls[i][1]), cam.s(ballRadius), p.Color, antiAlias)
 	}
 }
 
@@ -193,7 +295,7 @@ func drawBalls(screen *ebiten.Image, p *Pixel) {
 // Малюємо ПЕРЕД тілом: кріплення мусить ховатись під корпусом, інакше видно, що лінія
 // починається в порожнечі. Ворс іде так само й з тієї ж причини; кульки й щупальце
 // навпаки — після, бо вони мають лишатись видимими цілком.
-func drawLimbs(screen *ebiten.Image, p *Pixel) {
+func drawLimbStrokes(screen *ebiten.Image, p *Pixel) {
 	cx := p.X + pixelSize/2
 	cy := p.Y + pixelSize/2
 	// Усі чотири кінцівки — один шлях: товщина в них однакова, тож ділити нема на що.
@@ -203,9 +305,13 @@ func drawLimbs(screen *ebiten.Image, p *Pixel) {
 		path.MoveTo(cam.px(rx), cam.py(ry))
 		path.LineTo(cam.px(p.Limbs[i][0]), cam.py(p.Limbs[i][1]))
 	}
-	var op vector.DrawPathOptions
-	op.ColorScale.ScaleWithColor(p.Color)
+	op := pathOpts(p.Color)
 	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: cam.s(limbWidth)}, &op)
+}
+
+// drawLimbTips — кульки-долоні. Окремо від штрихів: вони проста фігура, а не шлях,
+// і йдуть у другому проході (див. [ДВА ПРОХОДИ] у Draw).
+func drawLimbTips(screen *ebiten.Image, p *Pixel) {
 	for i := 0; i < limbCount; i++ {
 		vector.FillCircle(screen, cam.px(p.Limbs[i][0]), cam.py(p.Limbs[i][1]), cam.s(limbTipDot), p.Color, false)
 	}
@@ -215,19 +321,31 @@ func drawLimbs(screen *ebiten.Image, p *Pixel) {
 //
 // Малюємо ПЕРЕД кульками, але ПІСЛЯ тіла: відросток має виходити з-під корпуса, а
 // кульки лишатись поверх усього.
-func drawTentacle(screen *ebiten.Image, p *Pixel) {
+func drawTentacleStroke(screen *ebiten.Image, p *Pixel) {
 	cx := p.X + pixelSize/2
 	cy := p.Y + pixelSize/2
 	px, py := tentRoot(cx, cy, bodyScaleOf(p))
 	var path vector.Path
 	path.MoveTo(cam.px(px), cam.py(py))
-	for i := 0; i < tentJoints; i++ {
+	// Та сама межа, що у фізиці (updateTentacle) — через tentJointsOf. Розʼїзд тут
+	// означав би або намальований суглоб, який ніхто не рухає, або живий, якого не видно.
+	for i, n := 0, tentJointsOf(p); i < n; i++ {
 		path.LineTo(cam.px(p.Tent[i][0]), cam.py(p.Tent[i][1]))
 		px, py = p.Tent[i][0], p.Tent[i][1]
 	}
-	var op vector.DrawPathOptions
-	op.ColorScale.ScaleWithColor(p.Color)
+	op := pathOpts(p.Color)
 	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: cam.s(tentWidth)}, &op)
+}
+
+// drawTentacleTip — кулька на кінці відростка. Кінець ланцюжка перераховуємо тут
+// заново, а не тягнемо з drawTentacleStroke: інакше довелось би вертати координату
+// через параметр і два проходи стали б звʼязаними.
+func drawTentacleTip(screen *ebiten.Image, p *Pixel) {
+	n := tentJointsOf(p)
+	px, py := tentRoot(p.X+pixelSize/2, p.Y+pixelSize/2, bodyScaleOf(p))
+	if n > 0 {
+		px, py = p.Tent[n-1][0], p.Tent[n-1][1]
+	}
 	vector.FillCircle(screen, cam.px(px), cam.py(py), cam.s(tentTipBall), p.Color, false)
 }
 
@@ -326,9 +444,11 @@ func drawBody(screen *ebiten.Image, p Pixel, col color.RGBA) {
 	}
 	path.Close()
 
-	var op vector.DrawPathOptions
-	op.AntiAlias = true // контур органічний, без згладжування виглядав би рваним
-	op.ColorScale.ScaleWithColor(col)
+	// Через pathOpts, а не вручну: колір і згладжування мусять братись з одного місця.
+	// Тут уже був цей баг — я прибрав рядок ColorScale, вважаючи, що op приходить із
+	// pathOpts, а він лишався нульовим. Нульовий ColorScale не «без кольору», а
+	// БІЛИЙ: він множить, тож одиничний масштаб дає білі гліфи тіла при живому ворсі.
+	op := pathOpts(col)
 	vector.FillPath(screen, path, nil, &op)
 }
 
@@ -357,24 +477,31 @@ func drawDash(screen *ebiten.Image, p *Pixel) {
 		f := dashWindupProgress(p)
 		ln := reach * f
 		vector.StrokeLine(screen, cam.px(cx), cam.py(cy), cam.px(cx+p.DashDirX*ln), cam.py(cy+p.DashDirY*ln),
-			cam.s(1+2*f), color.RGBA{255, uint8(220 - 140*f), 60, uint8(90 + 150*f)}, true)
+			cam.s(1+2*f), color.RGBA{255, uint8(220 - 140*f), 60, uint8(90 + 150*f)}, antiAlias)
 	case dashPhaseActive:
 		vector.StrokeLine(screen, cam.px(cx-p.DashDirX*reach), cam.py(cy-p.DashDirY*reach), cam.px(cx), cam.py(cy),
-			cam.s(4), color.RGBA{255, 255, 200, 210}, true)
+			cam.s(4), color.RGBA{255, 255, 200, 210}, antiAlias)
 	default:
 		a := uint8(120 * p.DashTimer / dashRecovery)
-		vector.StrokeCircle(screen, cam.px(cx), cam.py(cy), cam.s(pixelSize*0.9), cam.s(1.5), color.RGBA{120, 170, 255, a}, true)
+		vector.StrokeCircle(screen, cam.px(cx), cam.py(cy), cam.s(pixelSize*0.9), cam.s(1.5), color.RGBA{120, 170, 255, a}, antiAlias)
 	}
 }
 
-func drawPixel(screen *ebiten.Image, p Pixel) {
+func drawPixelBody(screen *ebiten.Image, p Pixel) {
 	// Flash: поки HitTimer > 0 — малюємо білим
 	col := p.Color
 	if p.HitTimer > 0 {
 		col = color.RGBA{255, 255, 255, 255}
 	}
 	drawBody(screen, p, col)
+}
 
+// drawPixelOverlay — смуга HP і мітка: прості фігури й текст, тобто другий прохід.
+//
+// Побічний виграш, який видно оком: смуга тепер завжди ЗВЕРХУ. Раніше сусідній юніт,
+// намальований пізніше, міг її перекрити — і здоровʼя ставало нечитним саме в купі,
+// тобто рівно тоді, коли воно потрібне.
+func drawPixelOverlay(screen *ebiten.Image, p Pixel) {
 	// HP bar — тільки для ворогів (MaxHP > 0)
 	if p.MaxHP > 0 {
 		const barH = 3
@@ -434,31 +561,37 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	} else {
 		drawSea(screen) // [ФОН] море: вертикальний градієнт замість плоскої заливки
 
-		// Малюємо тайли рівня.
-		// Стіни — темно-сірі, підлога — не малюється (фон і є підлогою).
-		for row := 0; row < boidMapH; row++ {
-			for col := 0; col < boidMapW; col++ {
-				if tileMap[row][col] {
-					x := float32(col * pixelSize)
-					y := float32(row * pixelSize)
-					if !cam.visible(x, y) {
-						continue // [ЗУМ] за кадром — не платимо за те, чого не видно
-					}
-					vector.FillRect(screen, cam.px(x), cam.py(y), cam.s(pixelSize), cam.s(pixelSize), wallFill, false)
-					// Тонкий контур стіни для об'єму
-					vector.StrokeRect(screen, cam.px(x), cam.py(y), cam.s(pixelSize), cam.s(pixelSize), cam.s(1), wallEdge, false)
-				}
-			}
-		}
-
-		// [МЕЖА РІВНЯ] Рамка кольором СТІН — бо межа і є стіна: юніти від неї
-		// відбиваються, гравець упирається.
+		// Тайли рівня. Стіни — темно-сірі, підлога не малюється (фон і є підлогою).
 		//
-		// Раніше вона була бурштиновою й позначала wrap-перехід («гравець протікає на
-		// інший бік»). Wrap-around прибрано давно, а колір лишився й читався як border
-		// з верстки — позначка механіки, якої вже немає.
-		vector.StrokeRect(screen, cam.px(1), cam.py(1), cam.s(screenWidth-2), cam.s(screenHeight-2),
-			cam.s(2), wallEdge, false)
+		// [ПАКЕТУВАННЯ] Усі тайли — В ОДИН ШЛЯХ, а не по два виклики на кожен.
+		//
+		// Та сама техніка, що вже стоїть у ворсі, але виграш більший і причина інша:
+		// стін у кадрі 218, тобто 436 викликів vector щокадру, і ця цифра залежить від
+		// РОЗМІРУ СВІТУ, а не від кількості юнітів. Саме вона мовчки підняла підлогу,
+		// коли карта виросла вчетверо, — а юніти вже перетнули межу кадру.
+		//
+		// Чому це взагалі вирішує проблему: замір показав, що обчислень тут немає —
+		// логіка тіку 1.16 мс і тесселяція 0.88 мс із бюджету 8.33 мс, тобто чверть.
+		// Решту зʼїдало САМЕ ЧИСЛО ВИКЛИКІВ. А з vsync промах навіть на десяту
+		// мілісекунди коштує рівно половини кадрів: 120 → 60, без проміжних значень.
+		//
+		// Малюнок не змінюється: кожен тайл лишається окремим замкненим підшляхом, тож
+		// заливка й контур виходять ті самі, до пікселя.
+		wallPath.Reset() // пакетна змінна: інакше алокація шляху щокадру
+		buildWallPath(&wallPath)
+		fillOp, edgeOp := pathOpts(wallFill), pathOpts(wallEdge)
+		vector.FillPath(screen, &wallPath, nil, &fillOp)
+		vector.StrokePath(screen, &wallPath, &vector.StrokeOptions{Width: cam.s(1)}, &edgeOp)
+
+		// [МЕЖА РІВНЯ] Рамки тут НЕМА, і це свідомо. Камера відсікає центр огляду до
+		// меж світу (camera.go, follow), тож край карти ЗАВЖДИ лежить рівно на краю
+		// вікна — при будь-якому зумі. Рамка збіглася б із ним піксель у піксель:
+		// половина обводки за екраном, половина дублює віконну раму.
+		//
+		// Раніше тут стояв StrokeRect на screenWidth×screenHeight. Поки світ дорівнював
+		// вікну, він лежав саме на краю екрана й читався як оформлення. Коли світ виріс
+		// удвічі, той самий прямокутник лишився на СТАРИХ межах — і став фальшивою
+		// стіною посеред карти: колір стіни (wallEdge), а юніти проходять крізь неї.
 
 		// [СТИГМЕРГІЯ] Теплова карта феромонів фрустрації (під ворогами).
 		// Чим яскравіше-червоніше — тим сильніший слід «тут застрягали».
@@ -487,31 +620,72 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			g.drawFlowField(screen)
 		}
 
-		for i, e := range g.units {
-			// Радіус огляду — дуже прозоре кільце навколо ворога
-			cx := e.X + pixelSize/2
-			cy := e.Y + pixelSize/2
-			if showDetectionCircle {
-				vector.StrokeCircle(screen, cam.px(cx), cam.py(cy), cam.s(e.Cfg.DetectionRange), cam.s(1),
-					color.RGBA{255, 255, 255, 5}, false)
+		// ══════════════════════════════════════════════════════════════════
+		// [ДВА ПРОХОДИ] Спершу ШЛЯХИ всіх юнітів, потім ПРОСТІ ФІГУРИ всіх.
+		//
+		// Раніше кожен юніт малювався цілком: ворс(шлях) → долоні(коло) → тіло(шлях) →
+		// кінчик(коло) → кульки(кола) → смуга HP(прямокутники). А ці два механізми в
+		// ebiten різні (див. [ПАКЕТУВАННЯ] вище): шляхи НАКОПИЧУЮТЬСЯ й ідуть одним
+		// викликом, а кожна проста фігура малюється негайно — і тим САМИМ скидає
+		// накопичене. Дев'ять фігур на юніта давали 450 розривів пакета за кадр.
+		//
+		// Розділені проходи — ОДИН розрив: усі шляхи збираються разом, потім усі
+		// фігури. Механізм при цьому не міняється: ми вже пробували перевести фігури
+		// на шляхи й отримали вдвічі гірший кадр (30 FPS проти 63), бо шлях
+		// растеризується через атлас, а коло — це просто трикутники.
+		//
+		// ЦІНА, і вона видима: юніт більше не малюється «цілком». Раніше пізніший юніт
+		// перекривав ранішнього повністю; тепер тіла всіх лежать під кульками всіх.
+		// У щільній купі це помітно — і це свідомий обмін на кадр.
+		// ══════════════════════════════════════════════════════════════════
+
+		// Діагностичні оверлеї — окремо й ПЕРШИМИ, щоб лишитись під юнітами. Вони
+		// негайні, але їх один прохід, а не вперемішку з кожним юнітом.
+		if showDetectionCircle || showWhiskers {
+			for _, e := range g.units {
+				cx := e.X + pixelSize/2
+				cy := e.Y + pixelSize/2
+				if showDetectionCircle {
+					vector.StrokeCircle(screen, cam.px(cx), cam.py(cy), cam.s(e.Cfg.DetectionRange), cam.s(1),
+						color.RGBA{255, 255, 255, 5}, false)
+				}
+				if showWhiskers && e.Brain != nil {
+					drawBrainSensors(screen, e, cx, cy)
+				}
 			}
-			if showWhiskers && e.Brain != nil {
-				drawBrainSensors(screen, e, cx, cy)
-			}
-			if !cam.visible(e.X, e.Y) {
+		}
+
+		// Прохід 1 — ШЛЯХИ. Порядок усередині юніта збережено: ворс і кінцівки під
+		// тілом, відросток над ним.
+		for i := range g.units {
+			if !cam.visible(g.units[i].X, g.units[i].Y) {
 				continue // [ЗУМ] за кадром: при 4× це 15/16 світу
 			}
 			drawFur(screen, &g.units[i])
-			drawLimbs(screen, &g.units[i])
-			drawPixel(screen, e)
-			drawTentacle(screen, &g.units[i])
-			drawBalls(screen, &g.units[i])
+			drawLimbStrokes(screen, &g.units[i])
+			drawPixelBody(screen, g.units[i])
+			drawTentacleStroke(screen, &g.units[i])
 		}
 		drawFur(screen, &g.player)
-		drawLimbs(screen, &g.player)
-		drawPixel(screen, g.player)
-		drawTentacle(screen, &g.player)
+		drawLimbStrokes(screen, &g.player)
+		drawPixelBody(screen, g.player)
+		drawTentacleStroke(screen, &g.player)
+
+		// Прохід 2 — ПРОСТІ ФІГУРИ. Той самий відносний порядок, що був усередині
+		// юніта: долоні, кінчик відростка, кульки, смуга HP.
+		for i := range g.units {
+			if !cam.visible(g.units[i].X, g.units[i].Y) {
+				continue
+			}
+			drawLimbTips(screen, &g.units[i])
+			drawTentacleTip(screen, &g.units[i])
+			drawBalls(screen, &g.units[i])
+			drawPixelOverlay(screen, g.units[i])
+		}
+		drawLimbTips(screen, &g.player)
+		drawTentacleTip(screen, &g.player)
 		drawBalls(screen, &g.player)
+		drawPixelOverlay(screen, g.player)
 
 		drawDash(screen, &g.player)
 	} // кінець топ-даун-гілки
@@ -545,6 +719,12 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if cam.zoom != camZoomMin {
 		drawText(screen, fmt.Sprintf("zoom %.0f%%", cam.zoom*100), 10, screenWidth/2+90, 25,
 			color.RGBA{240, 200, 90, 255})
+	}
+	// [РЕНДЕР] Те саме правило, що для темпу й зуму: показуємо лише НЕтиповий стан.
+	// Тут воно ще й обовʼязкове: якщо міряєш FPS із вимкненим згладжуванням і не
+	// бачиш цього на екрані, наступного дня матимеш замір без відомої умови.
+	if !antiAlias {
+		drawText(screen, "AA off", 10, screenWidth/2+170, 10, color.RGBA{240, 200, 90, 255})
 	}
 
 	// [ЗАМІРИ] TPS окремо від FPS — це РІЗНІ речі, і плутанина між ними вже раз

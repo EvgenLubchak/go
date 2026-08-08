@@ -159,6 +159,12 @@ func (g *Game) Update() error {
 		startBeat(g.difficulty) // перегенерувати патерн під новий темп
 	}
 
+	// N — згладжування контурів. Перемикач, а не константа, бо це ПРИЛАД ЗАМІРУ:
+	// різницю у FPS видно на тому самому екрані, де стоїть перемикач (див. antiAlias).
+	if inpututil.IsKeyJustPressed(ebiten.KeyN) {
+		antiAlias = !antiAlias
+	}
+
 	// F — перемикач виду: зверху ↔ від першої особи (raycaster)
 	if inpututil.IsKeyJustPressed(ebiten.KeyF) {
 		g.firstPerson = !g.firstPerson
