@@ -440,7 +440,7 @@ func updateLimbs(u *Pixel) {
 	cx := u.X + pixelSize/2
 	cy := u.Y + pixelSize/2
 	for i := 0; i < limbCount; i++ {
-		hx, hy := limbHome(i, cx, cy)
+		hx, hy := limbHome(i, cx, cy, bodyScaleOf(u))
 		u.Limbs[i][0] += (hx - u.Limbs[i][0]) * limbStiff
 		u.Limbs[i][1] += (hy - u.Limbs[i][1]) * limbStiff
 	}
@@ -462,7 +462,7 @@ func updateTentacle(u *Pixel) {
 
 	cx := u.X + pixelSize/2
 	cy := u.Y + pixelSize/2
-	px, py := tentRoot(cx, cy)
+	px, py := tentRoot(cx, cy, bodyScaleOf(u))
 
 	// [ЖАЛО] У спокої відросток ОБВИСАЄ (сегмент униз), під час удару — ВИСТРІЛЮЄ в
 	// заморожений напрямок, довшає й твердне. Повернення програмувати не треба: щойно
@@ -574,7 +574,7 @@ func updateFur(u *Pixel) {
 	}
 
 	seg := length / furJoints
-	fx, fy := furRoot(cx, cy)
+	fx, fy := furRoot(cx, cy, bodyScaleOf(u))
 	for i := 0; i < furStrands; i++ {
 		// Ланцюжок: кожен суглоб тягнеться за ПОПЕРЕДНІМ, ПРОДОВЖУЮЧИ його напрямок від
 		// кореня. Саме з цього ворсинка ВИГИНАЄТЬСЯ, а не лишається прямою палицею.

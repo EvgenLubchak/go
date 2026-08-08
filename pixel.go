@@ -709,7 +709,7 @@ func (p *Pixel) resetFur() {
 
 	cx := p.X + pixelSize/2
 	cy := p.Y + pixelSize/2
-	fx, fy := furRoot(cx, cy)
+	fx, fy := furRoot(cx, cy, 1)
 	seg := float32(furLen) / furJoints
 	for i := 0; i < furStrands; i++ {
 		dx, dy := dirs8[i][0], dirs8[i][1]
@@ -723,11 +723,11 @@ func (p *Pixel) resetFur() {
 		p.Balls[i][0], p.Balls[i][1] = bx, by
 	}
 	for i := 0; i < limbCount; i++ {
-		lx, ly := limbHome(i, cx, cy)
+		lx, ly := limbHome(i, cx, cy, 1)
 		p.Limbs[i][0], p.Limbs[i][1] = lx, ly
 	}
 	// Відросток на спавні висить прямо вниз від нижньої точки тіла.
-	rx, ry := tentRoot(cx, cy)
+	rx, ry := tentRoot(cx, cy, 1)
 	for i := 0; i < tentJoints; i++ {
 		p.Tent[i][0], p.Tent[i][1] = rx, ry+tentSeg*float32(i+1)
 	}
@@ -748,17 +748,18 @@ var limbSpec = [limbCount]struct{ rx, ry, dx, dy float32 }{
 }
 
 // limbRoot — кут корпуса, з якого росте кінцівка i.
-func limbRoot(i int, cx, cy float32) (float32, float32) {
+func limbRoot(i int, cx, cy, scale float32) (float32, float32) {
 	sp := limbSpec[i]
-	return cx + sp.rx*limbRootIn*pixelSize/2, cy + sp.ry*limbRootIn*pixelSize/2
+	half := pixelSize / 2 * limbRootIn * scale
+	return cx + sp.rx*half, cy + sp.ry*half
 }
 
 // limbHome — куди тягнеться кінчик кінцівки i у спокої.
 //
 // Окремою функцією з тієї ж причини, що ballHome, tentRoot і furRoot: потрібна у
 // спавні, оновленні, малюванні й тесті, і розʼїхатись вони не мають права.
-func limbHome(i int, cx, cy float32) (float32, float32) {
-	rx, ry := limbRoot(i, cx, cy)
+func limbHome(i int, cx, cy, scale float32) (float32, float32) {
+	rx, ry := limbRoot(i, cx, cy, scale)
 	sp := limbSpec[i]
 	return rx + sp.dx*limbLen, ry + sp.dy*limbLen
 }
@@ -768,8 +769,8 @@ func limbHome(i int, cx, cy float32) (float32, float32) {
 // Окремою функцією з тієї ж причини, що ballHome: потрібна у спавні, оновленні й тесті,
 // і розʼїхатись не має права — відросток, чий корінь на спавні інший, ніж в оновленні,
 // смикнеться на першому ж кадрі.
-func tentRoot(cx, cy float32) (float32, float32) {
-	return cx, cy + pixelSize/2
+func tentRoot(cx, cy, scale float32) (float32, float32) {
+	return cx, cy + pixelSize/2*tentRootIn*scale
 }
 
 // furRoot — точка, з якої росте ворс: ВЕРХ тіла, а не центр.
@@ -777,8 +778,24 @@ func tentRoot(cx, cy float32) (float32, float32) {
 // Окремою функцією з тієї ж причини, що ballHome і tentRoot: потрібна у спавні,
 // оновленні, малюванні й тесті. Розʼїхатись вони не мають права — ворс, чий корінь у
 // малюванні відрізняється від кореня в оновленні, візуально «відірветься» від тіла.
-func furRoot(cx, cy float32) (float32, float32) {
-	return cx, cy - pixelSize/2*furRootUp
+func furRoot(cx, cy, scale float32) (float32, float32) {
+	return cx, cy - pixelSize/2*furRootUp*scale
+}
+
+// bodyScaleOf — поточний масштаб тіла з пружини (updateBody), із запобіжником для
+// юнітів, створених в обхід resetFur (тести).
+//
+// [НАВІЩО ВСІМ КОРЕНЯМ] Тіло СТИСКАЄТЬСЯ на швидкості: bodySquash дає BodyScale ~0.78
+// на повному ходу, тобто нижня грань малюється на ~2.75px вище. Кріплення, прибиті до
+// СТАЛОЇ півсторони, за нею не встигали — і на швидкості щупальце візуально
+// відривалось від корпуса. Ворс і кінцівки страждали так само, просто менш помітно.
+//
+// Тепер усі три корені множаться на цей масштаб і їдуть разом із намальованим тілом.
+func bodyScaleOf(p *Pixel) float32 {
+	if p.BodyScale <= 0 {
+		return 1
+	}
+	return p.BodyScale
 }
 
 // ballHome — точка, до якої тягнеться кулька i: під тілом, рознесені по горизонталі.

@@ -147,7 +147,7 @@ func drawFur(screen *ebiten.Image, p *Pixel) {
 	}
 	cx := p.X + pixelSize/2
 	cy := p.Y + pixelSize/2
-	fx, fy := furRoot(cx, cy)
+	fx, fy := furRoot(cx, cy, bodyScaleOf(p))
 
 	// [ПАКЕТУВАННЯ] Замість StrokeLine на КОЖЕН сегмент (8×furJoints викликів) збираємо
 	// сегменти в спільні шляхи за товщиною й малюємо один StrokePath на групу.
@@ -199,7 +199,7 @@ func drawLimbs(screen *ebiten.Image, p *Pixel) {
 	// Усі чотири кінцівки — один шлях: товщина в них однакова, тож ділити нема на що.
 	var path vector.Path
 	for i := 0; i < limbCount; i++ {
-		rx, ry := limbRoot(i, cx, cy)
+		rx, ry := limbRoot(i, cx, cy, bodyScaleOf(p))
 		path.MoveTo(rx, ry)
 		path.LineTo(p.Limbs[i][0], p.Limbs[i][1])
 	}
@@ -218,7 +218,7 @@ func drawLimbs(screen *ebiten.Image, p *Pixel) {
 func drawTentacle(screen *ebiten.Image, p *Pixel) {
 	cx := p.X + pixelSize/2
 	cy := p.Y + pixelSize/2
-	px, py := tentRoot(cx, cy)
+	px, py := tentRoot(cx, cy, bodyScaleOf(p))
 	var path vector.Path
 	path.MoveTo(px, py)
 	for i := 0; i < tentJoints; i++ {

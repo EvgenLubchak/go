@@ -2513,7 +2513,7 @@ func TestTentacleWaveTravelsDownTheChain(t *testing.T) {
 
 	// На спавні висить прямо вниз від НИЗУ тіла, без стрибка.
 	cx, cy := u.X+pixelSize/2, u.Y+pixelSize/2
-	rx, ry := tentRoot(cx, cy)
+	rx, ry := tentRoot(cx, cy, 1)
 	if ry <= cy {
 		t.Errorf("корінь відростка не під тілом: %.1f при центрі %.1f", ry, cy)
 	}
@@ -2554,7 +2554,7 @@ func TestTentacleWaveTravelsDownTheChain(t *testing.T) {
 		updateTentacle(u)
 	}
 	cx = u.X + pixelSize/2
-	rx, ry = tentRoot(cx, cy)
+	rx, ry = tentRoot(cx, cy, 1)
 	for i := 0; i < tentJoints; i++ {
 		if math.Abs(float64(u.Tent[i][0]-rx)) > 0.5 {
 			t.Errorf("суглоб %d не вирівнявся під коренем: %.2f проти %.2f",
@@ -2579,7 +2579,7 @@ func TestFurKnobsAreReal(t *testing.T) {
 	cx, cy := u.X+pixelSize/2, u.Y+pixelSize/2
 
 	// 1) Корінь вище центру тіла.
-	fx, fy := furRoot(cx, cy)
+	fx, fy := furRoot(cx, cy, 1)
 	if fy >= cy {
 		t.Errorf("корінь ворсу не вгорі: %.1f при центрі %.1f", fy, cy)
 	}
@@ -2618,7 +2618,7 @@ func TestFurKnobsAreReal(t *testing.T) {
 		updateFur(u)
 	}
 	cx = u.X + pixelSize/2
-	fx, fy = furRoot(cx, cy)
+	fx, fy = furRoot(cx, cy, 1)
 	tip = u.Fur[2][furJoints-1]
 	if d := math.Hypot(float64(tip[0]-fx), float64(tip[1]-fy)); math.Abs(d-furLen) > 0.6 {
 		t.Errorf("після зупинки ворсинка не вирівнялась: довжина %.2f проти %g", d, float64(furLen))
@@ -2715,7 +2715,7 @@ func TestStingShootsAtVictimAndCoolsDown(t *testing.T) {
 	}
 
 	// 3) Під час активної фази відросток тягнеться ВПРАВО, а не вниз.
-	rootX, _ := tentRoot(att.X+pixelSize/2, att.Y+pixelSize/2)
+	rootX, _ := tentRoot(att.X+pixelSize/2, att.Y+pixelSize/2, bodyScaleOf(att))
 	for f := 0; f < stingFrames; f++ {
 		updateTentacle(att)
 	}
@@ -2730,7 +2730,7 @@ func TestStingShootsAtVictimAndCoolsDown(t *testing.T) {
 	for f := 0; f < stingCooldown+300; f++ {
 		updateTentacle(att)
 	}
-	_, rootY := tentRoot(att.X+pixelSize/2, att.Y+pixelSize/2)
+	_, rootY := tentRoot(att.X+pixelSize/2, att.Y+pixelSize/2, bodyScaleOf(att))
 	tip := att.Tent[tentJoints-1]
 	if math.Abs(float64(tip[0]-rootX)) > 1 {
 		t.Errorf("відросток не повернувся під тіло: x = %.1f при корені %.1f", tip[0], rootX)
@@ -2760,7 +2760,7 @@ func TestLimbsHangFromCornersAndLag(t *testing.T) {
 
 	// 1) Анатомія.
 	for i := 0; i < limbCount; i++ {
-		rx, ry := limbRoot(i, cx, cy)
+		rx, ry := limbRoot(i, cx, cy, 1)
 		isArm := i < 2
 		if isArm && ry >= cy {
 			t.Errorf("рука %d кріпиться не згори: y = %.1f при центрі %.1f", i, ry, cy)
@@ -2785,7 +2785,7 @@ func TestLimbsHangFromCornersAndLag(t *testing.T) {
 
 	// 2) На спавні — у своїх домівках, без стрибка.
 	for i := 0; i < limbCount; i++ {
-		hx, hy := limbHome(i, cx, cy)
+		hx, hy := limbHome(i, cx, cy, 1)
 		if math.Abs(float64(u.Limbs[i][0]-hx)) > 1e-4 || math.Abs(float64(u.Limbs[i][1]-hy)) > 1e-4 {
 			t.Errorf("кінцівка %d на спавні не в домівці", i)
 		}
@@ -2797,7 +2797,7 @@ func TestLimbsHangFromCornersAndLag(t *testing.T) {
 	updateLimbs(u)
 	cx = u.X + pixelSize/2
 	for i := 0; i < limbCount; i++ {
-		hx, _ := limbHome(i, cx, cy)
+		hx, _ := limbHome(i, cx, cy, 1)
 		if u.Limbs[i][0] == before[i][0] {
 			t.Errorf("кінцівка %d не рушила зовсім", i)
 		}
@@ -2811,9 +2811,56 @@ func TestLimbsHangFromCornersAndLag(t *testing.T) {
 		updateLimbs(u)
 	}
 	for i := 0; i < limbCount; i++ {
-		hx, hy := limbHome(i, cx, cy)
+		hx, hy := limbHome(i, cx, cy, 1)
 		if d := math.Hypot(float64(u.Limbs[i][0]-hx), float64(u.Limbs[i][1]-hy)); d > 0.5 {
 			t.Errorf("кінцівка %d не наздогнала за 300 кадрів: %.2f", i, d)
 		}
+	}
+}
+
+// TestRootsFollowBodySquash — [КРІПЛЕННЯ] корені їдуть разом із НАМАЛЬОВАНИМ тілом.
+//
+// Тіло стискається на швидкості: bodySquash дає BodyScale ~0.78 на повному ходу, тобто
+// нижня грань малюється на ~2.75px вище. Корені, прибиті до СТАЛОЇ півсторони, за нею не
+// встигали — і щупальце візуально відривалось від корпуса. Ворс і кінцівки страждали так
+// само, просто менш помітно.
+//
+// Тест ловить саме це: при стиснутому тілі всі три корені мусять підтягнутись до центру.
+func TestRootsFollowBodySquash(t *testing.T) {
+	cx, cy := float32(500), float32(500)
+
+	full := &Pixel{BodyScale: 1.0}
+	squashed := &Pixel{BodyScale: 0.78} // приблизно повний хід
+
+	_, fyFull := furRoot(cx, cy, bodyScaleOf(full))
+	_, fySq := furRoot(cx, cy, bodyScaleOf(squashed))
+	if !(fySq > fyFull) {
+		t.Errorf("корінь ворсу не підтягнувся при стисненні: %.2f проти %.2f", fySq, fyFull)
+	}
+
+	_, tyFull := tentRoot(cx, cy, bodyScaleOf(full))
+	_, tySq := tentRoot(cx, cy, bodyScaleOf(squashed))
+	if !(tySq < tyFull) {
+		t.Errorf("корінь щупальця не підтягнувся: %.2f проти %.2f", tySq, tyFull)
+	}
+	gap := tyFull - tySq
+	t.Logf("при BodyScale 0.78 корінь щупальця вище на %.2fpx — саме цей розрив і був видний", gap)
+	if gap < 1 {
+		t.Errorf("поправка мізерна (%.2fpx) — розрив лишиться видним", gap)
+	}
+
+	for i := 0; i < limbCount; i++ {
+		xF, yF := limbRoot(i, cx, cy, bodyScaleOf(full))
+		xS, yS := limbRoot(i, cx, cy, bodyScaleOf(squashed))
+		dF := math.Hypot(float64(xF-cx), float64(yF-cy))
+		dS := math.Hypot(float64(xS-cx), float64(yS-cy))
+		if !(dS < dF) {
+			t.Errorf("кінцівка %d не підтягнулась: %.2f проти %.2f", i, dS, dF)
+		}
+	}
+
+	// І запобіжник: юніт без пружини (створений в обхід resetFur) не мусить схлопнутись.
+	if bodyScaleOf(&Pixel{}) != 1 {
+		t.Error("юніт без BodyScale отримав нульовий масштаб — кріплення зійдуться в точку")
 	}
 }
