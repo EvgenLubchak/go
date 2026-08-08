@@ -54,13 +54,10 @@ type FlowField struct {
 	maxDist int32   // найдальша досяжна клітинка (для розфарбування)
 	valid   bool
 
-	// [КЕШ МАЛЮВАННЯ] Стрілки поля — це ~5000 vector-примітивів, і кожен коштує
-	// ТЕСЕЛЯЦІЇ НА CPU при кожному виклику. Але поле міняється лише при перебудові
-	// (раз на flowRebuildEvery кадрів), а Draw викликається щокадру монітора.
-	// Тож малюємо один раз у позаекранний шар, а далі виводимо його одним
-	// DrawImage (це вже дешевий GPU-blit).
-	overlay      *ebiten.Image
-	overlayValid bool
+	// [КАМЕРА] Кеш малювання прибрано: тепер світ може бути більшим за екран, і
+	// створювати текстуру worldWidth×worldHeight (100+ МБ) для дебаг-оверлея
+	// марнотратно. Натомість drawFlowField малює лише ВИДИМІ клітинки щокадру
+	// з камерою — каллінг компенсує вартість теселяції.
 }
 
 // rebuildFrom — зручний варіант для ОДНОГО джерела (використовують тести).
@@ -77,7 +74,7 @@ func (f *FlowField) rebuildFrom(col, row int) {
 // по ~2500 клітинок.
 func (f *FlowField) rebuild(sources []flowSource) {
 	f.valid = false
-	f.overlayValid = false // дані змінились → перемалювати шар
+	// (кеш прибрано — малюємо щокадру з камерою)
 	f.maxDist = 0
 	for r := 0; r < boidMapH; r++ {
 		for c := 0; c < boidMapW; c++ {
@@ -222,7 +219,12 @@ func (g *Game) flowFor(u *Pixel) *FlowField {
 
 // drawFlowField — візуалізація (клавіша V): бачимо, як алгоритм «знає лабіринт».
 // Стрілка в клітинці — куди веде поле; яскравість ∝ близькість до цілі.
-// Саме малювання кешується — див. renderOverlay.
+//
+// [КАМЕРА] Малюємо лише ВИДИМІ клітинки з камерою (px/py/s). Раніше кешувалось у
+// позаекранний шар розміром screenWidth×screenHeight, але тепер світ може бути
+// більшим за екран, і створювати worldWidth×worldHeight текстуру (100+ МБ) для
+// дебаг-оверлея — марнотратство. Каллінг по камері компенсує: при зумі 1× видно
+// стільки ж клітинок, скільки раніше; при зумі 4× — у 16 разів менше.
 func (g *Game) drawFlowField(screen *ebiten.Image) {
 	// Клавіша V циклює: 0 = вимкнено, 1 = поле ДО СТОРОНИ ГРАВЦЯ (його бачать
 	// вороги), 2 = поле ДО ВОРОГІВ (його бачать твої юніти).
@@ -233,40 +235,30 @@ func (g *Game) drawFlowField(screen *ebiten.Image) {
 	if !f.valid || f.maxDist == 0 {
 		return
 	}
-	screen.DrawImage(f.renderOverlay(), nil)
-}
 
-// renderOverlay — намальовані стрілки поля. Перемальовуємо ЛИШЕ коли поле
-// змінилось; решту кадрів повертаємо готовий шар.
-//
-// [GO: ЛІНИВА ІНІЦІАЛІЗАЦІЯ] ebiten.NewImage можна кликати лише коли графічний
-// контекст уже живий, тому створюємо шар при першому малюванні, а не в init.
-func (f *FlowField) renderOverlay() *ebiten.Image {
-	if f.overlay == nil {
-		f.overlay = ebiten.NewImage(screenWidth, screenHeight)
-	}
-	if f.overlayValid {
-		return f.overlay
-	}
-	f.overlayValid = true
-	screen := f.overlay
-	screen.Clear() // шар прозорий → лягає поверх карти без фону
-	// Заливку клітинок НЕ малюємо: контури рівної відстані в манхеттен-метриці —
-	// це «ромби», у відкритому просторі вони читаються як шахове штрихування, а не
-	// як кільця. Усю інформацію несуть стрілки: напрямок + яскравість = близькість.
 	for r := 0; r < boidMapH; r++ {
 		for c := 0; c < boidMapW; c++ {
 			d := f.dist[r][c]
 			if d == flowUnreachable {
 				continue
 			}
+			// Світові координати центру клітинки
+			wx := float32(c*pixelSize) + pixelSize/2
+			wy := float32(r*pixelSize) + pixelSize/2
+
+			// [КАМЕРА] Каллінг — не малюємо те, що за екраном.
+			if !cam.visible(wx, wy) {
+				continue
+			}
+
 			dx, dy := f.dirX[r][c], f.dirY[r][c]
-			cx := float32(c*pixelSize) + pixelSize/2
-			cy := float32(r*pixelSize) + pixelSize/2
+			sx := cam.px(wx)
+			sy := cam.py(wy)
 
 			// Клітинка-джерело — без напрямку; позначаємо точкою.
 			if dx == 0 && dy == 0 {
-				vector.FillRect(screen, cx-2, cy-2, 4, 4, color.RGBA{255, 255, 255, 220}, false)
+				hs := cam.s(2)
+				vector.FillRect(screen, sx-hs, sy-hs, hs*2, hs*2, color.RGBA{255, 255, 255, 220}, false)
 				continue
 			}
 
@@ -278,16 +270,12 @@ func (f *FlowField) renderOverlay() *ebiten.Image {
 				A: uint8(110 + 130*t),
 			}
 
-			// [ВАЖЛИВО] Хвіст рівно в центрі клітинки, голова — у напрямку руху,
-			// плюс КРАПКА на кінці. Без крапки лінія симетрична, і напрямок
-			// прочитати неможливо (той самий «/» = і NE, і SW) — тоді поле
-			// виглядає як штрихування, а не як стрілки.
-			const arrowLen = 0.42 * pixelSize
-			tx := cx + dx*arrowLen
-			ty := cy + dy*arrowLen
-			vector.StrokeLine(screen, cx, cy, tx, ty, 1, col, false)
-			vector.FillRect(screen, tx-1.5, ty-1.5, 3, 3, col, false)
+			arrowLen := cam.s(0.42 * pixelSize)
+			tx := sx + dx*arrowLen
+			ty := sy + dy*arrowLen
+			vector.StrokeLine(screen, sx, sy, tx, ty, cam.s(1), col, false)
+			ds := cam.s(1.5)
+			vector.FillRect(screen, tx-ds, ty-ds, ds*2, ds*2, col, false)
 		}
 	}
-	return f.overlay
 }

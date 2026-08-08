@@ -15,7 +15,14 @@ package main
 const (
 	screenWidth  = 1700
 	screenHeight = 980
-	pixelSize    = 25
+
+	// [КАМЕРА] Розмір СВІТУ — може бути більшим за вікно. Камера (camera.go) слідує за
+	// гравцем і показує лише видиму частину. Фізика, boidMap, flow-field, спавни —
+	// все працює у СВІТОВИХ координатах; screenWidth/Height — лише розмір вікна й HUD.
+	worldWidth  = 3400
+	worldHeight = 1960
+
+	pixelSize = 25
 	// [СКЛАД ПОЛЯ] Кількість ворогів більше НЕ тут: кожен тип несе своє поле Count,
 	// а хто виходить на поле — список unitRoster (pixel.go). Так додати новий тип
 	// = один рядок, і неможливо мовчки лишитись без переслідувачів.
@@ -61,6 +68,6 @@ const (
 	// Джерел багато й вони рухаються, тож троттлинг замість «при зміні клітинки».
 	flowRebuildEvery = 6
 
-	boidMapW = screenWidth / pixelSize  // клітинок по горизонталі
-	boidMapH = screenHeight / pixelSize // клітинок по вертикалі
+	boidMapW = worldWidth / pixelSize  // клітинок по горизонталі (за СВІТОМ, не за екраном)
+	boidMapH = worldHeight / pixelSize // клітинок по вертикалі
 )

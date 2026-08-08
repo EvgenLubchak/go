@@ -1136,9 +1136,9 @@ func hasLineOfSight(x1, y1, x2, y2 float32) bool {
 
 // GatherInputs збирає стан (state) для Q-мережі.
 //
-//	[0] dx/screenWidth     напрямок до гравця X   ◄─┐
-//	[1] dy/screenHeight    напрямок до гравця Y     │ обнуляються,
-//	[2] dist/screenWidth   відстань до гравця       │ коли гравця НЕ видно
+//	[0] dx/worldWidth      напрямок до гравця X   ◄─┐
+//	[1] dy/worldHeight     напрямок до гравця Y     │ обнуляються,
+//	[2] dist/worldWidth    відстань до гравця       │ коли гравця НЕ видно
 //	[3] pVelX/5            швидкість гравця X        │ (POMDP)
 //	[4] pVelY/5            швидкість гравця Y     ◄─┘
 //	[5..12] whiskers       близькість стіни у 8 напрямках  ◄── зір на перешкоди (завжди)
@@ -1169,9 +1169,9 @@ func GatherInputs(enemy, player *Pixel) [baseInputs]float32 {
 
 	var in [baseInputs]float32
 	if visible {
-		in[0] = dx / screenWidth
-		in[1] = dy / screenHeight
-		in[2] = dist / screenWidth
+		in[0] = dx / worldWidth
+		in[1] = dy / worldHeight
+		in[2] = dist / worldWidth
 		// [БІЙ: ПРОПРІОЦЕПЦІЯ] Бойовим типам сюди йде ВЛАСНА швидкість, а не гравцева.
 		//
 		// Причина не в зручності, а в тому, що без неї цілий клас рішень недосяжний.
@@ -1298,9 +1298,9 @@ func GatherPreyInputs(player *Pixel, units []Pixel) [baseInputs]float32 {
 		if dist == 0 {
 			dist = 1
 		}
-		in[0] = dx / screenWidth
-		in[1] = dy / screenHeight
-		in[2] = dist / screenWidth
+		in[0] = dx / worldWidth
+		in[1] = dy / worldHeight
+		in[2] = dist / worldWidth
 		in[3] = e.VelX / 5.0
 		in[4] = e.VelY / 5.0
 		in[inVisible] = 1

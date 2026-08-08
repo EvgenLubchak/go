@@ -317,8 +317,8 @@ func (g *Game) updateUnits() {
 			e.VelX = -e.VelX
 			e.HitWall = true
 		}
-		if e.X > screenWidth-pixelSize {
-			e.X = screenWidth - pixelSize
+		if e.X > worldWidth-pixelSize {
+			e.X = worldWidth - pixelSize
 			e.VelX = -e.VelX
 			e.HitWall = true
 		}
@@ -327,8 +327,8 @@ func (g *Game) updateUnits() {
 			e.VelY = -e.VelY
 			e.HitWall = true
 		}
-		if e.Y > screenHeight-pixelSize {
-			e.Y = screenHeight - pixelSize
+		if e.Y > worldHeight-pixelSize {
+			e.Y = worldHeight - pixelSize
 			e.VelY = -e.VelY
 			e.HitWall = true
 		}
@@ -421,13 +421,33 @@ func (g *Game) nearestTargetFor(u *Pixel) *Pixel {
 // Саме з відставання виходить уся анімація: рушив — кульки лишились позаду й
 // підтягуються; різко повернув — заносить убік; спинився — доганяють і завмирають.
 // Нічого з цього не програмується окремо.
+//
+// [ПОВОДОК] Але саме відставання й було дірою: кулька — єдиний відросток без кріплення
+// (ворс і щупальце тримає ланцюжок, кінцівку — намальована лінія від кута корпуса), тож
+// на піднятій стелі швидкості вона просто відлітала на два корпуси й читалась як
+// окремий обʼєкт. Тепер відхід стискається до асимптоти ballLeash — див. там про те,
+// чому асимптота, а не зріз.
 func updateBalls(u *Pixel) {
 	cx := u.X + pixelSize/2
 	cy := u.Y + pixelSize/2
+	// Масштаб пружини тіла — той самий, що в решти кріплень. І в домівці, і в поводку:
+	// стиснуте тіло має тягти кульки ближче, а не лише опускати їх вище.
+	scale := bodyScaleOf(u)
+	leash := float32(ballLeash) * scale
 	for i := 0; i < ballCount; i++ {
-		hx, hy := ballHome(i, cx, cy)
+		hx, hy := ballHome(i, cx, cy, scale)
 		u.Balls[i][0] += (hx - u.Balls[i][0]) * ballStiff
 		u.Balls[i][1] += (hy - u.Balls[i][1]) * ballStiff
+
+		// d·L/√(L²+d²): напрямок відходу лишається цілим (він і несе «куди занесло»),
+		// стискається лише довжина. Позиція, а не швидкість — бо пружина тут теж
+		// позиційна, без інерційного стану, тож поводок нікуди не «накопичується».
+		dx, dy := u.Balls[i][0]-hx, u.Balls[i][1]-hy
+		if d := float32(math.Sqrt(float64(dx*dx + dy*dy))); d > 0.001 {
+			k := leash / float32(math.Sqrt(float64(leash*leash+d*d)))
+			u.Balls[i][0] = hx + dx*k
+			u.Balls[i][1] = hy + dy*k
+		}
 	}
 }
 
@@ -474,7 +494,10 @@ func updateTentacle(u *Pixel) {
 		seg, stiff = tentSeg*stingReach, stingStiff
 	}
 
-	for i := 0; i < tentJoints; i++ {
+	// Довжина ланцюжка — своя в кожного типу (UnitConfig.TentJoints), тож межа циклу
+	// не константа. Падіння жорсткості лишається тим самим: tentFalloff на суглоб, тобто
+	// у довшого відростка кінчик млявіший — не окремий випадок, а той самий закон.
+	for i, n := 0, tentJointsOf(u); i < n; i++ {
 		u.Tent[i][0] += (px + dx*seg - u.Tent[i][0]) * stiff
 		u.Tent[i][1] += (py + dy*seg - u.Tent[i][1]) * stiff
 		px, py = u.Tent[i][0], u.Tent[i][1]

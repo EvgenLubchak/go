@@ -2463,7 +2463,7 @@ func TestBallsLagBehindTheBody(t *testing.T) {
 	// На спавні кульки СТОЯТЬ у своїх домівках — без стрибка.
 	cx, cy := u.X+pixelSize/2, u.Y+pixelSize/2
 	for i := 0; i < ballCount; i++ {
-		hx, hy := ballHome(i, cx, cy)
+		hx, hy := ballHome(i, cx, cy, 1)
 		if math.Abs(float64(u.Balls[i][0]-hx)) > 1e-4 || math.Abs(float64(u.Balls[i][1]-hy)) > 1e-4 {
 			t.Errorf("кулька %d на спавні не в домівці: (%.2f, %.2f) проти (%.2f, %.2f)",
 				i, u.Balls[i][0], u.Balls[i][1], hx, hy)
@@ -2476,7 +2476,7 @@ func TestBallsLagBehindTheBody(t *testing.T) {
 	updateBalls(u)
 	cx = u.X + pixelSize/2
 	for i := 0; i < ballCount; i++ {
-		hx, _ := ballHome(i, cx, cy)
+		hx, _ := ballHome(i, cx, cy, 1)
 		moved := u.Balls[i][0] - before[i][0]
 		if moved <= 0 {
 			t.Errorf("кулька %d не рушила за тілом зовсім: %.2f", i, moved)
@@ -2492,10 +2492,48 @@ func TestBallsLagBehindTheBody(t *testing.T) {
 		updateBalls(u)
 	}
 	for i := 0; i < ballCount; i++ {
-		hx, hy := ballHome(i, cx, cy)
+		hx, hy := ballHome(i, cx, cy, 1)
 		d := math.Hypot(float64(u.Balls[i][0]-hx), float64(u.Balls[i][1]-hy))
 		if d > 0.5 {
 			t.Errorf("кулька %d не наздогнала за 200 кадрів: відстань %.2f", i, d)
+		}
+	}
+}
+
+// TestBallsStayLeashedToTheBody — [КУЛЬКИ: ПОВОДОК] відставання не має права
+// перетворюватись на ВІДРИВ.
+//
+// Кулька — єдиний відросток без кріплення: ворс і щупальце тримає ланцюжок (суглоб
+// цілиться на сегмент від попереднього, тож довжина самообмежена), кінцівку — намальована
+// лінія від кута корпуса. Кулька ж вільне коло, і поки стеля швидкості гравця множилась
+// трьома механіками (base 5 × sqrt(difficulty), далі ×2 ривок або ×4 відкид), чистий лаг
+// 2.33·v виносив її на 23–47px при корпусі 25 — два корпуси порожньої води.
+//
+// Перевіряємо на СТАЛОМУ русі, а не на одному стрибку: відрив був не одноразовим
+// смиканням, а стаціонарним станом усього часу руху.
+func TestBallsStayLeashedToTheBody(t *testing.T) {
+	// 5 = звичайна стеля гравця, 10 = ривок, 20 = відкид, 40 = відкид на difficulty 4.
+	for _, v := range []float32{5, 10, 20, 40} {
+		u := &Pixel{X: 500, Y: 500}
+		u.resetFur()
+		for f := 0; f < 200; f++ {
+			u.X += v // сталий рух: лаг виходить на стаціонар
+			updateBalls(u)
+		}
+		cx, cy := u.X+pixelSize/2, u.Y+pixelSize/2
+		for i := 0; i < ballCount; i++ {
+			hx, hy := ballHome(i, cx, cy, bodyScaleOf(u))
+			d := math.Hypot(float64(u.Balls[i][0]-hx), float64(u.Balls[i][1]-hy))
+			if d > ballLeash+1e-3 {
+				t.Errorf("v=%.0f: кулька %d відійшла на %.2f при поводку %.2f — відрив",
+					v, i, d, float64(ballLeash))
+			}
+			// Обернений бік: поводок не має права приклеїти кульку намертво, інакше
+			// разом із відривом він приберає й саму анімацію.
+			if d < 1 {
+				t.Errorf("v=%.0f: кулька %d приклеїлась до домівки (%.2f) — відставання зникло",
+					v, i, d)
+			}
 		}
 	}
 }
@@ -2517,7 +2555,10 @@ func TestTentacleWaveTravelsDownTheChain(t *testing.T) {
 	if ry <= cy {
 		t.Errorf("корінь відростка не під тілом: %.1f при центрі %.1f", ry, cy)
 	}
-	for i := 0; i < tentJoints; i++ {
+	// Межа — tentJointsOf, а не константа: довжина ланцюжка тепер властивість ТИПУ
+	// (UnitConfig.TentJoints), і тест мусить перевіряти саме цього юніта.
+	n := tentJointsOf(u)
+	for i := 0; i < n; i++ {
 		wantY := ry + tentSeg*float32(i+1)
 		if math.Abs(float64(u.Tent[i][1]-wantY)) > 1e-4 || math.Abs(float64(u.Tent[i][0]-rx)) > 1e-4 {
 			t.Errorf("суглоб %d на спавні не на місці: (%.1f, %.1f) проти (%.1f, %.1f)",
@@ -2531,22 +2572,24 @@ func TestTentacleWaveTravelsDownTheChain(t *testing.T) {
 	updateTentacle(u)
 
 	// 1) Хвиля йде згори вниз: перший суглоб зрушив більше за останній.
-	move := make([]float64, tentJoints)
-	for i := 0; i < tentJoints; i++ {
+	move := make([]float64, n)
+	for i := 0; i < n; i++ {
 		move[i] = math.Abs(float64(u.Tent[i][0] - before[i][0]))
 	}
-	for i := 1; i < tentJoints; i++ {
+	for i := 1; i < n; i++ {
 		if move[i] >= move[i-1] {
 			t.Errorf("суглоб %d зрушив на %.3f, а попередній лише на %.3f — хвиля не "+
 				"йде вниз по ланцюжку", i, move[i], move[i-1])
 		}
 	}
-	t.Logf("зсув за кадр по ланцюжку: %.2f → %.2f → %.2f", move[0], move[1], move[2])
+	// %v, а не три індекси: ланцюжок буває будь-якої довжини, і жорстке move[2] впало б
+	// на типі з двома суглобами.
+	t.Logf("зсув за кадр по ланцюжку (%d суглобів): %.2f", n, move)
 
 	// 2) Кінчик мусить помітно ВІДСТАВАТИ від основи — інакше це палиця, а не щупальце.
-	if move[tentJoints-1] > move[0]*0.5 {
+	if move[n-1] > move[0]*0.5 {
 		t.Errorf("кінчик відстає замало (%.3f проти %.3f у основи) — вигину не буде",
-			move[tentJoints-1], move[0])
+			move[n-1], move[0])
 	}
 
 	// 3) І все ж вирівнюється, якщо тіло стоїть.
@@ -2555,11 +2598,122 @@ func TestTentacleWaveTravelsDownTheChain(t *testing.T) {
 	}
 	cx = u.X + pixelSize/2
 	rx, ry = tentRoot(cx, cy, 1)
-	for i := 0; i < tentJoints; i++ {
+	for i := 0; i < n; i++ {
 		if math.Abs(float64(u.Tent[i][0]-rx)) > 0.5 {
 			t.Errorf("суглоб %d не вирівнявся під коренем: %.2f проти %.2f",
 				i, u.Tent[i][0], rx)
 		}
+	}
+}
+
+// TestTentJointsComeFromTheConfig — [ВІДРОСТОК] довжина ланцюжка стала властивістю ТИПУ.
+//
+// Три речі, і кожна ламається молча:
+//
+//  1. нуль у конфізі означає «взяти дефолт», а не «щупальця немає». Гравець приходить
+//     сюди саме з нулем (Cfg у нього порожній), тож помилка тут забрала б відросток у
+//     гравця, а не в якогось типу;
+//  2. задане число справді керує ФІЗИКОЮ — рухаються рівно стільки суглобів. Якби межа
+//     циклу лишилась константою, конфіг читався б, а нічого не змінював;
+//  3. слоти ЗА межами ланцюжка стоять на місці. Вони є в масиві (розмір — стеля), їх
+//     ніхто не малює, і якби фізика їх усе одно чіпала, ми платили б за невидиме.
+func TestTentJointsComeFromTheConfig(t *testing.T) {
+	// 1) Нуль = дефолт. Це шлях гравця.
+	plain := &Pixel{X: 500, Y: 500}
+	if got := tentJointsOf(plain); got != tentJoints {
+		t.Errorf("порожній конфіг дав %d суглобів, чекали дефолт %d", got, tentJoints)
+	}
+
+	// 2) Задане число керує фізикою.
+	const want = 8
+	if want > tentJointsMax || want == tentJoints {
+		t.Fatalf("тест утратив сенс: want=%d при стелі %d і дефолті %d", want, tentJointsMax, tentJoints)
+	}
+	u := &Pixel{X: 500, Y: 500, Cfg: UnitConfig{TentJoints: want}}
+	u.resetFur()
+	if got := tentJointsOf(u); got != want {
+		t.Fatalf("конфіг дав %d суглобів, чекали %d", got, want)
+	}
+
+	before := u.Tent // масив копіюється ПО ЗНАЧЕННЮ — на цьому тест і тримається
+	u.X += 40
+	updateTentacle(u)
+
+	for i := 0; i < want; i++ {
+		if u.Tent[i][0] == before[i][0] {
+			t.Errorf("суглоб %d не рушив — конфіг не дійшов до фізики", i)
+		}
+	}
+
+	// 3) Хвіст за межами ланцюжка — недоторканий.
+	for i := want; i < tentJointsMax; i++ {
+		if u.Tent[i][0] != before[i][0] || u.Tent[i][1] != before[i][1] {
+			t.Errorf("суглоб %d за межами ланцюжка (%d) усе одно рухається — платимо за невидиме",
+				i, want)
+		}
+	}
+}
+
+// TestTentJointsFitTheArray — [ВІДРОСТОК] жоден тип у складі поля не просить більше
+// суглобів, ніж уміщає масив.
+//
+// tentJointsOf обрізає перебір до стелі, бо вихід за масив — паніка в циклі малювання.
+// Але обрізання ТИХЕ: тип отримав би коротше щупальце, ніж просив, і ніхто б не сказав.
+// Тож перебір ловимо тут — у конфігах, а не в рантаймі.
+func TestTentJointsFitTheArray(t *testing.T) {
+	for _, cfg := range unitRoster {
+		if cfg.TentJoints > tentJointsMax {
+			t.Errorf("%q просить %d суглобів при стелі tentJointsMax = %d — підніми стелю "+
+				"або зменш конфіг, інакше відросток тихо обріжеться",
+				cfg.Label, cfg.TentJoints, tentJointsMax)
+		}
+	}
+	// Гравець теж просить своє число, просто з іншого місця (playerTentJoints).
+	if playerTentJoints > tentJointsMax {
+		t.Errorf("гравець просить %d суглобів при стелі tentJointsMax = %d",
+			playerTentJoints, tentJointsMax)
+	}
+}
+
+// TestPlayerTentJointsComeFromTheKnob — [ГРАВЕЦЬ] ручка суглобів справді доходить до
+// гравця, а не лишається неприкладеною константою.
+//
+// Гравець живе поза unitRoster, тож у нього немає типу, з якого взяти число. Але він
+// такий самий Pixel і ходить через той самий tentJointsOf — потрібне лише місце, де
+// задати. Це місце — Cfg.TentJoints у newPlayer.
+//
+// Саме тому newPlayer існує окремою функцією: у літералі всередині main() рядок `Cfg:`
+// можна було б видалити, і жоден тест не впав би. Тут — упаде.
+func TestPlayerTentJointsComeFromTheKnob(t *testing.T) {
+	p := newPlayer()
+
+	want := playerTentJoints
+	if want <= 0 {
+		want = tentJoints // нуль = дефолт, і це поточний стан гри
+	}
+	if got := tentJointsOf(&p); got != want {
+		t.Errorf("гравець отримав %d суглобів, чекали %d (playerTentJoints = %d)",
+			got, want, playerTentJoints)
+	}
+
+	// Ручка мусить бути ЖИВОЮ: підміна значення в Cfg міняє довжину ланцюжка. Без цієї
+	// половини тест лишався б зеленим і тоді, коли tentJointsOf ігнорує конфіг гравця.
+	const probe = 9
+	if probe > tentJointsMax || probe == tentJoints {
+		t.Fatalf("проба втратила сенс: %d при стелі %d і дефолті %d", probe, tentJointsMax, tentJoints)
+	}
+	p.Cfg.TentJoints = probe
+	if got := tentJointsOf(&p); got != probe {
+		t.Errorf("підміна ручки не подіяла: %d замість %d — гравець не читає свій конфіг",
+			got, probe)
+	}
+
+	// І решта Cfg у гравця мусить лишитись порожньою: на це спираються updateBody
+	// (MaxSpeed ≤ 0 → playerBaseSpeed) і GatherInputs.
+	p = newPlayer()
+	if p.Cfg.MaxSpeed != 0 || p.Cfg.IsLearner || p.Cfg.WeightsFile != "" || p.Cfg.MaxHP != 0 {
+		t.Errorf("newPlayer заповнив у Cfg щось окрім суглобів — гравець почав видавати "+
+			"себе за тип із unitRoster: %+v", p.Cfg)
 	}
 }
 
@@ -2719,19 +2873,19 @@ func TestStingShootsAtVictimAndCoolsDown(t *testing.T) {
 	for f := 0; f < stingFrames; f++ {
 		updateTentacle(att)
 	}
-	tipX := att.Tent[tentJoints-1][0]
+	tipX := att.Tent[tentJointsOf(att)-1][0]
 	if tipX <= rootX+float32(tentSeg) {
 		t.Errorf("жало не вистрілило: кінчик на %.1f при корені %.1f", tipX, rootX)
 	}
 	t.Logf("виліт за %d кадрів: кінчик на %.0fpx від кореня (у спокої %.0f)",
-		stingFrames, tipX-rootX, float64(tentSeg)*tentJoints)
+		stingFrames, tipX-rootX, float64(tentSeg)*float64(tentJointsOf(att)))
 
 	// 4) Після відходу повертається до обвисання — саме, без коду повернення.
 	for f := 0; f < stingCooldown+300; f++ {
 		updateTentacle(att)
 	}
 	_, rootY := tentRoot(att.X+pixelSize/2, att.Y+pixelSize/2, bodyScaleOf(att))
-	tip := att.Tent[tentJoints-1]
+	tip := att.Tent[tentJointsOf(att)-1]
 	if math.Abs(float64(tip[0]-rootX)) > 1 {
 		t.Errorf("відросток не повернувся під тіло: x = %.1f при корені %.1f", tip[0], rootX)
 	}
@@ -2859,35 +3013,55 @@ func TestRootsFollowBodySquash(t *testing.T) {
 		}
 	}
 
+	// [КУЛЬКИ] Четверте кріплення. Його пропустили, коли робили перші три: кулька не має
+	// «кореня» в тілі, тож не виглядала коренем — а хворіла тим самим. При стисненні
+	// домівка мусить підтягтись і вгору, і до центру по горизонталі.
+	for i := 0; i < ballCount; i++ {
+		xF, yF := ballHome(i, cx, cy, bodyScaleOf(full))
+		xS, yS := ballHome(i, cx, cy, bodyScaleOf(squashed))
+		if !(yS < yF) {
+			t.Errorf("кулька %d не підтягнулась угору: %.2f проти %.2f", i, yS, yF)
+		}
+		if !(math.Abs(float64(xS-cx)) < math.Abs(float64(xF-cx))) {
+			t.Errorf("кулька %d не звузила рознесення: %.2f проти %.2f", i, xS, xF)
+		}
+	}
+
 	// І запобіжник: юніт без пружини (створений в обхід resetFur) не мусить схлопнутись.
 	if bodyScaleOf(&Pixel{}) != 1 {
 		t.Error("юніт без BodyScale отримав нульовий масштаб — кріплення зійдуться в точку")
 	}
 }
 
-// TestCameraIdentityAtFullView — [ЗУМ] на 100% картинка мусить лишитись ТОЧНО такою,
-// якою була завжди.
+// TestCameraIdentityInTheCornerView — [ЗУМ] на 100% і в КУТІ світу трансформація
+// тотожна, тобто стара картинка 1700×980 лишається відтворюваною піксель у піксель.
 //
-// Це головна вимога до камери: зум додається як нова можливість, а не як зміна того, що
-// вже є. Досягається без жодного if — центр огляду ВІДСІКАЄТЬСЯ до меж світу, тож при
-// зумі 1.0 піввікна дорівнює півсвіту й камера сама стає рівно в центр карти.
+// Раніше цей тест звався ...AtFullView і твердив, що «на 100% картинка лишається такою,
+// якою була завжди, бо піввікна дорівнює півсвіту й камера стає в центр карти». Поки світ
+// дорівнював вікну, це була правда. Відколи світ 3400×1960 проти вікна 1700×980, при зумі
+// 1.0 видно ЧВЕРТЬ карти й камера реально їздить — а тест лишався зеленим ВИПАДКОВО: він
+// ганяв камеру лише за гравцем у (0,0), відсікання притискало центр огляду до (850, 490),
+// і 850 просто збігається зі screenWidth/2. Центр СВІТУ при цьому (1700, 980).
 //
-// Якби замість відсікання стояв особливий випадок «якщо зум == 1, не трансформувати»,
-// він розійшовся б із рештою коду на першій же правці.
-func TestCameraIdentityAtFullView(t *testing.T) {
+// Тож тепер перевіряємо дві речі окремо: тотожність там, де вона справді є (кутовий вид),
+// і ВІДСУТНІСТЬ її в центрі світу — щоб мертве твердження «завжди тотожна» не відродилось
+// у чиїйсь голові разом із екранними координатами в малюванні.
+func TestCameraIdentityInTheCornerView(t *testing.T) {
 	saved := cam
 	defer func() { cam = saved }()
 
+	// Гравець у куті → відсікання притискає вид до лівого-верхнього кута СВІТУ.
 	cam = camera{zoom: camZoomMin}
-	// Скільки б камера не ганялась за гравцем у куті — відсікання тримає її в центрі.
-	for f := 0; f < 200; f++ {
+	for f := 0; f < 400; f++ {
 		cam.follow(0, 0)
 	}
 	// Порівнюємо з допуском, а не на рівність: стеження експоненційне, тож камера
-	// СХОДИТЬСЯ до центру, а не стрибає в нього. Після 200 кадрів залишок ~1e-8 px —
-	// на вісім порядків менше за піксель, тобто тотожність практична, а не буквальна.
-	if math.Abs(float64(cam.cx-screenWidth/2)) > 1e-3 || math.Abs(float64(cam.cy-screenHeight/2)) > 1e-3 {
-		t.Errorf("на 100%% камера з'їхала з центру: (%.4f, %.4f)", cam.cx, cam.cy)
+	// СХОДИТЬСЯ до межі, а не стрибає в неї.
+	halfW := float32(screenWidth) / 2 / camZoomMin
+	halfH := float32(screenHeight) / 2 / camZoomMin
+	if math.Abs(float64(cam.cx-halfW)) > 1e-3 || math.Abs(float64(cam.cy-halfH)) > 1e-3 {
+		t.Errorf("вид не притиснувся до кута світу: (%.4f, %.4f), чекали (%.1f, %.1f)",
+			cam.cx, cam.cy, halfW, halfH)
 	}
 	for _, pt := range [][2]float32{{0, 0}, {123, 456}, {screenWidth, screenHeight}} {
 		if x := cam.px(pt[0]); math.Abs(float64(x-pt[0])) > 1e-2 {
@@ -2901,16 +3075,53 @@ func TestCameraIdentityAtFullView(t *testing.T) {
 		t.Errorf("s(7) = %.3f — товщини поїхали", cam.s(7))
 	}
 
-	// А при зумі камера справді йде за гравцем і не показує порожнечу за межами світу.
-	cam = camera{zoom: 4, cx: screenWidth / 2, cy: screenHeight / 2}
+	// А в ЦЕНТРІ світу тотожності вже немає — і це не баг, а наслідок того, що світ
+	// більший за вікно. Якщо цей блок колись почне падати, значить світ знову зрівнявся
+	// з вікном (або камера перестала їздити), і кутовий вид вище перестав бути окремим
+	// випадком.
+	cam = camera{zoom: camZoomMin}
 	for f := 0; f < 400; f++ {
-		cam.follow(10, 10) // гравець у лівому верхньому куті
+		cam.follow(worldWidth/2, worldHeight/2)
 	}
-	halfW := float32(screenWidth) / 2 / cam.zoom
-	if cam.cx < halfW-0.5 {
-		t.Errorf("камера показує порожнечу зліва: cx = %.1f при піввікні %.1f", cam.cx, halfW)
+	if math.Abs(float64(cam.px(0))) < 1 {
+		t.Errorf("у центрі світу px(0) = %.2f — трансформація тотожна, хоч світ (%d) "+
+			"більший за вікно (%d)", cam.px(0), worldWidth, screenWidth)
 	}
-	if math.Abs(float64(cam.cx-halfW)) > 1 {
-		t.Errorf("камера не дійшла до краю світу: cx = %.1f, чекали ~%.1f", cam.cx, halfW)
+}
+
+// TestCameraNeverShowsOutsideTheWorld — [КАМЕРА] на цьому тримається рендер: рівень НЕ
+// малює власної рамки (див. [МЕЖА РІВНЯ] у render.go), бо межа світу й так завжди лежить
+// рівно на краю вікна.
+//
+// Якщо камера колись зможе виїхати за карту, симптом буде не «видно чорноту», а невидима
+// стіна: гравець упреться в межу посеред екрана, і ніщо на екрані цього не пояснить. Тому
+// властивість тримаємо тестом, а не коментарем — і не на одному зумі, як було раніше.
+func TestCameraNeverShowsOutsideTheWorld(t *testing.T) {
+	saved := cam
+	defer func() { cam = saved }()
+
+	targets := [][2]float32{
+		{0, 0}, {worldWidth, 0}, {0, worldHeight}, {worldWidth, worldHeight},
+		{worldWidth / 2, worldHeight / 2},
+		{-500, -500}, {worldWidth + 500, worldHeight + 500}, // за межами — теж не має ламати
+	}
+	for _, zoom := range []float32{camZoomMin, 1.7, 2.5, camZoomMax} {
+		for _, tg := range targets {
+			// Стартуємо з центру світу: він законний при будь-якому зумі ≥ camZoomMin.
+			cam = camera{zoom: zoom, cx: worldWidth / 2, cy: worldHeight / 2}
+			for f := 0; f < 400; f++ {
+				cam.follow(tg[0], tg[1])
+			}
+			halfW := float32(screenWidth) / 2 / zoom
+			halfH := float32(screenHeight) / 2 / zoom
+			if cam.cx-halfW < -0.01 || cam.cx+halfW > worldWidth+0.01 {
+				t.Errorf("зум %.1f, ціль (%.0f, %.0f): вид виїхав по X — [%.1f, %.1f] проти світу [0, %d]",
+					zoom, tg[0], tg[1], cam.cx-halfW, cam.cx+halfW, worldWidth)
+			}
+			if cam.cy-halfH < -0.01 || cam.cy+halfH > worldHeight+0.01 {
+				t.Errorf("зум %.1f, ціль (%.0f, %.0f): вид виїхав по Y — [%.1f, %.1f] проти світу [0, %d]",
+					zoom, tg[0], tg[1], cam.cy-halfH, cam.cy+halfH, worldHeight)
+			}
+		}
 	}
 }

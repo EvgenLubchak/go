@@ -1,11 +1,40 @@
 package main
 
 import (
+	"image/color"
 	"math"
 	"math/rand"
 
 	"github.com/hajimehoshi/ebiten/v2"
 )
+
+// newPlayer — гравець на старті гри.
+//
+// Окремою функцією, а не літералом у main, з тієї ж причини, що ballHome і tentJointsOf:
+// інакше налаштування гравця нічим не перевірити. Літерал усередині main() недосяжний
+// для тесту, тож рядок `Cfg: ...` можна було б видалити й нічого б не впало —
+// а це саме той тихий розʼїзд, від якого решта кріплень уже застрахована.
+//
+// [КОНФІГ ГРАВЦЯ] Cfg у гравця лишається майже порожнім і надалі: він живе поза
+// unitRoster, і на порожні поля спираються updateBody (MaxSpeed ≤ 0 → playerBaseSpeed)
+// та GatherInputs. Заповнюємо РІВНО одне поле — те, для якого в гравця є своя ручка.
+func newPlayer() Pixel {
+	return Pixel{
+		X: playerSpawn.X,
+		Y: playerSpawn.Y,
+		// [БІЙ] HP > 0 → гравець витримує кілька ударів; MaxHP>0 ще й вмикає
+		// малювання HP-бару в drawPixel (те саме, що у ворогів).
+		HP:      playerMaxHP,
+		MaxHP:   playerMaxHP,
+		Faction: factionPlayer,
+		Color:   color.RGBA{R: 0, G: 255, B: 180, A: 255},
+		Label:   "  -_ - ",
+
+		// [ВІДРОСТОК] Нуль тут означає «взяти дефолт tentJoints» — саме так гравець і
+		// жив досі, просто неявно. Тепер це видно й керовано з tuning_visual.go.
+		Cfg: UnitConfig{TentJoints: playerTentJoints},
+	}
+}
 
 // handlePlayerInput читає клавіші і додає прискорення до вектора швидкості.
 // Не змінює позицію напряму — це робить updatePlayer().
@@ -83,8 +112,8 @@ func (g *Game) updatePrey() {
 // щоб мозок-жертва не вчився на «телепорті».
 func (g *Game) respawnPlayer() {
 	for tries := 0; tries < 50; tries++ {
-		x := float32(rand.Intn(screenWidth - pixelSize))
-		y := float32(rand.Intn(screenHeight - pixelSize))
+		x := float32(rand.Intn(worldWidth - pixelSize))
+		y := float32(rand.Intn(worldHeight - pixelSize))
 		if !isInteriorWallRect(x, y) {
 			g.player.X, g.player.Y = x, y
 			break
@@ -185,8 +214,8 @@ func (g *Game) updatePlayer() {
 		g.player.VelX = 0
 		g.player.HitWall = true
 	}
-	if g.player.X > screenWidth-pixelSize {
-		g.player.X = screenWidth - pixelSize
+	if g.player.X > worldWidth-pixelSize {
+		g.player.X = worldWidth - pixelSize
 		g.player.VelX = 0
 		g.player.HitWall = true
 	}
@@ -195,8 +224,8 @@ func (g *Game) updatePlayer() {
 		g.player.VelY = 0
 		g.player.HitWall = true
 	}
-	if g.player.Y > screenHeight-pixelSize {
-		g.player.Y = screenHeight - pixelSize
+	if g.player.Y > worldHeight-pixelSize {
+		g.player.Y = worldHeight - pixelSize
 		g.player.VelY = 0
 		g.player.HitWall = true
 	}

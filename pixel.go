@@ -64,6 +64,17 @@ type UnitConfig struct {
 	// Для «важких» типів, чия задача — тримати місце.
 	KnockResist float32
 
+	// [ВІДРОСТОК] Скільки суглобів у щупальці ЦЬОГО типу. 0 = взяти дефолт tentJoints.
+	//
+	// Нуль як «не задано» працює тут чесно, бо щупальце з нуля суглобів не має сенсу:
+	// це не прапорець, у якого «вимкнено» — легальний стан. Тому тристан, як у Memory,
+	// не потрібен.
+	//
+	// Стеля — tentJointsMax (розмір масиву Pixel.Tent). tentJointsOf обрізає до неї, а
+	// TestTentJointsFitTheArray ловить перебір у складі поля ще на тестах — інакше
+	// обрізання було б тихим і тип отримав би коротше щупальце, ніж просив.
+	TentJoints int
+
 	// [ВІДСІЧ] Наскільки сильно ЦЕЙ тип відкидає САМОГО СЕБЕ, коли б'є; 0 = глобальний
 	// knockbackRecoil.
 	//
@@ -207,6 +218,7 @@ var (
 	// у входах немає жодної інформації про сусідів, — але його внесок на порядок
 	// менший, і без нього ламається бій.
 	ConfigLearner = UnitConfig{
+		TentJoints:      3,
 		WanderStrength:  0.0, // [RL] 0 — див. «Чому в учнів немає блукання» нижче
 		AlignmentRate:   0.0, // не флокується — думає сам
 		CohesionRate:    0.0,
@@ -218,14 +230,14 @@ var (
 		DetectionRange:  300.0, // НЕ впливає на учня (лише debug-коло showDetectionCircle);
 		//                        зір мозку — це sightRange (POMDP) + whiskerRange (вуса)
 		PounceMulti: 0.0,
-		Count:       5, // скільки їх на полі
+		Count:       10, // скільки їх на полі
 		Faction:     factionEnemy,
 		WeightsFile: brainFile,
 		MaxHP:       2,                            // живучий — більше часу на навчання
 		Respawns:    1,                            // [РЕСПАУН] безкінечно: стала популяція = порівнянні метрики
 		Color:       color.RGBA{0, 255, 100, 255}, // зелений — учень
-		Label:       "0_0*",
-		IsLearner:   true, // ← саме це вмикає мозок, а не мітка
+		Label:       "",                           //"O_o",
+		IsLearner:   true,                         // ← саме це вмикає мозок, а не мітка
 		// [ВІДСІЧ] Низька: цей тип має ЩІЛЬНУ нагороду «наближайся», а вона рахується з
 		// власної швидкості. Велика відсіч навʼязувала б рух, за який агент отримував би
 		// кредит, нічого не вирішивши, — та сама вада, що в блукання.
@@ -240,6 +252,7 @@ var (
 	// Швидший і живучіший за рій — щоб «кидок кобри» був відчутним, але їх мало
 	// (Count), інакше бій перетвориться на бійню.
 	ConfigKiller = UnitConfig{
+		TentJoints:      4,
 		WanderStrength:  0.0, // [RL] 0 — блукання ламало credit assignment
 		AlignmentRate:   0.0,
 		CohesionRate:    0.0,
@@ -250,13 +263,13 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0, // не впливає (лише debug-коло)
 		PounceMulti:     0.0,
-		Count:           2, // мало: вони сильніші за рій
+		Count:           5, // мало: вони сильніші за рій
 		Faction:         factionEnemy,
 		WeightsFile:     killerFile,
 		Respawns:        3,                            // [РЕСПАУН] безкінечно — вони частина сталого складу
 		MaxHP:           10,                           // витримує на удар більше за рій
 		Color:           color.RGBA{255, 90, 60, 255}, // червоний — щоб одразу вирізняти
-		Label:           "*_*",
+		Label:           "",                           //"*_*",
 		IsLearner:       true,
 		UsesFlowField:   true, // ← окремий мозок + flow-field на вхід
 		CombatReward:    true, // ← вчиться БИТИ, а не лише наздоганяти
@@ -272,6 +285,7 @@ var (
 	//
 	// Реактивний аналог рою, але на твоєму боці: свій вулик, бойова нагорода.
 	ConfigAllyChaser = UnitConfig{
+		TentJoints:      3,
 		WanderStrength:  0.0, // [RL] як у рою — жодного некерованого руху
 		AlignmentRate:   0.0, // не флокується — думає сам
 		CohesionRate:    0.0,
@@ -282,13 +296,13 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           7,
+		Count:           10,
 		Faction:         factionPlayer, // ← свій; рій його атакує, він рій
 		WeightsFile:     allyFile,
 		Respawns:        2,
 		MaxHP:           3,
 		Color:           color.RGBA{80, 170, 255, 255}, // блакитний — свої
-		Label:           "( _ )",
+		Label:           "*_*",                         //"( _ )",
 		IsLearner:       true,
 		CombatReward:    true, // бійці: + за шкоду, − за отриману, ++ за вбивство
 		// [ВІДСІЧ] Низька: цей тип має ЩІЛЬНУ нагороду «наближайся», а вона рахується з
@@ -306,6 +320,7 @@ var (
 	// WeightsFile: мережа бачить лише ВІДНОСНІ входи («напрямок до моєї цілі»), тож
 	// політика має бути та сама, зате досвіду вдвічі більше.
 	ConfigAllyKiller = UnitConfig{
+		TentJoints:      4,
 		WanderStrength:  0.0, // [RL] як у вбивці
 		AlignmentRate:   0.0,
 		CohesionRate:    0.0,
@@ -322,7 +337,7 @@ var (
 		Respawns:        4,
 		MaxHP:           15,
 		Color:           color.RGBA{140, 100, 255, 255}, // фіолетовий — твій вбивця
-		Label:           "( _ )",
+		Label:           "*_*",                          //"( _ )",
 		IsLearner:       true,
 		UsesFlowField:   true, // ← поле до ВОРОГІВ (flowFor обирає за фракцією)
 		CombatReward:    true,
@@ -432,6 +447,7 @@ var (
 	// Memory: MemoryStack поки що. Спершу треба переконатись, що при розрідженій
 	// нагороді він узагалі вчиться; якщо так — ось тут і буде чесне порівняння з GRU.
 	ConfigWarden = UnitConfig{
+		TentJoints:     5,
 		WanderStrength: 0.0,
 		AlignmentRate:  0.0,
 		CohesionRate:   0.0,
@@ -443,14 +459,14 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           6,
+		Count:           20,
 		Faction:         factionEnemy,
 		WeightsFile:     wardenFile,
 		Respawns:        1,  // [РЕСПАУН] три життя: щоб бойовий досвід набирався, а не обривався першою смертю
 		MaxHP:           31, // удар пробілом обходить невразливість
 		//                                                  і дає ~12 шкоди/с → це ~10 секунд бою
 		Color:     color.RGBA{255, 215, 90, 255}, // золотий — не сплутати ні з ким
-		Label:     "^_^",
+		Label:     "",                            //"^_^",
 		IsLearner: true,
 		//                                             найдорожча ручка експерименту:
 		UsesFlowField: false, // без поля — інакше памʼяті нічого робити
@@ -688,7 +704,18 @@ type Pixel struct {
 
 	// [ВІДРОСТОК] Суглоби щупальця у СВІТОВИХ координатах — з тієї ж причини, що ворс
 	// і кульки: відставання має бути від РУХУ юніта.
-	Tent [tentJoints][2]float32
+	//
+	// Розмір — СТЕЛЯ (tentJointsMax), а справжня довжина ланцюжка в tentJointsOf(p):
+	// вона своя в кожного типу. Масив, а не слайс, і це не смак:
+	//
+	//	1. Pixel лежить у g.units []Pixel ЗНАЧЕННЯМИ, тож масив сидить inline — нуль
+	//	   алокацій і нуль розіменувань на кадр. Слайс дав би по алокації на юніта й
+	//	   стрибок у купу на кожен доступ, а ці цикли крутяться щокадру на всіх юнітах;
+	//	2. масив копіюється ПО ЗНАЧЕННЮ. Тести саме на це й спираються (`before := u.Tent`
+	//	   перед кроком фізики). Зі слайсом той рядок став би аліасом на ту саму памʼять,
+	//	   порівняння «до і після» тихо перетворилось би на порівняння з собою, і тест
+	//	   лишився б зеленим, перевіряючи ніщо.
+	Tent [tentJointsMax][2]float32
 
 	// [ТІЛО] Стан пружини розміру: поточний масштаб і його швидкість. Пульс медузи
 	// виникає з перельоту цієї пружини, а не з намальованого циклу.
@@ -719,7 +746,7 @@ func (p *Pixel) resetFur() {
 		}
 	}
 	for i := 0; i < ballCount; i++ {
-		bx, by := ballHome(i, cx, cy)
+		bx, by := ballHome(i, cx, cy, 1)
 		p.Balls[i][0], p.Balls[i][1] = bx, by
 	}
 	for i := 0; i < limbCount; i++ {
@@ -727,8 +754,13 @@ func (p *Pixel) resetFur() {
 		p.Limbs[i][0], p.Limbs[i][1] = lx, ly
 	}
 	// Відросток на спавні висить прямо вниз від нижньої точки тіла.
+	//
+	// Заповнюємо ВСЮ стелю, а не лише tentJointsOf(p): слоти за межами ланцюжка цього
+	// типу ніхто не оновлює й не малює, але лишати в них нулі означає тримати точку в
+	// (0,0) — а це вже пастка для будь-кого, хто колись підніме число суглобів у конфізі
+	// або віддебажить масив цілком.
 	rx, ry := tentRoot(cx, cy, 1)
-	for i := 0; i < tentJoints; i++ {
+	for i := 0; i < tentJointsMax; i++ {
 		p.Tent[i][0], p.Tent[i][1] = rx, ry+tentSeg*float32(i+1)
 	}
 }
@@ -790,7 +822,9 @@ func furRoot(cx, cy, scale float32) (float32, float32) {
 // СТАЛОЇ півсторони, за нею не встигали — і на швидкості щупальце візуально
 // відривалось від корпуса. Ворс і кінцівки страждали так само, просто менш помітно.
 //
-// Тепер усі три корені множаться на цей масштаб і їдуть разом із намальованим тілом.
+// Тепер усі ЧОТИРИ кріплення множаться на цей масштаб і їдуть разом із намальованим
+// тілом: furRoot, tentRoot, limbRoot і ballHome. Кульки приєднались останніми — їх
+// пропустили, бо вони єдині не мають кореня в тілі й тому не виглядали «коренем».
 func bodyScaleOf(p *Pixel) float32 {
 	if p.BodyScale <= 0 {
 		return 1
@@ -798,14 +832,42 @@ func bodyScaleOf(p *Pixel) float32 {
 	return p.BodyScale
 }
 
+// tentJointsOf — довжина ланцюжка щупальця ЦЬОГО юніта.
+//
+// Окремою функцією з тієї ж причини, що bodyScaleOf і ballHome: її питають три місця
+// (фізика, малювання, тест), і розʼїхатись вони не мають права. Якби малювання й фізика
+// брали різні числа, зайвий суглоб лишався б висіти там, де його ніхто не оновлює.
+//
+// Гравець сюди теж приходить: у нього Cfg порожній, тобто TentJoints == 0 → дефолт.
+// Окремої гілки «якщо гравець» не потрібно — нуль її вже покриває.
+//
+// Обрізання до стелі — запобіжник від виходу за масив, а не робочий режим: перебір у
+// складі поля ловить TestTentJointsFitTheArray.
+func tentJointsOf(p *Pixel) int {
+	n := p.Cfg.TentJoints
+	if n <= 0 {
+		n = tentJoints
+	}
+	if n > tentJointsMax {
+		n = tentJointsMax
+	}
+	return n
+}
+
 // ballHome — точка, до якої тягнеться кулька i: під тілом, рознесені по горизонталі.
 //
 // Окремою функцією, бо її треба ТРИ рази (спавн, оновлення, тест), і розʼїхатись вони
 // не мають права: кулька, чия домівка на спавні відрізняється від домівки в оновленні,
 // на першому ж кадрі стрибне.
-func ballHome(i int, cx, cy float32) (float32, float32) {
+//
+// scale — той самий множник пружини тіла, що у furRoot/tentRoot/limbRoot (bodyScaleOf).
+// Кульки його довго НЕ мали, і це давало рівно ту хворобу, від якої лікували решту
+// кріплень: домівка стояла на сталих 12px під центром, а нижня грань стиснутого тіла
+// піднімалась до 9.75px — кріплення висіло на 2.25px НИЖЧЕ намальованого корпуса саме
+// на швидкості, тобто рівно тоді, коли розрив і видно.
+func ballHome(i int, cx, cy, scale float32) (float32, float32) {
 	side := float32(2*i) - float32(ballCount-1) // для двох: -1 і +1
-	return cx + side*ballOffX, cy + ballDrop
+	return cx + side*ballOffX*scale, cy + ballDrop*scale
 }
 
 // reviveAt повертає юніта до життя на його посту.
@@ -917,8 +979,8 @@ func newUnitsWithHive(hive map[string]*Net) []Pixel {
 				spawnX, spawnY = sp.X, sp.Y
 			} else {
 				for tries := 0; tries < 50; tries++ {
-					spawnX = float32(rand.Intn(screenWidth - pixelSize))
-					spawnY = float32(rand.Intn(screenHeight - pixelSize))
+					spawnX = float32(rand.Intn(worldWidth - pixelSize))
+					spawnY = float32(rand.Intn(worldHeight - pixelSize))
 					if !isInteriorWallRect(spawnX, spawnY) {
 						break
 					}
