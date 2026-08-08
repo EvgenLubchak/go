@@ -256,7 +256,7 @@ var (
 		Respawns:        3,                            // [РЕСПАУН] безкінечно — вони частина сталого складу
 		MaxHP:           10,                           // витримує на удар більше за рій
 		Color:           color.RGBA{255, 90, 60, 255}, // червоний — щоб одразу вирізняти
-		Label:           "",
+		Label:           "*_*",
 		IsLearner:       true,
 		UsesFlowField:   true, // ← окремий мозок + flow-field на вхід
 		CombatReward:    true, // ← вчиться БИТИ, а не лише наздоганяти
@@ -316,7 +316,7 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           2,
+		Count:           5,
 		Faction:         factionPlayer,
 		WeightsFile:     allyKillerFile,
 		Respawns:        4,
@@ -396,7 +396,7 @@ var (
 		Respawns:        0,                             // [РЕСПАУН] бос не безсмертний: три життя на сесію
 		MaxHP:           75,                            // умова навчання, не лише баланс
 		Color:           color.RGBA{235, 70, 160, 255}, // малиновий — не сплутати ні з ким
-		Label:           "$_$",
+		Label:           "",                            //"$_$",
 		IsLearner:       true,
 		UsesFlowField:   false,       // ← памʼять має на що працювати лише без поля
 		CombatReward:    true,        // бос мусить вчитись БИТИ, а не наздоганяти
@@ -450,7 +450,7 @@ var (
 		MaxHP:           31, // удар пробілом обходить невразливість
 		//                                                  і дає ~12 шкоди/с → це ~10 секунд бою
 		Color:     color.RGBA{255, 215, 90, 255}, // золотий — не сплутати ні з ким
-		Label:     "W_W",
+		Label:     "^_^",
 		IsLearner: true,
 		//                                             найдорожча ручка експерименту:
 		UsesFlowField: false, // без поля — інакше памʼяті нічого робити
@@ -562,7 +562,7 @@ var (
 		Respawns:       -1, // стала присутність: сенс типу — ДОВГЕ навчання
 		MaxHP:          10, // два ривки (dashDamage 8) — встигає показати політику
 		Color:          color.RGBA{255, 140, 40, 255},
-		Label:          "?_?", // шукає
+		Label:          "", //"?_?", // шукає
 		IsLearner:      true,
 		UsesFlowField:  false, // ← лабіринт НЕ даний
 		CombatReward:   true,
@@ -675,6 +675,10 @@ type Pixel struct {
 	// рухались би разом із тілом і не відставали б ні від чого.
 	Balls [ballCount][2]float32
 
+	// [КІНЦІВКИ] Кінчики рук і ніг у СВІТОВИХ координатах — з тієї ж причини, що ворс,
+	// кульки й щупальце: відставання має бути від РУХУ юніта.
+	Limbs [limbCount][2]float32
+
 	// [ЖАЛО] Лічильник пострілу відростка й ЗАМОРОЖЕНИЙ напрямок удару.
 	//
 	// Один лічильник на обидві фази: активна, поки StingTimer > stingCooldown, далі
@@ -718,11 +722,45 @@ func (p *Pixel) resetFur() {
 		bx, by := ballHome(i, cx, cy)
 		p.Balls[i][0], p.Balls[i][1] = bx, by
 	}
+	for i := 0; i < limbCount; i++ {
+		lx, ly := limbHome(i, cx, cy)
+		p.Limbs[i][0], p.Limbs[i][1] = lx, ly
+	}
 	// Відросток на спавні висить прямо вниз від нижньої точки тіла.
 	rx, ry := tentRoot(cx, cy)
 	for i := 0; i < tentJoints; i++ {
 		p.Tent[i][0], p.Tent[i][1] = rx, ry+tentSeg*float32(i+1)
 	}
+}
+
+// limbSpec — де кріпиться кінцівка й куди звисає у спокої.
+//
+//	rx, ry  кут корпуса в частках півсторони (-1..+1)
+//	dx, dy  напрямок звисання
+//
+// Руки з верхніх кутів ідуть униз-НАЗОВНІ, ноги з нижніх — майже прямо вниз. Саме ця
+// різниця й читається як «руки» проти «ніг»: без неї виходять чотири однакові вусики.
+var limbSpec = [limbCount]struct{ rx, ry, dx, dy float32 }{
+	{-1, -1, -0.75, 0.66}, // ліва рука
+	{+1, -1, +0.75, 0.66}, // права рука
+	{-1, +1, -0.30, 0.95}, // ліва нога
+	{+1, +1, +0.30, 0.95}, // права нога
+}
+
+// limbRoot — кут корпуса, з якого росте кінцівка i.
+func limbRoot(i int, cx, cy float32) (float32, float32) {
+	sp := limbSpec[i]
+	return cx + sp.rx*pixelSize/2, cy + sp.ry*pixelSize/2
+}
+
+// limbHome — куди тягнеться кінчик кінцівки i у спокої.
+//
+// Окремою функцією з тієї ж причини, що ballHome, tentRoot і furRoot: потрібна у
+// спавні, оновленні, малюванні й тесті, і розʼїхатись вони не мають права.
+func limbHome(i int, cx, cy float32) (float32, float32) {
+	rx, ry := limbRoot(i, cx, cy)
+	sp := limbSpec[i]
+	return rx + sp.dx*limbLen, ry + sp.dy*limbLen
 }
 
 // tentRoot — точка кріплення відростка: НИЗ тіла, а не центр.

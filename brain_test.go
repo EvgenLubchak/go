@@ -2744,3 +2744,76 @@ func TestStingShootsAtVictimAndCoolsDown(t *testing.T) {
 		t.Errorf("лічильник не обнулився: %d", att.StingTimer)
 	}
 }
+
+// TestLimbsHangFromCornersAndLag — [КІНЦІВКИ] анатомія й відставання.
+//
+// Три речі, і перша — не про фізику, а про те, що юніт мусить читатись як істота:
+//
+//  1. руки ростуть із ВЕРХНІХ кутів, ноги з НИЖНІХ, і руки розходяться назовні сильніше
+//     за ноги. Без цієї різниці виходять чотири однакові вусики, а не руки й ноги;
+//  2. кінчик ВІДСТАЄ за корпусом — інакше кінцівки жорстко приклеєні й не бовтаються;
+//  3. і все ж доганяє, якщо юніт стоїть.
+func TestLimbsHangFromCornersAndLag(t *testing.T) {
+	u := &Pixel{X: 600, Y: 600}
+	u.resetFur()
+	cx, cy := u.X+pixelSize/2, u.Y+pixelSize/2
+
+	// 1) Анатомія.
+	for i := 0; i < limbCount; i++ {
+		rx, ry := limbRoot(i, cx, cy)
+		isArm := i < 2
+		if isArm && ry >= cy {
+			t.Errorf("рука %d кріпиться не згори: y = %.1f при центрі %.1f", i, ry, cy)
+		}
+		if !isArm && ry <= cy {
+			t.Errorf("нога %d кріпиться не знизу: y = %.1f при центрі %.1f", i, ry, cy)
+		}
+		if math.Abs(float64(rx-cx)) < 1 {
+			t.Errorf("кінцівка %d не в куті: x = %.1f при центрі %.1f", i, rx, cx)
+		}
+	}
+	armOut := math.Abs(float64(limbSpec[0].dx))
+	legOut := math.Abs(float64(limbSpec[2].dx))
+	if armOut <= legOut {
+		t.Errorf("руки розходяться не сильніше за ноги (%.2f проти %.2f) — вийдуть "+
+			"чотири однакові вусики", armOut, legOut)
+	}
+	// Ноги мусять звисати переважно ВНИЗ.
+	if float64(limbSpec[2].dy) <= math.Abs(float64(limbSpec[2].dx)) {
+		t.Error("нога звисає більше вбік, ніж униз")
+	}
+
+	// 2) На спавні — у своїх домівках, без стрибка.
+	for i := 0; i < limbCount; i++ {
+		hx, hy := limbHome(i, cx, cy)
+		if math.Abs(float64(u.Limbs[i][0]-hx)) > 1e-4 || math.Abs(float64(u.Limbs[i][1]-hy)) > 1e-4 {
+			t.Errorf("кінцівка %d на спавні не в домівці", i)
+		}
+	}
+
+	// 3) Відставання: після різкого зсуву рушила, але не наздогнала за кадр.
+	before := u.Limbs
+	u.X += 40
+	updateLimbs(u)
+	cx = u.X + pixelSize/2
+	for i := 0; i < limbCount; i++ {
+		hx, _ := limbHome(i, cx, cy)
+		if u.Limbs[i][0] == before[i][0] {
+			t.Errorf("кінцівка %d не рушила зовсім", i)
+		}
+		if u.Limbs[i][0] >= hx-1 {
+			t.Errorf("кінцівка %d наздогнала за ОДИН кадр — вона приклеєна, а не бовтається", i)
+		}
+	}
+
+	// 4) І все ж доганяє в спокої.
+	for f := 0; f < 300; f++ {
+		updateLimbs(u)
+	}
+	for i := 0; i < limbCount; i++ {
+		hx, hy := limbHome(i, cx, cy)
+		if d := math.Hypot(float64(u.Limbs[i][0]-hx), float64(u.Limbs[i][1]-hy)); d > 0.5 {
+			t.Errorf("кінцівка %d не наздогнала за 300 кадрів: %.2f", i, d)
+		}
+	}
+}

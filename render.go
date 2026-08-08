@@ -173,6 +173,22 @@ func drawBalls(screen *ebiten.Image, p *Pixel) {
 	}
 }
 
+// drawLimbs — [КІНЦІВКИ] чотири короткі лінії від кутів корпуса з кулькою-долонею.
+//
+// Малюємо ПЕРЕД тілом: кріплення мусить ховатись під корпусом, інакше видно, що лінія
+// починається в порожнечі. Ворс іде так само й з тієї ж причини; кульки й щупальце
+// навпаки — після, бо вони мають лишатись видимими цілком.
+func drawLimbs(screen *ebiten.Image, p *Pixel) {
+	cx := p.X + pixelSize/2
+	cy := p.Y + pixelSize/2
+	for i := 0; i < limbCount; i++ {
+		rx, ry := limbRoot(i, cx, cy)
+		tx, ty := p.Limbs[i][0], p.Limbs[i][1]
+		vector.StrokeLine(screen, rx, ry, tx, ty, limbWidth, p.Color, true)
+		vector.FillCircle(screen, tx, ty, limbTipDot, p.Color, true)
+	}
+}
+
 // drawTentacle — [ВІДРОСТОК] ламана від низу тіла крізь суглоби, з кулькою на кінці.
 //
 // Малюємо ПЕРЕД кульками, але ПІСЛЯ тіла: відросток має виходити з-під корпуса, а
@@ -450,11 +466,13 @@ func (g *Game) Draw(screen *ebiten.Image) {
 				drawBrainSensors(screen, e, cx, cy)
 			}
 			drawFur(screen, &g.units[i])
+			drawLimbs(screen, &g.units[i])
 			drawPixel(screen, e)
 			drawTentacle(screen, &g.units[i])
 			drawBalls(screen, &g.units[i])
 		}
 		drawFur(screen, &g.player)
+		drawLimbs(screen, &g.player)
 		drawPixel(screen, g.player)
 		drawTentacle(screen, &g.player)
 		drawBalls(screen, &g.player)
@@ -482,7 +500,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	// [ТЕМП] Цільовий TPS поруч із фактичним: коли вони розходяться, це просадка, а коли
 	// цільовий не той, що очікуєш, — ти просто забув, що перемкнув темп клавішею T.
 	if gameTPS != 120 {
-		drawText(screen, fmt.Sprintf("ТЕМП %d", gameTPS), 10, screenWidth/2+90, 10,
+		drawText(screen, fmt.Sprintf("temp %d", gameTPS), 10, screenWidth/2+90, 10,
 			color.RGBA{240, 200, 90, 255})
 	}
 

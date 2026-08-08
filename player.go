@@ -207,5 +207,6 @@ func (g *Game) updatePlayer() {
 	updateFur(&g.player)
 	updateBalls(&g.player)
 	updateTentacle(&g.player)
+	updateLimbs(&g.player)
 	updateBody(&g.player) // [ТІЛО] у гравця немає мозку → лише пружина, без Q-форми
 }

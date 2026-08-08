@@ -335,8 +335,9 @@ func (g *Game) updateUnits() {
 
 		updateFur(e)
 		updateBalls(e)
-		updateTentacle(e) // [ВОРС] щупальця тягнуться за юнітом (і показують його стан)
-		updateBody(e)     // [ТІЛО] пружина розміру → пульс на зупинці
+		updateTentacle(e)
+		updateLimbs(e) // [ВОРС] щупальця тягнуться за юнітом (і показують його стан)
+		updateBody(e)  // [ТІЛО] пружина розміру → пульс на зупинці
 
 		// [СТИГМЕРГІЯ] Учень ОФІЦІЙНО застряг (спрацювала фрустрація) → лишаємо слід
 		// саме в цій клітинці (лише якщо феромони ввімкнені). НЕ на кожен дотик
@@ -427,6 +428,21 @@ func updateBalls(u *Pixel) {
 		hx, hy := ballHome(i, cx, cy)
 		u.Balls[i][0] += (hx - u.Balls[i][0]) * ballStiff
 		u.Balls[i][1] += (hy - u.Balls[i][1]) * ballStiff
+	}
+}
+
+// updateLimbs — [КІНЦІВКИ] один крок фізики рук і ніг.
+//
+// Найпростіший випадок відставання в проєкті: одна точка на кінцівку, ціль стала. Уся
+// «жвавість» береться з того, що кінчик не встигає за кутом корпуса — рушив, і руки з
+// ногами лишились позаду, повернув — занесло.
+func updateLimbs(u *Pixel) {
+	cx := u.X + pixelSize/2
+	cy := u.Y + pixelSize/2
+	for i := 0; i < limbCount; i++ {
+		hx, hy := limbHome(i, cx, cy)
+		u.Limbs[i][0] += (hx - u.Limbs[i][0]) * limbStiff
+		u.Limbs[i][1] += (hy - u.Limbs[i][1]) * limbStiff
 	}
 }
 
