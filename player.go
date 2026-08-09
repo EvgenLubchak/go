@@ -140,6 +140,9 @@ func (g *Game) updatePlayer() {
 	if g.player.InvulnTimer > 0 {
 		g.player.InvulnTimer--
 	}
+	if g.player.StrikeTimer > 0 {
+		g.player.StrikeTimer--
+	}
 	if g.player.HitTimer > 0 {
 		g.player.HitTimer--
 	}

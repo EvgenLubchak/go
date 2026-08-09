@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"image"
 	"image/color"
 	"math"
 
@@ -102,7 +103,7 @@ var (
 //
 // ЩО ЛИШАЄТЬСЯ ПРАВДОЮ: змішувати їх упереміш — найгірше з двох. Кожна проста фігура
 // між шляхами рве батч. Правильна відповідь тут не «переписати фігури», а не
-// перемішувати порядок малювання; це ще не зроблено й лишається наступним кроком.
+// перемішувати порядок — саме це й роблять три проходи в Draw ([ДВА ПРОХОДИ] нижче).
 //
 // ТОЙ САМИЙ МЕХАНІЗМ ПОЯСНЮЄ ЦІНУ ЗГЛАДЖУВАННЯ. Коли AA стояв лише на тілі, кожен
 // юніт перемикав antialias з false на true й назад — тобто скидав батч двічі, ще й
@@ -117,6 +118,44 @@ func pathOpts(col color.RGBA) vector.DrawPathOptions {
 	op.AntiAlias = antiAlias
 	op.ColorScale.ScaleWithColor(col)
 	return op
+}
+
+// pinAARegion прибиває область AA-буфера до цілого екрана. Без згладжування — нічого.
+//
+// [ЧОМУ ЦЕ ВЗАГАЛІ ПОТРІБНО] Згладжений пакет ebiten малює не на екран, а в офскрін
+// подвійного розміру, і область цього буфера — BOUNDING BOX усієї AA-геометрії кадру,
+// округлений до 16 пікселів (requiredRegion в internal/ui/image.go). Далі:
+//
+//	if r := i.requiredRegion(vertices); i.region != r {
+//	    i.flush()
+//	    i.image = nil   // ← текстура створюється ЗАНОВО
+//	}
+//
+// Поки юніти купкою, рамка з кадру в кадр та сама й буфер перевикористовується. У БОЮ
+// відсіч розкидає юнітів, а жала вистрілюють уперед — рамка стрибає щокадру, і ebiten
+// щоразу виділяє нову текстуру. При розкиданих юнітах це майже весь екран, тобто
+// ~26 МБ на кадр. Саме тому просадка приходила рівно з початком бійки, а не з
+// кількістю юнітів — це помітив Євген у грі, і числа тут ні до чого не вели.
+//
+// Прибиваємо рамку прозорим прямокутником на весь екран: він нічого не малює (альфа
+// нуль), але його вершини входять у той самий пакет, тож bounding box ЗАВЖДИ однаковий.
+// Буфер виділяється раз і живе. Ціна — один невидимий чотирикутник на пакет.
+//
+// Викликається на КОЖЕН AA-пакет окремо (шляхи юнітів і кульки): рамка належить
+// буферу, а буфер один на екран, тож два пакети з різними рамками перевиділяли б його
+// так само, як два кадри.
+func pinAARegion(screen *ebiten.Image) {
+	if !antiAlias {
+		return
+	}
+	var p vector.Path
+	p.MoveTo(0, 0)
+	p.LineTo(screenWidth, 0)
+	p.LineTo(screenWidth, screenHeight)
+	p.LineTo(0, screenHeight)
+	p.Close()
+	op := pathOpts(color.RGBA{}) // нульова альфа: вершини є, пікселів немає
+	vector.FillPath(screen, &p, nil, &op)
 }
 
 // wallPath — шлях стін, що ПЕРЕВИКОРИСТОВУЄТЬСЯ між кадрами.
@@ -158,46 +197,98 @@ func buildWallPath(p *vector.Path) int {
 	return n
 }
 
-// drawSea малює фон-море: вертикальний градієнт від світлішого верху до темнішої
-// глибини. Смугами, а не пікселями — seaBands штук FillRect на кадр, тобто дешевше
-// за один намальований юніт.
+// [ГРАДІЄНТ] Біла точка як джерело кольору для DrawTriangles.
+//
+// GPU множить колір текстури на колір ВЕРШИНИ, тож біле джерело означає «бери колір
+// цілком із вершини». Зображення 3×3 із вирізаною серединою — щоб білінійна фільтрація
+// не зачепила краю й не підмішала прозорість: той самий прийом, що в самого ebiten.
+var (
+	whitePix = ebiten.NewImage(3, 3)
+	whiteDot = whitePix.SubImage(image.Rect(1, 1, 2, 2)).(*ebiten.Image)
+)
+
+func init() {
+	pix := make([]byte, 4*3*3)
+	for i := range pix {
+		pix[i] = 0xff
+	}
+	whitePix.WritePixels(pix)
+}
+
+// seaColorAt — колір моря на заданій СВІТОВІЙ висоті. 0 = поверхня, worldHeight = дно.
+//
+// Окремою функцією заради тесту: сам градієнт малює GPU, і назовні він нічого не
+// віддає — перевірити, що глибина не перевернулась, можна лише тут.
+func seaColorAt(worldY float32) color.RGBA {
+	t := worldY / worldHeight
+	if t < 0 {
+		t = 0
+	}
+	if t > 1 {
+		t = 1
+	}
+	return color.RGBA{
+		R: uint8(float32(seaTopR) + (seaBotR-seaTopR)*t),
+		G: uint8(float32(seaTopG) + (seaBotG-seaTopG)*t),
+		B: uint8(float32(seaTopB) + (seaBotB-seaTopB)*t),
+		A: 255,
+	}
+}
+
+// worldYAt — обернення cam.py: яка СВІТОВА висота лежить на цьому рядку екрана.
+func worldYAt(screenY float32) float32 {
+	return (screenY-screenHeight/2)/cam.zoom + cam.cy
+}
+
+// drawSea малює фон-море: вертикальний градієнт від світлішої мілини вгорі до темної
+// глибини внизу.
 //
 // Чому градієнт, а не screen.Fill одним кольором: плоска заливка читається як
 // «пофарбоване тло», а вертикальний перехід — як ГЛИБИНА, і цього досить, щоб поле
-// перестало бути абстрактним аркушем. Текстуру можна буде покласти згори пізніше,
-// нічого тут не переписуючи.
+// перестало бути абстрактним аркушем.
 //
-// [КАМЕРА] Смуги прив'язані до СВІТОВОГО Y, а не до екранного. Поки світ дорівнював
-// вікну, різниці не було. Коли світ став удвічі вищим за вікно, екранна прив'язка
-// перетворила глибину на скайбокс: та сама світова клітинка світлішала й темнішала
-// залежно від того, де стоїть камера, тобто градієнт перестав щось означати.
+// [КАМЕРА] Колір прив'язаний до СВІТОВОГО Y, а не до екранного. Поки світ дорівнював
+// вікну, різниці не було. Коли світ став удвічі вищим, екранна прив'язка перетворила
+// глибину на скайбокс: та сама світова клітинка світлішала й темнішала залежно від
+// того, де стоїть камера. Зі світовою — рухаючись вертикально, ти справді занурюєшся.
 //
-// Зі світовою прив'язкою верх карти читається як мілина, низ — як глибина, і колір
-// клітинки не залежить від камери. Наслідок, який видно оком: рухаючись вертикально,
-// ти справді «занурюєшся». Ціна — за один кадр видно лише частину діапазону (при
-// зумі 1.0 половину, при 4× — восьму), тож повний розкид кольору мусив вирости
-// вдвічі, а seaBands — теж удвічі, щоб смуги лишились такими ж дрібними на екрані
-// (див. sea* у tuning_visual.go).
+// [ОДИН ЧОТИРИКУТНИК ЗАМІСТЬ 48 СМУГ]
+//
+// Раніше тут був цикл на seaBands прямокутників: градієнт СХОДИНКАМИ, бо FillRect
+// заливає одним кольором. Тепер це чотири вершини, у яких колір заданий згори й знизу,
+// а проміжок інтерполює GPU — саме те, що він робить апаратно й задарма.
+//
+// Виграш подвійний, і другий важливіший за перший:
+//
+//	48 викликів → 1;
+//	сходинки зникли зовсім — перехід став неперервним, а не «майже».
+//
+// Разом із ними зникла й ручка seaBands, і кострубатий +1 піксель до висоти смуги:
+// він затуляв волосяні щілини, що народжувались при округленні між смугами. Немає
+// смуг — немає щілин. Класичний випадок, коли зникає не лише код, а й проблема.
 func drawSea(screen *ebiten.Image) {
-	bandH := float32(worldHeight) / seaBands // висота смуги у СВІТОВИХ пікселях
-	for i := 0; i < seaBands; i++ {
-		// +1 екранний піксель: щоб між смугами не лишалось волосяних щілин
-		// через округлення. Саме екранний, а не світовий — щілина народжується
-		// при растеризації, тож і запас потрібен у пікселях екрана.
-		sy := cam.py(float32(i) * bandH)
-		h := cam.s(bandH) + 1
-		if sy+h < 0 || sy > screenHeight {
-			continue // [КАМЕРА] смуга за кадром — не платимо за те, чого не видно
+	// Кольори беремо на верхньому й нижньому краях ВИДИМОЇ частини світу, а не всієї
+	// карти: інакше при зумі градієнт розтягнувся б на екран цілком і глибина знову
+	// поїхала б за камерою.
+	top := seaColorAt(worldYAt(0))
+	bot := seaColorAt(worldYAt(screenHeight))
+
+	v := func(x, y float32, c color.RGBA) ebiten.Vertex {
+		return ebiten.Vertex{
+			DstX: x, DstY: y,
+			SrcX: 1, SrcY: 1, // середина білої точки
+			ColorR: float32(c.R) / 255,
+			ColorG: float32(c.G) / 255,
+			ColorB: float32(c.B) / 255,
+			ColorA: 1,
 		}
-		t := float32(i) / (seaBands - 1) // 0 = поверхня, 1 = глибина
-		col := color.RGBA{
-			R: uint8(float32(seaTopR) + (seaBotR-seaTopR)*t),
-			G: uint8(float32(seaTopG) + (seaBotG-seaTopG)*t),
-			B: uint8(float32(seaTopB) + (seaBotB-seaTopB)*t),
-			A: 255,
-		}
-		vector.FillRect(screen, 0, sy, screenWidth, h, col, false)
 	}
+	verts := [4]ebiten.Vertex{
+		v(0, 0, top), v(screenWidth, 0, top),
+		v(0, screenHeight, bot), v(screenWidth, screenHeight, bot),
+	}
+	op := &ebiten.DrawTrianglesOptions{ColorScaleMode: ebiten.ColorScaleModePremultipliedAlpha}
+	screen.DrawTriangles(verts[:], []uint16{0, 1, 2, 1, 3, 2}, whiteDot, op)
 }
 
 // drawText малює текст відцентровано відносно точки (cx, cy).
@@ -278,6 +369,26 @@ func drawFur(screen *ebiten.Image, p *Pixel) {
 	}
 }
 
+// strikeColorOf — колір відростка й кульок: білий, поки триває спалах удару.
+//
+// [ДИЗАЙН: ДВА СПАЛАХИ НА РІЗНИХ ЧАСТИНАХ ТІЛА] Біле тіло вже означає «мене вдарили»
+// (HitTimer у drawPixelBody). Новий спалах означає протилежне — «вдарив я». Якби він
+// теж світив тіло, дві події стали б НЕРОЗРІЗНЕННИМИ, і саме там, де це найпотрібніше:
+// у щільній бійці ти бачив би білі спалахи й не знав, хто кому завдав.
+//
+// Тому нападник світить ВІДРОСТКОМ І КУЛЬКАМИ. Читається як розряд, що виходить крізь
+// кінцівку, якою його й доставили: жало в цю саму мить вистрілює вперед, тож рух і
+// колір розповідають одну подію двома каналами.
+//
+// Одним помічником, а не трьома однаковими if: три місця розʼїхались би, і відросток
+// світився б без кульок.
+func strikeColorOf(p *Pixel) color.RGBA {
+	if p.StrikeTimer > 0 {
+		return color.RGBA{255, 255, 255, 255}
+	}
+	return p.Color
+}
+
 // drawBalls — [КУЛЬКИ] дві кульки, що бовтаються під тілом.
 //
 // Малюємо ПІСЛЯ тіла, а не до: вони мають лишатись видимими цілком, коли підтягуються
@@ -286,7 +397,7 @@ func drawFur(screen *ebiten.Image, p *Pixel) {
 // Колір — тіла, без прозорості: кульки читаються як частина істоти, а не як ефект.
 func drawBalls(screen *ebiten.Image, p *Pixel) {
 	for i := 0; i < ballCount; i++ {
-		vector.FillCircle(screen, cam.px(p.Balls[i][0]), cam.py(p.Balls[i][1]), cam.s(ballRadius), p.Color, antiAlias)
+		vector.FillCircle(screen, cam.px(p.Balls[i][0]), cam.py(p.Balls[i][1]), cam.s(ballRadius), strikeColorOf(p), antiAlias)
 	}
 }
 
@@ -333,7 +444,7 @@ func drawTentacleStroke(screen *ebiten.Image, p *Pixel) {
 		path.LineTo(cam.px(p.Tent[i][0]), cam.py(p.Tent[i][1]))
 		px, py = p.Tent[i][0], p.Tent[i][1]
 	}
-	op := pathOpts(p.Color)
+	op := pathOpts(strikeColorOf(p))
 	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: cam.s(tentWidth)}, &op)
 }
 
@@ -346,7 +457,7 @@ func drawTentacleTip(screen *ebiten.Image, p *Pixel) {
 	if n > 0 {
 		px, py = p.Tent[n-1][0], p.Tent[n-1][1]
 	}
-	vector.FillCircle(screen, cam.px(px), cam.py(py), cam.s(tentTipBall), p.Color, false)
+	vector.FillCircle(screen, cam.px(px), cam.py(py), cam.s(tentTipBall), strikeColorOf(p), false)
 }
 
 // bodyRestRadius — радіус «спокійного» контуру вздовж напрямку dirs8[i].
@@ -577,7 +688,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		//
 		// Малюнок не змінюється: кожен тайл лишається окремим замкненим підшляхом, тож
 		// заливка й контур виходять ті самі, до пікселя.
-		wallPath.Reset() // пакетна змінна: інакше алокація шляху щокадру
+		pinAARegion(screen) // [ЗГЛАДЖУВАННЯ] стабільна рамка буфера — див. pinAARegion
+		wallPath.Reset()    // пакетна змінна: інакше алокація шляху щокадру
 		buildWallPath(&wallPath)
 		fillOp, edgeOp := pathOpts(wallFill), pathOpts(wallEdge)
 		vector.FillPath(screen, &wallPath, nil, &fillOp)
@@ -671,21 +783,35 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		drawPixelBody(screen, g.player)
 		drawTentacleStroke(screen, &g.player)
 
-		// Прохід 2 — ПРОСТІ ФІГУРИ. Той самий відносний порядок, що був усередині
-		// юніта: долоні, кінчик відростка, кульки, смуга HP.
+		// Прохід 2 — ПРОСТІ ФІГУРИ, усі негайні: долоні, кінчик відростка, смуга HP.
 		for i := range g.units {
 			if !cam.visible(g.units[i].X, g.units[i].Y) {
 				continue
 			}
 			drawLimbTips(screen, &g.units[i])
 			drawTentacleTip(screen, &g.units[i])
-			drawBalls(screen, &g.units[i])
 			drawPixelOverlay(screen, g.units[i])
 		}
 		drawLimbTips(screen, &g.player)
 		drawTentacleTip(screen, &g.player)
-		drawBalls(screen, &g.player)
 		drawPixelOverlay(screen, g.player)
+
+		// Прохід 3 — КУЛЬКИ, останніми й окремо. Вони єдина проста фігура, що йде за
+		// перемикачем згладжування, і саме тому не можуть стояти всередині проходу 2:
+		// AA-кулька малюється через шлях, а сусідні долоні й смуга HP — негайно, тож
+		// вони скидали б її пакет НА КОЖНОМУ юніті. Винесені в кінець — усі кульки
+		// кадру збираються в один пакет, і зі згладжуванням це один буфер, а не 50.
+		//
+		// Порядок від цього не страждає: кульки й так були поверх усього, а зі смугою
+		// HP вони не перетинаються — та висить над юнітом, ці бовтаються під ним.
+		pinAARegion(screen)
+		for i := range g.units {
+			if !cam.visible(g.units[i].X, g.units[i].Y) {
+				continue
+			}
+			drawBalls(screen, &g.units[i])
+		}
+		drawBalls(screen, &g.player)
 
 		drawDash(screen, &g.player)
 	} // кінець топ-даун-гілки

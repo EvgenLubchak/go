@@ -287,6 +287,9 @@ func (g *Game) updateUnits() {
 			e.VelY = e.VelY / speed * currentMaxSpeed
 		}
 
+		if e.StrikeTimer > 0 {
+			e.StrikeTimer--
+		}
 		if e.HitTimer > 0 {
 			e.HitTimer--
 		}
