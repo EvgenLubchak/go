@@ -3047,6 +3047,12 @@ func TestRootsFollowBodySquash(t *testing.T) {
 // і ВІДСУТНІСТЬ її в центрі світу — щоб мертве твердження «завжди тотожна» не відродилось
 // у чиїйсь голові разом із екранними координатами в малюванні.
 func TestCameraIdentityInTheCornerView(t *testing.T) {
+	// Камера тестується сама по собі: renderScale — це масштаб КАДРУ, і домішувати
+	// його сюди означало б перевіряти дві речі одним числом.
+	savedScale := renderScale
+	renderScale = 1
+	defer func() { renderScale = savedScale }()
+
 	saved := cam
 	defer func() { cam = saved }()
 
@@ -3097,6 +3103,12 @@ func TestCameraIdentityInTheCornerView(t *testing.T) {
 // стіна: гравець упреться в межу посеред екрана, і ніщо на екрані цього не пояснить. Тому
 // властивість тримаємо тестом, а не коментарем — і не на одному зумі, як було раніше.
 func TestCameraNeverShowsOutsideTheWorld(t *testing.T) {
+	// Камера тестується сама по собі: renderScale — це масштаб КАДРУ, і домішувати
+	// його сюди означало б перевіряти дві речі одним числом.
+	savedScale := renderScale
+	renderScale = 1
+	defer func() { renderScale = savedScale }()
+
 	saved := cam
 	defer func() { cam = saved }()
 

@@ -161,3 +161,41 @@ func TestStrikeFlashMarksTheAttacker(t *testing.T) {
 		t.Errorf("після спалаху колір не повернувся: %v", c)
 	}
 }
+
+// TestDefaultsMatchTheirConstants — індикатори HUD показують лише те, що ВІДРІЗНЯЄТЬСЯ
+// від типового стану, і порівнюють поточне значення з іменованою константою.
+//
+// Пастка, від якої це стереже: змінна й константа живуть поруч, але окремо. Змінив
+// дефолт у var і забув у const — і показник або світиться завжди, або не світиться
+// ніколи. Компілятор мовчить, картинка правильна, а прилад бреше. Ми вже ловили рівно
+// цей клас вади в камері, де тест був зелений через збіг чисел.
+//
+// Тест читає ПОЧАТКОВІ значення, тому мусить іти до будь-чого, що їх змінює. Пакетні
+// змінні ініціалізуються один раз, тож усередині одного прогону це так і є.
+func TestDefaultsMatchTheirConstants(t *testing.T) {
+	if gameTPS != gameTPSDefault {
+		t.Errorf("gameTPS стартує з %d, а типовим оголошено %d — показник temp бреше",
+			gameTPS, gameTPSDefault)
+	}
+	if antiAlias != antiAliasDefault {
+		t.Errorf("antiAlias стартує з %v, а типовим оголошено %v — показник AA бреше",
+			antiAlias, antiAliasDefault)
+	}
+	if renderScale != renderScaleDefault {
+		t.Errorf("renderScale стартує з %v, а типовим оголошено %v — показник SS бреше",
+			renderScale, renderScaleDefault)
+	}
+	if cam.zoom != camZoomDefault {
+		t.Errorf("камера стартує з зумом %v, а типовим оголошено %v — показник zoom бреше",
+			cam.zoom, camZoomDefault)
+	}
+
+	// Дефолт мусить бути ДОСЯЖНИМ клавішами, інакше, збивши його, повернутись не можна.
+	if camZoomDefault < camZoomMin || camZoomDefault > camZoomMax {
+		t.Errorf("типовий зум %v поза межами [%v, %v]", camZoomDefault, camZoomMin, camZoomMax)
+	}
+	if d := float64(camZoomDefault-camZoomMin) / camZoomStep; d != float64(int(d)) {
+		t.Errorf("типовий зум %v не лягає на крок %v від %v — клавішами в нього не попасти",
+			camZoomDefault, camZoomStep, camZoomMin)
+	}
+}
