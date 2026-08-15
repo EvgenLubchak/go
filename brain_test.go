@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -50,9 +51,6 @@ func TestQLearningChasesNoWalls(t *testing.T) {
 
 	// Контракт памʼяті тепер живе в Net, але глобаль лишилась ДЕФОЛТОМ для мереж,
 	// створених без конфігу (як NewBrain нижче) — тож пінимо саме її.
-	savedGRU := useGRU
-	useGRU = false // цей тест перевіряє СТЕК-шлях (Step/train/forwardQ)
-	defer func() { useGRU = savedGRU }()
 
 	// [ТЕСТ НЕ ЗАЛЕЖИТЬ ВІД ДИЗАЙНУ РІВНЯ] Прибираємо ВСІ стіни на час тесту.
 	// Інакше правки levelLayout або pixelSize засівають «порожню» зону стінами →
@@ -162,11 +160,10 @@ func TestSharedBrainNoRace(t *testing.T) {
 // а не тікати. Якщо знак градієнта переплутано — Q падав би, і тест упав.
 // Запуск: go test -run TestGRULearnsSequence -v
 func TestGRULearnsSequence(t *testing.T) {
-	old := useGRU
-	useGRU = true
-	defer func() { useGRU = old }()
-
+	// Контракт задаємо ЯВНО на мережі: глобального перемикача більше немає, і це
+	// правильніше — тест каже, ЩО саме він перевіряє, а не покладається на режим.
 	n := NewNet()
+	n.mem = resolveMemContract(MemoryGRU, 0, 0, 1, 0)
 
 	// Фіксований відрізок (burn-in + навчальні) із чітким сигналом: reward=+1 для дії 2.
 	var seq sequence
@@ -214,10 +211,16 @@ func TestGRULearnsSequence(t *testing.T) {
 // TestSaveLoadGRURoundTrip перевіряє, що ваги GRU переживають save/load (round-trip),
 // а старий файл без ваг GRU не ламає завантаження (GRU ініціалізується з нуля).
 // Пишемо в тимчасовий файл, щоб не чіпати реальний brain_weights.json.
+//
+// [ЗМІНА КОНТРАКТУ] Рекурентні ваги тепер пишуться, ЛИШЕ якщо мережа ними
+// користується — інакше 43% кожного файлу йшло на припаркований шлях. Тому мережа
+// тут бере MemoryGRU ЯВНО: без цього перевіряти round-trip нічого, секції у файлі
+// просто не буде. Випадок «стек не пише GRU» перевіряє окремий тест нижче.
 func TestSaveLoadGRURoundTrip(t *testing.T) {
 	dir := t.TempDir()
 
 	n := NewNet()
+	n.mem = resolveMemContract(MemoryGRU, 0, 0, 1, 0)
 	n.Wz[0][0] = 0.4242 // характерні значення
 	n.Wq[2][5] = -0.777
 	n.W1[1][1] = 0.333 // і стек-вага
@@ -467,9 +470,8 @@ func TestRosterConfigsAreComplete(t *testing.T) {
 // Тест навмисно перевіряє й ЗВОРОТНЕ (розморожені ваги таки змінюються) —
 // інакше він проходив би і тоді, коли тренування зламане й не робить нічого.
 func TestFrozenPolicyStopsLearning(t *testing.T) {
-	savedRoster, savedFrozen, savedGRU := unitRoster, frozenPolicy, useGRU
-	defer func() { unitRoster, frozenPolicy, useGRU = savedRoster, savedFrozen, savedGRU }()
-	useGRU = false // перевіряємо стек-шлях: у нього детермінований поріг qMinReplay
+	savedRoster, savedFrozen := unitRoster, frozenPolicy
+	defer func() { unitRoster, frozenPolicy = savedRoster, savedFrozen }()
 	chaser := ConfigLearner
 	chaser.Count = 1
 	unitRoster = []UnitConfig{chaser}
@@ -886,19 +888,19 @@ func TestRestartKeepsBrains(t *testing.T) {
 
 // TestMemoryContractIsPerNetwork — головна обіцянка рефакторингу: два типи юнітів
 // можуть мати РІЗНУ памʼять одночасно. Доти це було неможливо — Step і train
-// дивились на глобальний useGRU, тобто «усе або ніщо».
+// дивились на одну глобаль, тобто «усе або ніщо».
 //
 // Заразом перевіряємо, що глобаль лишилась ДЕФОЛТОМ: тип, який нічого не вказав,
 // мусить її успадкувати, інакше кожен конфіг був би змушений повторювати вибір.
 func TestMemoryContractIsPerNetwork(t *testing.T) {
 	savedRoster, savedShared := unitRoster, sharedBrain
-	savedGRU, savedFrames, savedSkip := useGRU, memFrames, stackSkip
+	savedFrames, savedSkip := memFrames, stackSkip
 	defer func() {
 		unitRoster, sharedBrain = savedRoster, savedShared
-		useGRU, memFrames, stackSkip = savedGRU, savedFrames, savedSkip
+		memFrames, stackSkip = savedFrames, savedSkip
 	}()
 	sharedBrain = true
-	useGRU, memFrames, stackSkip = false, 4, 10 // глобаль = стек 4/10
+	memFrames, stackSkip = 4, 10 // дефолт стеку 4/10
 
 	// Файли неіснуючі: тест не має читати реальні ваги з робочої теки.
 	mk := func(file string, kind MemoryKind, frames, skip int) UnitConfig {
@@ -3135,5 +3137,55 @@ func TestCameraNeverShowsOutsideTheWorld(t *testing.T) {
 					zoom, tg[0], tg[1], cam.cy-halfH, cam.cy+halfH, worldHeight)
 			}
 		}
+	}
+}
+
+// TestStackNetWritesNoGruSection — файл ваг СТЕК-мережі не містить рекурентної секції.
+//
+// Це не про охайність, а про 43%: доки шлях припаркований, тридцять масивів по 61 КБ
+// писались у кожен файл при кожному збереженні. Тест стереже дві речі, і друга
+// важливіша за першу.
+func TestStackNetWritesNoGruSection(t *testing.T) {
+	dir := t.TempDir()
+	n := NewNet() // контракт за замовчуванням = стек
+	if n.mem.gru {
+		t.Fatal("дефолтний контракт раптом став рекурентним — тест перевіряє не те")
+	}
+	n.Wz[0][0] = 0.4242 // навмисно НЕнульова: якби секція писалась, ми б це побачили
+
+	path := dir + "/w.json"
+	if err := saveNetTo(n, path); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("файл ваг стек-мережі: %d КБ", len(raw)/1024)
+	if strings.Contains(string(raw), "gru_weights") {
+		t.Errorf("стек-мережа записала рекурентну секцію — %d КБ на шлях, яким ніхто не ходить",
+			len(raw)/1024)
+	}
+
+	// ДРУГЕ, І ГОЛОВНЕ: після завантаження рекурентні ваги мусять бути ЖИВІ, а не
+	// нульові. Нульова матриця — це не «памʼять з нуля», це вироджена мережа, у якій
+	// градієнти не течуть. Якби відродження GRU колись почалось із такого стану, воно
+	// б не навчилось нічого, і причину шукали б у чому завгодно, крім завантаження.
+	m := loadNetFrom(path, n.mem, n.gamma, n.clip)
+	if m == nil {
+		t.Fatal("loadNetFrom повернув nil")
+	}
+	var sum float32
+	for i := range m.Wz {
+		for j := range m.Wz[i] {
+			if v := m.Wz[i][j]; v > 0 {
+				sum += v
+			} else {
+				sum -= v
+			}
+		}
+	}
+	if sum == 0 {
+		t.Error("після завантаження ваги GRU нульові — initGRU не спрацював")
 	}
 }

@@ -60,14 +60,13 @@ const gradCheckFloor = 1e-5
 const gradCheckAbs = 2e-5
 
 func TestGRUGradientMatchesFiniteDifference(t *testing.T) {
-	savedClip, savedLR, savedGRU := gruGradClip, gruLearnRate, useGRU
-	defer func() { gruGradClip, gruLearnRate, useGRU = savedClip, savedLR, savedGRU }()
+	savedClip, savedLR := gruGradClip, gruLearnRate
+	defer func() { gruGradClip, gruLearnRate = savedClip, savedLR }()
 
 	// Кліп ГЕТЬ: він навмисно спотворює градієнт, і з ним перевірка безглузда.
 	gruGradClip = 1e9
 	const lr = 1e-3
 	gruLearnRate = lr
-	useGRU = true
 
 	for _, sign := range []float32{+1, -1} {
 		name := "td=+1"

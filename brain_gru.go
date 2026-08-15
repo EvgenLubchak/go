@@ -6,7 +6,43 @@ import (
 )
 
 // ==========================================================================
-// ШЛЯХ 2: GRU — ВИВЧЕНА памʼять (рекурентна) — активний при useGRU = true.
+// ⚠️ ПРИПАРКОВАНО. ЖОДЕН ТИП ЦЬОГО ШЛЯХУ НЕ ВИКОРИСТОВУЄ.
+//
+// Код лишений навмисно, а не забутий. Перш ніж його вмикати, прочитай чому.
+//
+// [ЩО ЗМІРЯНО] На стенді GRU нерозрізненний від ВІДСУТНОСТІ памʼяті: домінування
+// 52% і 44% при двох темпах навчання, p = 0.76 і 0.37. Тобто увімкнути його комусь
+// означає дати ГІРШУ памʼять, ніж стек, — і виглядатиме це як «памʼять не
+// допомагає», хоча причина інша.
+//
+// [НАЙІМОВІРНІША ПРИЧИНА, НЕ ПЕРЕВІРЕНА] Важіль BPTT: seqLen = 8 кадрів розгортки —
+// це 0.067 с, а задачам, які ми ставили, потрібно ~1.5 с. Градієнт просто не дістає
+// туди, де лежить корисна інформація. Комірки для перевірки готові: BENCH_SET=gru,
+// щаблі gskip 1 / 5 / 20 / 40. Це єдиний незакритий хвіст по цьому шляху.
+//
+// [ЧОМУ ВЗАГАЛІ НЕМАЄ ДЕ ЗАСТОСУВАТИ] Рекурентна памʼять потрібна там, де НЕ МОЖНА
+// ПЕРЕЛІЧИТИ, що саме треба запамʼятати. У нашій грі перелічити можна майже все, і
+// тому дешевші рівні виграють:
+//
+//	явний вхід   знаєш, ЩО памʼятати        → inDashAtMe, inDashOpen
+//	стек кадрів  знаєш ГОРИЗОНТ             → 4 кадри × 10, вікно 0.5 с
+//	рекурентна   не знаєш ні того, ні того  → ось цей файл
+//
+// Єдиний кандидат — моделювання суперника — виявився непридатним: стиль прицілу
+// існує лише в стенді (у грі цілиться людина), а девʼята дія дає НЕВРАЗЛИВІСТЬ, тож
+// напрямок удару на результат ухилення не впливає взагалі. Доведено тестом
+// TestAimStyleCannotReachTheDodge.
+//
+// [ЩО ТУТ УСЕ Ж СПРАВНЕ] Математика перевірена: TestGRUGradientMatchesFiniteDifference
+// звіряє BPTT зі скінченними різницями й ловить інверсію знака в оновленні ваг. Тобто
+// відроджувати доведеться механіку й задачу, а не рахунок.
+//
+// [ЯКЩО ВІДРОДЖУЄШ] Спершу задача, потім памʼять. Побудуй механіку, де прихована
+// величина справді накопичується, розвʼяжи її НАЙДЕШЕВШИМ способом і лише потім міряй
+// рекурентну проти нього. Ми вже колись зробили навпаки й спалили пʼять замірів.
+// ==========================================================================
+//
+// ШЛЯХ 2: GRU — ВИВЧЕНА памʼять (рекурентна) — лише при явному MemoryGRU.
 //
 // На вхід іде ОДИН кадр (baseInputs), а «минуле» живе в прихованому стані h,
 // який мережа несе між кадрами й САМА вирішує (воротами z/r), що тримати і як
@@ -32,6 +68,76 @@ type sequence struct {
 // initGRU — Xavier-ініціалізація ваг рекурентної клітини. Викликається і з NewNet,
 // і з LoadNet (файл ваг GRU поки не містить → щоб не лишались нульовими й мертвими).
 // Вхідні ваги масштабуємо ~1/√baseInputs, рекурентні й вихідні ~1/√gruHidden.
+// gruFile — рекурентні ваги в JSON. Окремою секцією, а не плоскими полями поруч зі
+// стеком: доки шлях припаркований, секції у файлі просто немає (omitempty), і кожен
+// файл ваг худне на 43%.
+//
+// Тип тримає ті самі поля, що gruWeights, але БЕЗ target-копій: вони відновлюються
+// з живих ваг через syncTarget одразу після завантаження, тож писати їх на диск
+// означало б дублювати те, що й так виводиться.
+type gruFile struct {
+	Wz [gruHidden][baseInputs]float32   `json:"wz"`
+	Uz [gruHidden][gruHidden]float32    `json:"uz"`
+	Bz [gruHidden]float32               `json:"bz"`
+	Wr [gruHidden][baseInputs]float32   `json:"wr"`
+	Ur [gruHidden][gruHidden]float32    `json:"ur"`
+	Br [gruHidden]float32               `json:"br"`
+	Wh [gruHidden][baseInputs]float32   `json:"wh"`
+	Uh [gruHidden][gruHidden]float32    `json:"uh"`
+	Bh [gruHidden]float32               `json:"bh"`
+	Wq [brainActions][gruHidden]float32 `json:"wq"`
+	Bq [brainActions]float32            `json:"bq"`
+}
+
+func newGruFile(w gruWeights) *gruFile {
+	return &gruFile{Wz: w.Wz, Uz: w.Uz, Bz: w.Bz, Wr: w.Wr, Ur: w.Ur, Br: w.Br,
+		Wh: w.Wh, Uh: w.Uh, Bh: w.Bh, Wq: w.Wq, Bq: w.Bq}
+}
+
+// weights розгортає секцію назад у ваги. Target-копії лишаються нульовими навмисно —
+// syncTarget заповнить їх одразу після завантаження.
+func (f *gruFile) weights() gruWeights {
+	return gruWeights{Wz: f.Wz, Uz: f.Uz, Bz: f.Bz, Wr: f.Wr, Ur: f.Ur, Br: f.Br,
+		Wh: f.Wh, Uh: f.Uh, Bh: f.Bh, Wq: f.Wq, Bq: f.Bq}
+}
+
+// gruWeights — ваги рекурентної клітини, вбудовані в Net.
+//
+// Окремим типом і в ЦЬОМУ файлі, щоб уся рекурентна памʼять жила в одному місці:
+// доки шлях припаркований, brain.go про нього не мусить нагадувати тридцятьма
+// рядками полів.
+type gruWeights struct {
+	// GRU-клітина: вхід x(baseInputs) + попередній стан h(gruHidden) → новий h.
+	//   z — update gate (скільки нового пускати в памʼять)
+	//   r — reset gate (скільки старого забути перед оновленням)
+	//   h~ — candidate (кандидат нового стану)
+	// W* множать ВХІД, U* множать СТАН, B* — зсуви. Wq/Bq: стан h → Q(8) (лінійно).
+	Wz [gruHidden][baseInputs]float32
+	Uz [gruHidden][gruHidden]float32
+	Bz [gruHidden]float32
+	Wr [gruHidden][baseInputs]float32
+	Ur [gruHidden][gruHidden]float32
+	Br [gruHidden]float32
+	Wh [gruHidden][baseInputs]float32
+	Uh [gruHidden][gruHidden]float32
+	Bh [gruHidden]float32
+	Wq [brainActions][gruHidden]float32
+	Bq [brainActions]float32
+
+	// [RNN] Target-копії GRU-ваг — заморожені для Беллман-цілі (як tW1… для стеку).
+	tWz [gruHidden][baseInputs]float32
+	tUz [gruHidden][gruHidden]float32
+	tBz [gruHidden]float32
+	tWr [gruHidden][baseInputs]float32
+	tUr [gruHidden][gruHidden]float32
+	tBr [gruHidden]float32
+	tWh [gruHidden][baseInputs]float32
+	tUh [gruHidden][gruHidden]float32
+	tBh [gruHidden]float32
+	tWq [brainActions][gruHidden]float32
+	tBq [brainActions]float32
+}
+
 func (n *Net) initGRU() {
 	sx := float32(math.Sqrt(1.0 / baseInputs))
 	sh := float32(math.Sqrt(1.0 / gruHidden))

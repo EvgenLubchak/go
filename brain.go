@@ -30,7 +30,7 @@ import (
 //   Режим sharedBrain (main.go): усі учні ділять один Net → «вулик-розум».
 //
 // --------------------------------------------------------------------------
-// ДВА ШЛЯХИ ПАМʼЯТІ (обираються прапорцем useGRU у рантаймі, див. Step/train):
+// ДВА ШЛЯХИ ПАМʼЯТІ (обирає memContract кожної мережі, див. Step/train):
 //
 //	brain_stack.go — FRAME-STACKING: вхід = стек stackFrames кадрів (64 числа),
 //	                 вікно історії задане НАМИ. Історично перший підхід; лишається
@@ -75,7 +75,7 @@ const (
 	brainWhiskers = 8 // промені-сенсори стін (по одному на КОЖЕН напрямок руху)
 
 	// [RNN/GRU] Розмір рекурентного прихованого стану h (памʼять, яку мережа несе
-	// між кадрами). Вмикається прапорцем useGRU: тоді вхід — ОДИН кадр (baseInputs),
+	// між кадрами). Вмикається явним MemoryGRU: тоді вхід — ОДИН кадр (baseInputs),
 	// а «минуле» живе в h, а не в стеку кадрів. Ваги GRU співіснують у Net поряд зі
 	// стек-вагами (обираємо шлях у рантаймі) → перемкнути назад = нуль ризику.
 	gruHidden = 32
@@ -359,7 +359,7 @@ var (
 // ==========================================================================
 // [ПАМʼЯТЬ] КОНТРАКТ ПАМʼЯТІ — властивість МЕРЕЖІ, а не глобальний прапорець.
 //
-// Глобалі useGRU/memFrames/stackSkip лишаються, але тепер вони ДЕФОЛТИ, а не істина.
+// memFrames/stackSkip лишаються ДЕФОЛТАМИ стеку; глобаль на GRU видалено як пастку.
 // Причина: ваги навчені під ОДИН контракт входу, і всі мозки одного вулика
 // зобовʼязані його шанувати. А вулик ключується по WeightsFile, тож
 // ОДИН ФАЙЛ = ОДНА МЕРЕЖА = ОДИН КОНТРАКТ. Поняття вже існувало — глобальні
@@ -375,7 +375,7 @@ var (
 type MemoryKind int
 
 const (
-	MemoryDefault MemoryKind = iota // бери глобальний useGRU
+	MemoryDefault MemoryKind = iota // не вказано → СТЕК (глобалі на GRU більше немає)
 	MemoryStack                     // frame-stacking незалежно від глобалі
 	MemoryGRU                       // рекурентна памʼять незалежно від глобалі
 )
@@ -449,7 +449,13 @@ func (c memContract) decisionSkip() int {
 
 // resolveMemContract — контракт типу юніта: що вказано в конфізі, решта з глобалей.
 func resolveMemContract(kind MemoryKind, frames, skip, gskip, askip int) memContract {
-	c := memContract{gru: useGRU, memFrames: memFrames, stackSkip: stackSkip,
+	// [ПРИПАРКОВАНО] Дефолт — СТЕК, і глобального перемикача на GRU більше немає.
+	// Рекурентний шлях лишається досяжним ЛИШЕ через явний MemoryGRU у конфізі або в
+	// комірці стенду. Причина в тому, що глобаль була пасткою: вона робила «просто
+	// увімкнути й глянути» одним рухом, а результат виходив ГІРШИЙ за стек (seqLen = 8
+	// це 0.067 с розгортки проти потрібних задачі ~1.5 с) — і виглядало б це як
+	// «памʼять не допомагає», хоча її просто не встигли розгорнути.
+	c := memContract{gru: false, memFrames: memFrames, stackSkip: stackSkip,
 		gruSkip: gruSkip, actSkip: actSkip}
 	switch kind {
 	case MemoryStack:
@@ -644,36 +650,13 @@ type Net struct {
 	gamma float32
 	clip  float32
 
-	// [RNN/GRU] Ваги рекурентної клітини (вживаються лише коли mem.gru).
-	// GRU-клітина: вхід x(baseInputs) + попередній стан h(gruHidden) → новий h.
-	//   z — update gate (скільки нового пускати в памʼять)
-	//   r — reset gate (скільки старого забути перед оновленням)
-	//   h~ — candidate (кандидат нового стану)
-	// W* множать ВХІД, U* множать СТАН, B* — зсуви. Wq/Bq: стан h → Q(8) (лінійно).
-	Wz [gruHidden][baseInputs]float32
-	Uz [gruHidden][gruHidden]float32
-	Bz [gruHidden]float32
-	Wr [gruHidden][baseInputs]float32
-	Ur [gruHidden][gruHidden]float32
-	Br [gruHidden]float32
-	Wh [gruHidden][baseInputs]float32
-	Uh [gruHidden][gruHidden]float32
-	Bh [gruHidden]float32
-	Wq [brainActions][gruHidden]float32
-	Bq [brainActions]float32
-
-	// [RNN] Target-копії GRU-ваг — заморожені для Беллман-цілі (як tW1… для стеку).
-	tWz [gruHidden][baseInputs]float32
-	tUz [gruHidden][gruHidden]float32
-	tBz [gruHidden]float32
-	tWr [gruHidden][baseInputs]float32
-	tUr [gruHidden][gruHidden]float32
-	tBr [gruHidden]float32
-	tWh [gruHidden][baseInputs]float32
-	tUh [gruHidden][gruHidden]float32
-	tBh [gruHidden]float32
-	tWq [brainActions][gruHidden]float32
-	tBq [brainActions]float32
+	// [RNN/GRU] Ваги рекурентного шляху — ПРИПАРКОВАНОГО, див. brain_gru.go.
+	//
+	// Вбудовано, а не перелічено тут: тридцять полів, які ніхто не читає, займали в
+	// цьому файлі більше місця, ніж уся решта опису мережі. Вбудовування лишає
+	// доступ незмінним (n.Wz працює через підвищення полів), тож жодне місце
+	// використання не змінилось — переїхав лише опис.
+	gruWeights
 }
 
 // Brain — «голова» одного ворога-учня: указник на мережу + ОСОБИСТА пам'ять.
@@ -693,7 +676,7 @@ type Brain struct {
 	frames    [stackFrames - 1][baseInputs]float32
 	frameTick int
 
-	// [RNN/GRU] Рекурентний прихований стан цього агента (вживається при useGRU).
+	// [RNN/GRU] Рекурентний прихований стан цього агента (лише при MemoryGRU).
 	// Несеться між кадрами, скидається на новий епізод/respawn. Памʼять — своя в
 	// кожного агента (як frames); ваги GRU — спільні в Net (вулик лишається).
 	h [gruHidden]float32
@@ -826,7 +809,7 @@ func NewNet() *Net {
 			n.W3[a][k] = (rand.Float32()*2 - 1) * s3
 		}
 	}
-	n.initGRU()    // [RNN] ініціалізуємо й рекурентні ваги (навіть якщо useGRU=false)
+	n.initGRU()    // [RNN] ініціалізуємо й рекурентні ваги (навіть якщо шлях не задіяний)
 	n.syncTarget() // target стартує копією живих ваг
 	return n
 }
@@ -1432,21 +1415,19 @@ type BrainData struct {
 	W3 [brainActions][brainHidden2]float32 `json:"w3"`
 	B3 [brainActions]float32               `json:"b3"`
 
-	// [RNN] Ваги GRU. Старі файли їх не містять (HasGRU=false) → GRU стартує з нуля
-	// через initGRU. GruHidden звіряємо окремо (розмір h) при завантаженні.
-	HasGRU    bool                             `json:"has_gru"`
-	GruHidden int                              `json:"gru_hidden"`
-	Wz        [gruHidden][baseInputs]float32   `json:"wz"`
-	Uz        [gruHidden][gruHidden]float32    `json:"uz"`
-	Bz        [gruHidden]float32               `json:"bz"`
-	Wr        [gruHidden][baseInputs]float32   `json:"wr"`
-	Ur        [gruHidden][gruHidden]float32    `json:"ur"`
-	Br        [gruHidden]float32               `json:"br"`
-	Wh        [gruHidden][baseInputs]float32   `json:"wh"`
-	Uh        [gruHidden][gruHidden]float32    `json:"uh"`
-	Bh        [gruHidden]float32               `json:"bh"`
-	Wq        [brainActions][gruHidden]float32 `json:"wq"`
-	Bq        [brainActions]float32            `json:"bq"`
+	// [RNN] Ваги GRU — ОКРЕМОЮ СЕКЦІЄЮ, і її немає у файлі, поки шлях припаркований.
+	//
+	// Раніше тридцять масивів лежали тут плоско й писались ЗАВЖДИ: 61 КБ із 143 КБ
+	// кожного файлу ваг, тобто 43% на шлях, яким ніхто не ходить. Тепер секція
+	// вказівник із omitempty — немає GRU, немає й байтів.
+	//
+	// Старі файли з плоскими полями просто не знайдуть цю секцію, HasGRU лишиться
+	// false, і GRU підніметься з нуля через initGRU — рівно та гілка, що вже була
+	// передбачена для файлів зі старих збірок. Стек при цьому цілий, а він і є все,
+	// що ми зараз використовуємо.
+	HasGRU    bool     `json:"has_gru"`
+	GruHidden int      `json:"gru_hidden"`
+	GRU       *gruFile `json:"gru_weights,omitempty"`
 }
 
 // SaveNet зберігає ваги у ВЛАСНИЙ файл мережі (n.file). Ефемерні мережі
@@ -1478,12 +1459,13 @@ func saveNetTo(n *Net, path string) error {
 		Gru: n.mem.gru, MemFrames: n.mem.memFrames, StackSkip: n.mem.stackSkip,
 		GruSkip: n.mem.gruSkip, ActSkip: n.mem.actSkip, NStep: n.mem.nStep, Gamma: n.gamma,
 		W1: n.W1, B1: n.B1, W2: n.W2, B2: n.B2, W3: n.W3, B3: n.B3,
-		// [RNN] і рекурентні ваги — щоб gru-рій не вчився з нуля щоразу.
-		HasGRU: true, GruHidden: gruHidden,
-		Wz: n.Wz, Uz: n.Uz, Bz: n.Bz,
-		Wr: n.Wr, Ur: n.Ur, Br: n.Br,
-		Wh: n.Wh, Uh: n.Uh, Bh: n.Bh,
-		Wq: n.Wq, Bq: n.Bq,
+	}
+	// [RNN] Рекурентні ваги пишемо, ЛИШЕ якщо мережа ними справді користується.
+	// Раніше вони йшли завжди — 43% файлу на припаркований шлях. Прапорець читає той
+	// самий контракт, що й решта збереження, тож відродження GRU поверне запис саме.
+	if n.mem.gru {
+		data.HasGRU, data.GruHidden = true, gruHidden
+		data.GRU = newGruFile(n.gruWeights)
 	}
 	bytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
@@ -1551,11 +1533,8 @@ func loadNetFrom(path string, want memContract, wantGamma, wantClip float32) *Ne
 	n := &Net{mem: want, W1: data.W1, B1: data.B1, W2: data.W2, B2: data.B2, W3: data.W3, B3: data.B3}
 	n.gamma, n.clip = wantGamma, wantClip
 	n.file = path // мережа памʼятає, звідки прийшла → туди ж і збережеться
-	if data.HasGRU && data.GruHidden == gruHidden {
-		n.Wz, n.Uz, n.Bz = data.Wz, data.Uz, data.Bz
-		n.Wr, n.Ur, n.Br = data.Wr, data.Ur, data.Br
-		n.Wh, n.Uh, n.Bh = data.Wh, data.Uh, data.Bh
-		n.Wq, n.Bq = data.Wq, data.Bq
+	if data.HasGRU && data.GruHidden == gruHidden && data.GRU != nil {
+		n.gruWeights = data.GRU.weights()
 	} else {
 		n.initGRU() // немає ваг GRU у файлі / інший розмір → рекурентна памʼять з нуля
 	}

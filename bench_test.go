@@ -52,7 +52,7 @@ import (
 // benchCfg — одна конфігурація памʼяті для порівняння.
 type benchCfg struct {
 	name   string
-	gru    bool    // useGRU
+	gru    bool    // MemoryGRU замість стеку
 	frames int     // memFrames: скільки слотів стеку несуть історію
 	skip   int     // stackSkip: кадрів між семплами
 	units  int     // скільки учнів на полі (1 перевіряє гіпотезу «рій замінює памʼять»)
