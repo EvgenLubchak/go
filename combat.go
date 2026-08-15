@@ -210,12 +210,15 @@ func impactThreshold(ownMaxSpeed float32) float32 {
 // [БІЙ: АТРИБУЦІЯ] Записує подію обом сторонам у лічильники мозку — це
 // сировина для бойової нагороди (rewardFor споживає й обнуляє їх наступного
 // кадру). attacker може бути nil (напр. шкода не від агента).
-func applyImpactDamage(attacker, target *Pixel, dmg int) {
+// Повертає true, якщо шкода СПРАВДІ пройшла. Потрібно тому, що заморозка мусить
+// спрацьовувати на подію, а не на спробу: удар у невразливого або в того, хто вдало
+// ухилився, — це не влучання, і морозити на ньому означало б нагороджувати промах.
+func applyImpactDamage(attacker, target *Pixel, dmg int) bool {
 	// [УХИЛЕННЯ] Активне ухилення захищає так само, як невразливість після удару.
 	// Окремим таймером, а не через InvulnTimer: у них різна тривалість і різний сенс,
 	// і змішувати їх означало б, що вдалий ухил дає ще й 45 кадрів безкарності.
 	if target.InvulnTimer > 0 || target.DodgeTimer > 0 {
-		return
+		return false
 	}
 	target.HP -= dmg
 	target.HitTimer = hitFlashDuration // біле блимання (вже було для удару гравця)
@@ -275,11 +278,32 @@ func applyImpactDamage(attacker, target *Pixel, dmg int) {
 		target.Brain.dmgTaken += dmg
 		target.Brain.mDmgTaken += dmg
 	}
+
+	return true
 }
 
 // resolveImpacts — [БІЙ] проходить пари, що перетинаються, і завдає шкоди за
 // closing speed. Обробляє і гравець↔вороги, і вороги↔вороги.
 // Однопотоково (після паралельної фази) → без гонок.
+// freezeOnHit просить заморозити світ на frames кадрів.
+//
+// [ШОВ ІЗ ЗАМІРАМИ] Ці два поля читає ЛИШЕ Update, тобто справжній ігровий цикл.
+// Стенд крутиться через tickHeadless і про них не знає, тож усі записані базові лінії
+// лишаються порівнянними. resolveImpacts на стенді їх виставляє — і це нікому не
+// шкодить, бо ніхто їх там не читає. Шов саме тут, а не в самій механіці.
+func (g *Game) freezeOnHit(frames int) {
+	if g.hitstopCool > 0 {
+		return
+	}
+	// Беремо БІЛЬШУ з двох, а не суму: в одному тіку гравець може і вдарити, і дістати
+	// у відповідь, а складати паузи означало б робити розмін ударами найповільнішим
+	// місцем гри — тобто карати за найцікавіше.
+	if frames > g.hitstop {
+		g.hitstop = frames
+	}
+	g.hitstopCool = hitstopCooldown
+}
+
 func (g *Game) resolveImpacts() {
 	// --- Гравець ↔ вороги ---
 	for i := range g.units {
@@ -306,12 +330,16 @@ func (g *Game) resolveImpacts() {
 		// незалежно від свого InvulnTimer. Я спершу приписав це збігу двох таймерів —
 		// невірно, збіг був випадковий і зник, коли замах виріс до 60.
 		if g.player.DashPhase == dashPhaseActive {
-			applyImpactDamage(&g.player, e, dashDamage)
+			if applyImpactDamage(&g.player, e, dashDamage) {
+				g.freezeOnHit(hitstopDealt)
+			}
 		}
 		// Ворог кидається на гравця (напрямок навпаки).
 		eMax := e.Cfg.MaxSpeed * g.difficulty
 		if eMax > 0 && closingSpeed(e.VelX, e.VelY, -nx, -ny) >= impactThreshold(eMax) {
-			applyImpactDamage(e, &g.player, impactDamage)
+			if applyImpactDamage(e, &g.player, impactDamage) {
+				g.freezeOnHit(hitstopTaken)
+			}
 		}
 	}
 

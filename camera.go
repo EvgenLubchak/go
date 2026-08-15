@@ -49,12 +49,12 @@ func (c *camera) follow(tx, ty float32) {
 }
 
 // px, py — світові координати в екранні. s — довжина/товщина/радіус.
-// [СУПЕРСЕМПЛІНГ] Множення на renderScale — саме ТУТ, а не в кожній точці малювання.
+// [СУПЕРСЕМПЛІНГ] Множення на sceneScale — саме ТУТ, а не в кожній точці малювання.
 // Камера і так єдиний місток зі світу на екран, тож збільшення кадру стає її справою,
 // і тридцять викликів px/py/s нічого про нього не знають.
-func (c camera) px(wx float32) float32 { return ((wx-c.cx)*c.zoom + screenWidth/2) * renderScale }
-func (c camera) py(wy float32) float32 { return ((wy-c.cy)*c.zoom + screenHeight/2) * renderScale }
-func (c camera) s(v float32) float32   { return v * c.zoom * renderScale }
+func (c camera) px(wx float32) float32 { return ((wx-c.cx)*c.zoom + screenWidth/2) * sceneScale }
+func (c camera) py(wy float32) float32 { return ((wy-c.cy)*c.zoom + screenHeight/2) * sceneScale }
+func (c camera) s(v float32) float32   { return v * c.zoom * sceneScale }
 
 // visible — чи потрапляє юніт у видиму область (із запасом на ворс і щупальце).
 //

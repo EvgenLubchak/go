@@ -263,10 +263,10 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0, // не впливає (лише debug-коло)
 		PounceMulti:     0.0,
-		Count:           5, // мало: вони сильніші за рій
+		Count:           15, // мало: вони сильніші за рій
 		Faction:         factionEnemy,
 		WeightsFile:     killerFile,
-		Respawns:        3,                            // [РЕСПАУН] безкінечно — вони частина сталого складу
+		Respawns:        0,                            // [РЕСПАУН] безкінечно — вони частина сталого складу
 		MaxHP:           10,                           // витримує на удар більше за рій
 		Color:           color.RGBA{255, 90, 60, 255}, // червоний — щоб одразу вирізняти
 		Label:           "O_o",                        //"*_*",
@@ -331,10 +331,10 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           5,
+		Count:           7,
 		Faction:         factionPlayer,
 		WeightsFile:     allyKillerFile,
-		Respawns:        4,
+		Respawns:        5,
 		MaxHP:           15,
 		Color:           color.RGBA{140, 100, 255, 255}, // фіолетовий — твій вбивця
 		Label:           "*_*",                          //"( _ )",

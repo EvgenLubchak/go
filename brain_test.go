@@ -3049,9 +3049,9 @@ func TestRootsFollowBodySquash(t *testing.T) {
 func TestCameraIdentityInTheCornerView(t *testing.T) {
 	// Камера тестується сама по собі: renderScale — це масштаб КАДРУ, і домішувати
 	// його сюди означало б перевіряти дві речі одним числом.
-	savedScale := renderScale
-	renderScale = 1
-	defer func() { renderScale = savedScale }()
+	savedScale := sceneScale
+	sceneScale = 1
+	defer func() { sceneScale = savedScale }()
 
 	saved := cam
 	defer func() { cam = saved }()
@@ -3105,9 +3105,9 @@ func TestCameraIdentityInTheCornerView(t *testing.T) {
 func TestCameraNeverShowsOutsideTheWorld(t *testing.T) {
 	// Камера тестується сама по собі: renderScale — це масштаб КАДРУ, і домішувати
 	// його сюди означало б перевіряти дві речі одним числом.
-	savedScale := renderScale
-	renderScale = 1
-	defer func() { renderScale = savedScale }()
+	savedScale := sceneScale
+	sceneScale = 1
+	defer func() { sceneScale = savedScale }()
 
 	saved := cam
 	defer func() { cam = saved }()

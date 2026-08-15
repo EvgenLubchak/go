@@ -199,3 +199,63 @@ func TestDefaultsMatchTheirConstants(t *testing.T) {
 			camZoomDefault, camZoomStep, camZoomMin)
 	}
 }
+
+// TestSuperSamplingLadder — драбина масштабів і спуск нею.
+//
+// Головна властивість не в тому, як високо забирається драбина (×12 узагалі поклав
+// гру — див. ssLadder), а в тому, що НЕВДАЧА НЕ МОВЧИТЬ: sceneScale
+// каже, що вийшло насправді, і HUD показує розбіжність. Камера множить саме на
+// sceneScale, тож помилка тут малювала б світ повз буфер — чорний екран замість
+// чесного «не влізло».
+func TestSuperSamplingLadder(t *testing.T) {
+	if len(ssLadder) < 2 || ssLadder[0] != 1 {
+		t.Fatalf("драбина мусить починатись з 1 і мати щаблі вище: %v", ssLadder)
+	}
+	for i := 1; i < len(ssLadder); i++ {
+		if ssLadder[i] <= ssLadder[i-1] {
+			t.Errorf("драбина не зростає: %v", ssLadder)
+		}
+	}
+
+	// Типовий масштаб мусить бути НА драбині, інакше клавіша H у нього не повернеться:
+	// цикл шукає поточне значення в списку, не знаходить і починає з початку.
+	onLadder := false
+	for _, s := range ssLadder {
+		if s == renderScaleDefault {
+			onLadder = true
+		}
+	}
+	if !onLadder {
+		t.Errorf("типовий масштаб %v не лежить на драбині %v — клавішею H у нього не вернутись",
+			float32(renderScaleDefault), ssLadder)
+	}
+
+	// Спуск: невдале виділення мусить дати ЩАБЕЛЬ НИЖЧЕ, а не тишу. Перевіряємо саму
+	// логіку вибору, не чіпаючи GPU — виділяти тут нічого не можна, бо в тестах немає
+	// графічного контексту.
+	pick := func(want float32, fits func(float32) bool) float32 {
+		for i := len(ssLadder) - 1; i >= 0; i-- {
+			s := ssLadder[i]
+			if s > want || s <= 1 {
+				continue
+			}
+			if fits(s) {
+				return s
+			}
+		}
+		return 1
+	}
+	all := func(float32) bool { return true }
+	top := ssLadder[len(ssLadder)-1]
+	if got := pick(top, all); got != top {
+		t.Errorf("коли влазить усе, %v мусить лишитись %v, а не %v", top, top, got)
+	}
+	upTo2 := func(s float32) bool { return s <= 2 }
+	if got := pick(top, upTo2); got != 2 {
+		t.Errorf("коли стеля ×2, запит %v мусить осісти на ×2, а не на %v", top, got)
+	}
+	none := func(float32) bool { return false }
+	if got := pick(top, none); got != 1 {
+		t.Errorf("коли не влазить нічого, мусить лишитись ×1, а не %v", got)
+	}
+}

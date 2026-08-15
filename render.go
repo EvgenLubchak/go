@@ -154,6 +154,45 @@ func pathOpts(col color.RGBA) vector.DrawPathOptions {
 // перебудовувався щокадру під поточні шляхи, а тут одна текстура назавжди.
 var sceneBuf *ebiten.Image
 
+// ssLadder — щаблі суперсемплінгу, які циклює клавіша H.
+//
+// Список, а не крок: між 1.5 і 2 різниця тонка, а між 2 і 4 — прірва, тож рівномірна
+// сітка була б або надто дрібною внизу, або надто грубою вгорі.
+//
+// [ЧОМУ ДРАБИНА ЗАКІНЧУЄТЬСЯ НА ×4] Спершу тут стояли ще ×8 і ×12. На ×12 гра
+// ВПАЛА — і впала так, що newSceneBuf нижче цього не перехопив.
+//
+// Це головний урок цього місця, і він коштував краху: буфер ×12 від вікна 1700×980 це
+// 20400×11760 пікселів, майже гігабайт, і невдача такого виділення НЕ приходить як
+// Go-паніка. Вона стається глибше — у драйвері або на самому виділенні памʼяті, куди
+// recover не дістає взагалі. Мій захист був теоретичним: він ловить лише той клас
+// відмов, який ebiten оформлює як panic, а справжня стеля заліза лежить нижче.
+//
+// Звідси правило: у драбині лишаються ЛИШЕ перевірені в грі щаблі. Верхню межу тут
+// визначає не наша сміливість, а те, що справді запустилось.
+//
+// ×8 прибрано теж — 427 МБ і 64 пікселі на кожен екранний заради картинки, яка вже не
+// кращає (див. про 2×2 тексели в endScene).
+var ssLadder = []float32{1, 1.5, 2, 4}
+
+// newSceneBuf пробує виділити буфер і чесно каже, чи вийшло.
+//
+// [GO: RECOVER] ebiten.NewImage на неприйнятному розмірі ПАНІКУЄ, і цю паніку ми тут
+// ловимо. Але захист ЧАСТКОВИЙ, і це перевірено крахом: на ×12 гра впала повз recover,
+// бо відмова виділення такого розміру приходить не з Go, а з драйвера.
+//
+// Тобто ця функція страхує від дрібної помилки в арифметиці розміру, а не від виходу
+// за стелю заліза. Від стелі страхує ssLadder, у якому лишаються тільки перевірені
+// щаблі.
+func newSceneBuf(scale float32) (img *ebiten.Image) {
+	defer func() {
+		if recover() != nil {
+			img = nil
+		}
+	}()
+	return ebiten.NewImage(int(screenWidth*scale), int(screenHeight*scale))
+}
+
 // beginScene повертає зображення, у яке малювати СВІТ.
 //
 // [СУПЕРСЕМПЛІНГ] renderScale > 1 → малюємо в буфер більшого розміру, а потім
@@ -169,28 +208,52 @@ var sceneBuf *ebiten.Image
 //
 // Побічно: згладжується ВСЕ однаково — ворс, жало, тіло, стіни, — а не лише те, що
 // намальоване шляхом. Кульки з долонями досі йшли повз AA, бо малюються трикутниками.
+//
+// [СПУСК ДРАБИНОЮ] Якщо запитаний масштаб не влазить у текстуру, пробуємо щабель нижче,
+// і так до 1. Тобто верхні щаблі можна вмикати без ризику: гра або покаже їх, або
+// чесно скаже на HUD, що дісталась не туди, куди просили.
 func beginScene() *ebiten.Image {
 	if renderScale <= 1 {
+		sceneScale = 1
 		return screenImage
 	}
 	w := int(screenWidth * renderScale)
 	h := int(screenHeight * renderScale)
-	if sceneBuf == nil || sceneBuf.Bounds().Dx() != w || sceneBuf.Bounds().Dy() != h {
-		if sceneBuf != nil {
-			sceneBuf.Deallocate()
-		}
-		sceneBuf = ebiten.NewImage(w, h)
+	if sceneBuf != nil && sceneBuf.Bounds().Dx() == w && sceneBuf.Bounds().Dy() == h {
+		return sceneBuf // той самий масштаб, що й торік — буфер живе далі
 	}
-	return sceneBuf
+	// Звільняємо СПЕРШУ: на верхніх щаблях буфер важить сотні мегабайтів, і тримати
+	// старий разом із новим означало б впертись у памʼять там, де вистачило б однієї.
+	if sceneBuf != nil {
+		sceneBuf.Deallocate()
+		sceneBuf = nil
+	}
+	for i := len(ssLadder) - 1; i >= 0; i-- {
+		s := ssLadder[i]
+		if s > renderScale || s <= 1 {
+			continue
+		}
+		if buf := newSceneBuf(s); buf != nil {
+			sceneBuf, sceneScale = buf, s
+			return sceneBuf
+		}
+	}
+	sceneScale = 1
+	return screenImage
 }
 
-// endScene стискає буфер на екран. При renderScale = 1 світ уже намальований на екрані.
+// endScene стискає буфер на екран. При sceneScale = 1 світ уже намальований на екрані.
+//
+// Фільтр лінійний, тобто читає 2×2 тексели. На ×2 це рівно ті чотири пікселі, з яких
+// складається екранний, — ідеальне усереднення. На ×4 таких пікселів уже 16, а
+// прочитає він знову чотири, тож ebiten підмішує мипмапи. Звідси й чесна межа
+// корисності: вище ×2 картинка майже не кращає, а платня росте як КВАДРАТ множника.
 func endScene(screen *ebiten.Image) {
-	if renderScale <= 1 {
+	if sceneScale <= 1 {
 		return
 	}
 	op := &ebiten.DrawImageOptions{Filter: ebiten.FilterLinear}
-	op.GeoM.Scale(1/float64(renderScale), 1/float64(renderScale))
+	op.GeoM.Scale(1/float64(sceneScale), 1/float64(sceneScale))
 	screen.DrawImage(sceneBuf, op)
 }
 
@@ -277,9 +340,9 @@ func seaColorAt(worldY float32) color.RGBA {
 
 // worldYAt — обернення cam.py: яка СВІТОВА висота лежить на цьому рядку екрана.
 func worldYAt(screenY float32) float32 {
-	// Ділимо на renderScale: cam.py на нього множить, тож обернення мусить симетрично
+	// Ділимо на sceneScale: cam.py на нього множить, тож обернення мусить симетрично
 	// скасувати масштаб — інакше при суперсемплінгу градієнт розтягнеться вдвічі.
-	return (screenY/renderScale-screenHeight/2)/cam.zoom + cam.cy
+	return (screenY/sceneScale-screenHeight/2)/cam.zoom + cam.cy
 }
 
 // drawSea малює фон-море: вертикальний градієнт від світлішої мілини вгорі до темної
@@ -919,9 +982,15 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		}
 		drawText(screen, label, 10, screenWidth/2+170, 10, color.RGBA{240, 200, 90, 255})
 	}
-	if renderScale != renderScaleDefault {
-		drawText(screen, fmt.Sprintf("SS %.2g×", renderScale), 10, screenWidth/2+170, 25,
-			color.RGBA{240, 200, 90, 255})
+	if renderScale != renderScaleDefault || sceneScale != renderScale {
+		// Розбіжність показуємо ЗАВЖДИ, навіть на типовому масштабі: «просив 12, дали 8»
+		// це не дрібниця, а межа заліза, і мовчати про неї означало б збрехати про те,
+		// що зараз на екрані.
+		label := fmt.Sprintf("SS %.2g×", sceneScale)
+		if sceneScale != renderScale {
+			label = fmt.Sprintf("SS %.2g×→%.2g×", renderScale, sceneScale)
+		}
+		drawText(screen, label, 10, screenWidth/2+170, 25, color.RGBA{240, 200, 90, 255})
 	}
 
 	// [ЗАМІРИ] TPS окремо від FPS — це РІЗНІ речі, і плутанина між ними вже раз
