@@ -73,6 +73,10 @@ func (g *Game) drawInputDirs(screen *ebiten.Image) {
 // faceInk — чорнило обличчя: очі, а далі й рот. Одне місце, щоб вони не розʼїхались.
 var faceInk = color.RGBA{20, 20, 30, 255}
 
+// toothWhite — трохи тепліший за чистий білий: крижаний білок серед мʼяких тіл
+// виглядав би стороннім елементом, а не частиною істоти.
+var toothWhite = color.RGBA{245, 243, 235, 255}
+
 var (
 	wallFill = color.RGBA{55, 55, 75, 255}  // тіло тайла
 	wallEdge = color.RGBA{80, 80, 110, 255} // світліший контур — дає обʼєм
@@ -760,6 +764,108 @@ func drawEyes(screen *ebiten.Image, p *Pixel) {
 	}
 	vector.FillCircle(screen, cam.px(cx-w/2+r), cam.py(my), cam.s(r), faceInk, antiAlias)
 	vector.FillCircle(screen, cam.px(cx+w/2-r), cam.py(my), cam.s(r), faceInk, antiAlias)
+
+	appendTeeth(p, cx, my, w, h, r)
+}
+
+// [ЗУБИ] Спільний буфер вершин на весь кадр. Пакетні змінні, а не локальні: інакше
+// кожен кадр алокував би слайси на сотні трикутників і віддавав їх збирачу сміття.
+var (
+	teethVerts []ebiten.Vertex
+	teethIdx   []uint16
+)
+
+// addTooth кладе один трикутник у спільний буфер. Координати — СВІТОВІ; у екранні
+// переводимо тут, бо далі вершини вже нікуди не рухаються.
+func addTooth(x0, y0, x1, y1, x2, y2 float32) {
+	base := uint16(len(teethVerts))
+	v := func(x, y float32) ebiten.Vertex {
+		return ebiten.Vertex{
+			DstX: cam.px(x), DstY: cam.py(y),
+			SrcX: 1, SrcY: 1, // середина білої точки
+			ColorR: float32(toothWhite.R) / 255,
+			ColorG: float32(toothWhite.G) / 255,
+			ColorB: float32(toothWhite.B) / 255,
+			ColorA: 1,
+		}
+	}
+	teethVerts = append(teethVerts, v(x0, y0), v(x1, y1), v(x2, y2))
+	teethIdx = append(teethIdx, base, base+1, base+2)
+}
+
+// flushTeeth віддає ВСІ зуби кадру одним викликом і чистить буфер.
+func flushTeeth(screen *ebiten.Image) {
+	if len(teethIdx) == 0 {
+		return
+	}
+	op := &ebiten.DrawTrianglesOptions{ColorScaleMode: ebiten.ColorScaleModePremultipliedAlpha}
+	screen.DrawTriangles(teethVerts, teethIdx, whiteDot, op)
+	teethVerts, teethIdx = teethVerts[:0], teethIdx[:0]
+}
+
+// mouthHalfHeightAt — піввисота капсули на горизонтальному зсуві dx від центра рота.
+//
+// Потрібно, бо коли рот найбільш розкритий, він майже круглий і РІВНОЇ кромки в нього
+// майже немає: inner = w − 2r сходиться до нуля. Зуби, посаджені на пряму лінію,
+// вилізли б за контур на обличчя.
+//
+// Тому основа кожного зуба сідає на САМ контур: на пласкій ділянці це h/2, на
+// заокругленнях — коло радіуса r. Виходить щелепа, а не наліпка.
+func mouthHalfHeightAt(dx, w, h, r float32) float32 {
+	flat := w/2 - r // піввисота стала, доки не почалось заокруглення
+	if dx < 0 {
+		dx = -dx
+	}
+	if dx <= flat {
+		return h / 2
+	}
+	d := dx - flat
+	if d >= r {
+		return 0
+	}
+	return float32(math.Sqrt(float64(r*r - d*d)))
+}
+
+// appendTeeth складає зуби юніта у СПІЛЬНИЙ буфер вершин.
+//
+// [ОДИН ВИКЛИК НА ВЕСЬ КАДР] Трикутника в пакеті vector немає, тож малюємо через
+// DrawTriangles із власним білим зображенням — так само, як море. Це інше джерело, ніж
+// у vector, тобто розрив пакета. Але розрив буде ОДИН на кадр, а не на юніта: усі зуби
+// всіх юнітів накопичуються тут і віддаються разом (flushTeeth).
+//
+// Виходить дешевше за очі: 50 юнітів × 6 зубів це 300 трикутників одним викликом,
+// тоді як очі дають по два виклики на юніта.
+//
+// Відсікання не потрібне: рот у нас не ДІРА, а чорна фігура поверх тіла, тож зуби —
+// просто білі трикутники поверх чорного.
+func appendTeeth(p *Pixel, cx, my, w, h, r float32) {
+	if toothCount <= 0 || p.Mouth < toothMinOpen {
+		return
+	}
+	// Зуби наростають від нуля на межі появи — інакше вони вискакували б цілими.
+	grow := (p.Mouth - float32(toothMinOpen)) / (1 - float32(toothMinOpen))
+
+	for i := 0; i < toothCount; i++ {
+		// Рівномірно по ширині, з півкроком від країв: інакше крайні зуби сиділи б
+		// рівно на кінчиках капсули, де висоти вже немає.
+		t := (float32(i) + 0.5) / float32(toothCount)
+		dx := (t - 0.5) * w
+		half := mouthHalfHeightAt(dx, w, h, r)
+		if half <= 0 {
+			continue
+		}
+		tipLen := half * float32(toothDepth) * grow
+		base := w / float32(toothCount) / 2 // піврозмах основи
+
+		for _, dir := range [2]float32{-1, +1} { // верхня щелепа й нижня
+			y0 := my + dir*half // основа НА контурі
+			addTooth(
+				cx+dx-base, y0,
+				cx+dx+base, y0,
+				cx+dx, y0-dir*tipLen, // вістря всередину рота
+			)
+		}
+	}
 }
 
 // mouthShape — ширина, висота й радіус кінців за станом рота (0 = риска, 1 = «о»).
@@ -970,6 +1076,8 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 	drawTentacleTip(screen, &g.player)
 	drawEyes(screen, &g.player)
 	drawPixelOverlay(screen, g.player)
+	// [ЗУБИ] Один виклик на всі обличчя кадру — саме заради цього вони й копились.
+	flushTeeth(screen)
 
 	// Прохід 3 — КУЛЬКИ, останніми й окремо. Вони єдина проста фігура, що йде за
 	// перемикачем згладжування, і саме тому не можуть стояти всередині проходу 2:
