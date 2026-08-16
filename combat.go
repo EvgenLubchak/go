@@ -565,7 +565,18 @@ func (g *Game) deathTransition(e *Pixel) {
 	if b == nil || b.net == nil || !b.hasPrev || b.net.mem.gru {
 		return
 	}
-	reward := b.rewardFor(false, b.prevState[inWhisker0+b.prevAction])
+	// ⚠️ ЧЕРЕЗ whiskerOf, А НЕ ПРЯМИМ ІНДЕКСОМ. Тут довго стояло
+	// b.prevState[inWhisker0+b.prevAction] — і для дії ухилення це давало
+	// inWhisker0 + 8 = 13, тобто слот «видно гравця» замість вуса.
+	//
+	// Наслідок був тихий і дорогий: термінальний перехід після ухилення отримував
+	// зайвий штраф rewardNearWall (−0.3) просто за те, що ціль було видно. А
+	// термінальні переходи — найцінніші з усіх: у них увесь урок «смерть не
+	// безкоштовна», і саме вони шуміли.
+	//
+	// Два інші місця виклику rewardFor (brain_stack.go, brain_gru.go) whiskerOf уже
+	// використовували. Це — третє, яке лишилось не переведеним.
+	reward := b.rewardFor(false, b.whiskerOf(b.prevState[:], b.prevAction))
 	b.net.remember(transition{s: b.prevState, a: b.prevAction, r: reward, terminal: true})
 }
 

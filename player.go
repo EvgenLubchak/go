@@ -96,7 +96,14 @@ func (g *Game) updatePrey() {
 	action := g.player.Brain.Step(state, g.player.HitWall)
 	// [УХИЛЕННЯ] Девʼята дія без напрямку — те саме правило, що в юнітів.
 	if action == actionDodge {
-		if g.player.DodgeCooldown == 0 {
+		// Через canDodge, а не через власну перевірку кулдауну: правило «почав —
+		// доводь» мусить бути одне на всіх. З окремою умовою жертва могла б ухилятись
+		// просто з відходу — точнісінько як юніти до виправлення.
+		//
+		// ⚠️ ВІДОМА АСИМЕТРІЯ: кидка (dodgeBurst) у жертви немає — лише невразливість.
+		// Це не вада цього виправлення, а незакінчена механіка: перш ніж її додавати,
+		// треба вирішити, від ЧОГО жертва відскакує, коли загроз кілька.
+		if canDodge(&g.player) {
 			g.player.DodgeTimer = dodgeInvuln
 			g.player.DodgeCooldown = dodgeCooldown
 		}
@@ -122,6 +129,9 @@ func (g *Game) respawnPlayer() {
 	g.player.HP = playerMaxHP // [БІЙ] новий «епізод» → повне здоровʼя
 	g.player.resetFur()       // [ВОРС] інакше хутро «прилетіло б» зі старого місця
 	g.player.InvulnTimer = 0
+	// [SELF-PLAY] Інакше жертва прийшла б у нове життя з недотіклим ухиленням, і
+	// «новий епізод» починався б із подарованої невразливості.
+	g.player.DodgeTimer, g.player.DodgeCooldown, g.player.DodgeRecover = 0, 0, 0
 	if g.player.Brain != nil {
 		g.player.Brain.hasPrev = false
 		g.player.Brain.h = [gruHidden]float32{} // [RNN] скидаємо рекурентну памʼять
@@ -144,6 +154,34 @@ func (g *Game) updatePlayer() {
 	}
 	if g.player.HitTimer > 0 {
 		g.player.HitTimer--
+	}
+
+	// [SELF-PLAY] ⚠️ ТАЙМЕРИ УХИЛЕННЯ ГРАВЦЯ ТІКАЮТЬ САМЕ ТУТ, І ЦЕ НЕ ДРІБНИЦЯ.
+	//
+	// Гравець НЕ входить у g.units, тож цикл таймерів в updateUnits його не бачить —
+	// та сама пастка, що колись підвісила йому ворс на місці спавну. А updatePrey
+	// (режим aiPlayer) виставляє DodgeTimer при дії №8.
+	//
+	// Без цих рядків таймер лишався 20 НАЗАВЖДИ, а applyImpactDamage починається з
+	// «якщо DodgeTimer > 0 — шкоди немає». Тобто жертва ставала невразливою після
+	// першого ж ухилення, рій фізично не міг її спіймати, і вся арена self-play тихо
+	// вироджувалась: спіймань немає → нагороди немає → «хижаки не навчились».
+	//
+	// Гра при цьому не падала й нічого не показувала. Найгірший вид вади.
+	//
+	// Порядок повторює цикл юнітів дослівно, включно зі стиком невразливості й
+	// відходу впритул — інакше в жертви лишився б БЕЗКОШТОВНИЙ дож, тобто рівно та
+	// домінантна дія, яку ми щойно вилікували в стражників.
+	if g.player.DodgeTimer > 0 {
+		g.player.DodgeTimer--
+		if g.player.DodgeTimer == 0 {
+			g.player.DodgeRecover = dodgeRecovery
+		}
+	} else if g.player.DodgeRecover > 0 {
+		g.player.DodgeRecover--
+	}
+	if g.player.DodgeCooldown > 0 {
+		g.player.DodgeCooldown--
 	}
 
 	// [РИВОК] Машина фаз — ДО тертя й до стелі швидкості: у замаху ми швидкість

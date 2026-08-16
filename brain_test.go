@@ -2430,7 +2430,7 @@ func TestDodgeBurstClearsTheLine(t *testing.T) {
 	// Загроза ліворуч, юніт праворуч від неї.
 	threat := &Pixel{X: 300, Y: 300}
 	e := &Pixel{X: 360, Y: 300, Cfg: ConfigWarden, VelY: 0.3} // хилиться вниз
-	dodgeBurst(e, threat)
+	dodgeBurst(e, threat.X, threat.Y)
 
 	// 1) Перпендикулярно: загроза по осі X, отже відкид мусить бути по Y.
 	if math.Abs(float64(e.VelX)) > 0.01 {

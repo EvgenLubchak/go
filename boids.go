@@ -199,7 +199,11 @@ func (g *Game) calcAcceleration() {
 						if canDodge(e) {
 							e.DodgeTimer = dodgeInvuln
 							e.DodgeCooldown = dodgeCooldown
-							dodgeBurst(e, target)
+							// [ГОНКА] Тут ЛИШЕ намір: сам кидок пише VelX/VelY, а це
+							// читає інша горутина як швидкість своєї цілі. Застосує
+							// updateUnits, однопотоково й у цьому ж тіку.
+							e.DodgePending = true
+							e.DodgeFromX, e.DodgeFromY = target.X, target.Y
 						}
 						// Перезарядка або відхід ще йдуть — дію змарновано. Це навмисно:
 						// інакше спам був би безкарний.
@@ -240,6 +244,12 @@ func (g *Game) updateUnits() {
 	// [УХИЛЕННЯ] Таймери дії. Окремим циклом до фізики: DodgeTimer читає
 	// applyImpactDamage, і він мусить бачити стан ЦЬОГО кадру.
 	for i := range g.units {
+		// [ГОНКА] Відкладений кидок застосовуємо ТУТ — однопотоково й ДО фізики, тобто
+		// в тому самому тіку, коли мережа його обрала. Кадр не втрачається.
+		if g.units[i].DodgePending {
+			g.units[i].DodgePending = false
+			dodgeBurst(&g.units[i], g.units[i].DodgeFromX, g.units[i].DodgeFromY)
+		}
 		if g.units[i].DodgeTimer > 0 {
 			g.units[i].DodgeTimer--
 			// [ВІДХІД] Стик робимо ТУТ, а не окремою перевіркою деінде: невразливість
@@ -535,11 +545,11 @@ func updateTentacle(u *Pixel) {
 //
 // Агент при цьому не позбавлений впливу: бік визначається тим, куди юніт УЖЕ хилиться,
 // тобто його власним позиціюванням до моменту ухилення.
-func dodgeBurst(e *Pixel, threat *Pixel) {
-	if threat == nil {
-		return
-	}
-	tx, ty := e.X-threat.X, e.Y-threat.Y
+// Приймає КООРДИНАТИ загрози, а не вказівник: у момент застосування (updateUnits) той
+// юніт міг уже загинути й зникнути зі зрізу, а позиція, з якої прилетіла загроза, — це
+// саме те, що було в момент РІШЕННЯ.
+func dodgeBurst(e *Pixel, threatX, threatY float32) {
+	tx, ty := e.X-threatX, e.Y-threatY
 	d := float32(math.Sqrt(float64(tx*tx + ty*ty)))
 	if d < 0.001 {
 		return // збіглись у точку — перпендикуляра немає

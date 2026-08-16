@@ -151,10 +151,14 @@ func init() {
 }
 
 func main() {
+	// [ВУЛИКИ] Реєстр створюємо ТУТ і віддаємо в newUnitsWithHive: вона його заповнить
+	// по ходу створення юнітів, і далі мережі живуть незалежно від тіл.
+	hive := map[string]*Net{}
 	game := &Game{
 		difficulty: 1.0,
 		player:     newPlayer(), // див. player.go — щоб налаштування гравця було чим перевірити
-		units:      newUnits(),
+		hive:       hive,
+		units:      newUnitsWithHive(hive),
 	}
 
 	game.player.resetFur() // [ВОРС] стартове положення хутра
