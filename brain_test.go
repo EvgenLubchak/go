@@ -2665,9 +2665,10 @@ func TestTentJointsComeFromTheConfig(t *testing.T) {
 func TestTentJointsFitTheArray(t *testing.T) {
 	for _, cfg := range unitRoster {
 		if cfg.TentJoints > tentJointsMax {
+			// Тип називаємо файлом ваг: мітка була текстова й пішла разом зі шрифтами.
 			t.Errorf("%q просить %d суглобів при стелі tentJointsMax = %d — підніми стелю "+
 				"або зменш конфіг, інакше відросток тихо обріжеться",
-				cfg.Label, cfg.TentJoints, tentJointsMax)
+				cfg.WeightsFile, cfg.TentJoints, tentJointsMax)
 		}
 	}
 	// Гравець теж просить своє число, просто з іншого місця (playerTentJoints).

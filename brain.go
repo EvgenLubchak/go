@@ -751,6 +751,13 @@ type Brain struct {
 	// [ФОРМА] Q-значення останнього рішення — для деформації тіла (див. updateBody).
 	// Пишеться у Step, тобто в паралельній фазі, але у ВЛАСНИЙ Brain агента, як і
 	// lastWhiskers → гонки немає. Читається однопотоково при малюванні.
+	// [ОЧІ] Напрямок на ціль і чи агент її БАЧИТЬ. Не нова інформація — рівно те, що
+	// GatherInputs і так рахує для слотів 0-2 та inVisible; ми лише лишаємо це назовні,
+	// щоб очі могли показати СПРИЙНЯТТЯ. Тіло вже показує НАМІР (форма з lastQ), і
+	// дублювати його поглядом було б декорацією, а не приладом.
+	gazeX, gazeY float32 // одиничний напрямок; має сенс лише коли sees
+	sees         bool
+
 	lastQ      [brainActions]float32
 	lastAction int
 	lastReward float32 // [МЕТРИКИ] нагорода останнього кроку (для середнього по рою)
@@ -1148,6 +1155,15 @@ func GatherInputs(enemy, player *Pixel) [baseInputs]float32 {
 	if localSight {
 		visible = dist <= sightRange &&
 			hasLineOfSight(cx, cy, player.X+pixelSize/2, player.Y+pixelSize/2)
+	}
+
+	// [ОЧІ] Записуємо погляд ДО гілки: коли цілі не видно, sees=false, і зіниці самі
+	// поїдуть у центр — за тим самим відставанням, що вся анімація в грі.
+	if enemy.Brain != nil {
+		enemy.Brain.sees = visible
+		if visible && dist > 0.001 {
+			enemy.Brain.gazeX, enemy.Brain.gazeY = dx/dist, dy/dist
+		}
 	}
 
 	var in [baseInputs]float32

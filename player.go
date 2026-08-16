@@ -28,7 +28,6 @@ func newPlayer() Pixel {
 		MaxHP:   playerMaxHP,
 		Faction: factionPlayer,
 		Color:   color.RGBA{R: 0, G: 255, B: 180, A: 255},
-		Label:   "  -_ - ",
 
 		// [ВІДРОСТОК] Нуль тут означає «взяти дефолт tentJoints» — саме так гравець і
 		// жив досі, просто неявно. Тепер це видно й керовано з tuning_visual.go.
@@ -240,5 +239,6 @@ func (g *Game) updatePlayer() {
 	updateBalls(&g.player)
 	updateTentacle(&g.player)
 	updateLimbs(&g.player)
+	updateFace(&g.player)
 	updateBody(&g.player) // [ТІЛО] у гравця немає мозку → лише пружина, без Q-форми
 }

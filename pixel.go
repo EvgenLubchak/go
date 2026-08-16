@@ -30,11 +30,10 @@ type UnitConfig struct {
 	PounceMulti     float32    // множник кидка при зближенні
 	MaxHP           int        // початкове HP
 	Color           color.RGBA // базовий колір; A==0 → колір визначається Aggression
-	Label           string     // мітка всередині пікселя (ЛИШЕ відображення)
 	Count           int        // скільки таких виходить на поле (див. unitRoster)
 	Faction         int        // [КОМАНДИ] чий юніт: factionEnemy (рій) чи factionPlayer (твої)
 	WeightsFile     string     // файл ваг ЦЬОГО типу мозку — різні типи вчаться незалежно
-	IsLearner       bool       // true → створюємо Brain (Q-learning); незалежно від Label
+	IsLearner       bool       // true → створюємо Brain (Q-learning)
 
 	// [ВБИВЦЯ] true → мозок цього типу отримує на вхід FLOW-FIELD (напрямок до
 	// цілі крізь стіни) замість прямого напрямку, і вчиться в ОКРЕМІЙ мережі
@@ -138,7 +137,6 @@ var (
 		PounceMulti:     7.0,
 		MaxHP:           2,
 		// Color.A == 0 → aggressionColor() визначить колір
-		Label: "",
 	}
 
 	// ConfigPredator — повільний але смертоносний: великий радіус, сильний кидок.
@@ -155,7 +153,6 @@ var (
 		PounceMulti:     14.0,
 		MaxHP:           5,
 		Color:           color.RGBA{220, 50, 50, 255},
-		Label:           "",
 	}
 
 	// ConfigSpeeder — хаотичний, дуже швидкий, крихкий, майже не флокується.
@@ -172,7 +169,6 @@ var (
 		PounceMulti:     2.0,
 		MaxHP:           1,
 		Color:           color.RGBA{200, 220, 50, 255},
-		Label:           "",
 	}
 
 	ConfigHP = UnitConfig{
@@ -188,7 +184,6 @@ var (
 		PounceMulti:     1,
 		MaxHP:           1,
 		Color:           color.RGBA{255, 255, 255, 255},
-		Label:           "",
 	}
 
 	// ConfigLearner — ворог-учень з нейронною мережею замість захардкоджених правил.
@@ -236,7 +231,6 @@ var (
 		MaxHP:       2,                            // живучий — більше часу на навчання
 		Respawns:    1,                            // [РЕСПАУН] безкінечно: стала популяція = порівнянні метрики
 		Color:       color.RGBA{0, 255, 100, 255}, // зелений — учень
-		Label:       "O_o",                        //"O_o",
 		IsLearner:   true,                         // ← саме це вмикає мозок, а не мітка
 		// [ВІДСІЧ] Низька: цей тип має ЩІЛЬНУ нагороду «наближайся», а вона рахується з
 		// власної швидкості. Велика відсіч навʼязувала б рух, за який агент отримував би
@@ -269,7 +263,6 @@ var (
 		Respawns:        0,                            // [РЕСПАУН] безкінечно — вони частина сталого складу
 		MaxHP:           10,                           // витримує на удар більше за рій
 		Color:           color.RGBA{255, 90, 60, 255}, // червоний — щоб одразу вирізняти
-		Label:           "O_o",                        //"*_*",
 		IsLearner:       true,
 		UsesFlowField:   true, // ← окремий мозок + flow-field на вхід
 		CombatReward:    true, // ← вчиться БИТИ, а не лише наздоганяти
@@ -302,7 +295,6 @@ var (
 		Respawns:        2,
 		MaxHP:           3,
 		Color:           color.RGBA{80, 170, 255, 255}, // блакитний — свої
-		Label:           "*_*",                         //"( _ )",
 		IsLearner:       true,
 		CombatReward:    true, // бійці: + за шкоду, − за отриману, ++ за вбивство
 		// [ВІДСІЧ] Низька: цей тип має ЩІЛЬНУ нагороду «наближайся», а вона рахується з
@@ -337,7 +329,6 @@ var (
 		Respawns:        5,
 		MaxHP:           15,
 		Color:           color.RGBA{140, 100, 255, 255}, // фіолетовий — твій вбивця
-		Label:           "*_*",                          //"( _ )",
 		IsLearner:       true,
 		UsesFlowField:   true, // ← поле до ВОРОГІВ (flowFor обирає за фракцією)
 		CombatReward:    true,
@@ -360,7 +351,6 @@ var (
 		PounceMulti:     1.0,
 		MaxHP:           5,
 		Color:           color.RGBA{100, 180, 255, 255}, // блакитний — виділяється
-		Label:           "",
 	}
 
 	// ConfigBoss — [БОС] ОДИНАК із власною мережею. Єдиний тип, для якого памʼять за
@@ -411,7 +401,6 @@ var (
 		Respawns:        0,                             // [РЕСПАУН] бос не безсмертний: три життя на сесію
 		MaxHP:           75,                            // умова навчання, не лише баланс
 		Color:           color.RGBA{235, 70, 160, 255}, // малиновий — не сплутати ні з ким
-		Label:           "O_o",                         //"$_$",
 		IsLearner:       true,
 		UsesFlowField:   false,       // ← памʼять має на що працювати лише без поля
 		CombatReward:    true,        // бос мусить вчитись БИТИ, а не наздоганяти
@@ -466,7 +455,6 @@ var (
 		MaxHP:           31, // удар пробілом обходить невразливість
 		//                                                  і дає ~12 шкоди/с → це ~10 секунд бою
 		Color:     color.RGBA{255, 215, 90, 255}, // золотий — не сплутати ні з ким
-		Label:     "O_o",                         //"^_^",
 		IsLearner: true,
 		//                                             найдорожча ручка експерименту:
 		UsesFlowField: false, // без поля — інакше памʼяті нічого робити
@@ -578,7 +566,6 @@ var (
 		Respawns:       -1, // стала присутність: сенс типу — ДОВГЕ навчання
 		MaxHP:          10, // два ривки (dashDamage 8) — встигає показати політику
 		Color:          color.RGBA{255, 140, 40, 255},
-		Label:          "", //"?_?", // шукає
 		IsLearner:      true,
 		UsesFlowField:  false, // ← лабіринт НЕ даний
 		CombatReward:   true,
@@ -668,6 +655,7 @@ type Pixel struct {
 	// перезарядки. Живуть на Pixel, бо це стан ТІЛА, а не мозку: юніт може бути в
 	// ухиленні й без мозку (напр. після рестарту), і фізика мусить це бачити.
 	DodgeTimer    int
+	DodgeRecover  int // [ВІДХІД] кадрів безпорадності після кидка (див. dodgeRecovery)
 	DodgeCooldown int
 
 	// [РИВОК] Стан машини фаз атаки: замах → ривок → відхід. Живе на Pixel, а не на
@@ -721,13 +709,20 @@ type Pixel struct {
 	//	   лишився б зеленим, перевіряючи ніщо.
 	Tent [tentJointsMax][2]float32
 
+	// [ОЧІ] Зсув зіниці від центра ока, у частках pupilShift (−1..1 по кожній осі).
+	// Не світові координати, на відміну від ворсу й кінцівок: око мале, і зберігати
+	// абсолютну позицію означало б перераховувати її щоразу, коли тіло стиснулось.
+	Pupil [2]float32
+
+	// [РОТ] Наскільки розкритий: 0 = зібраний, 1 = витрачений. Лагається, як усе інше.
+	Mouth float32
+
 	// [ТІЛО] Стан пружини розміру: поточний масштаб і його швидкість. Пульс медузи
 	// виникає з перельоту цієї пружини, а не з намальованого циклу.
 	BodyScale float32
 	BodyVel   float32
 
 	Color color.RGBA
-	Label string
 	Cfg   UnitConfig // конфіг типу (порожній для гравця)
 	Brain *Brain     // нейронна мережа (nil для звичайних ворогів, не nil для Learner)
 }
@@ -816,6 +811,18 @@ func tentRoot(cx, cy, scale float32) (float32, float32) {
 // малюванні відрізняється від кореня в оновленні, візуально «відірветься» від тіла.
 func furRoot(cx, cy, scale float32) (float32, float32) {
 	return cx, cy - pixelSize/2*furRootUp*scale
+}
+
+// eyeRoot — центр ока i (0 = ліве, 1 = праве) у СВІТОВИХ координатах.
+//
+// Через ту саму пружину тіла (scale), що ворс, кінцівки й відросток: інакше при
+// стисканні юніта обличчя лишилось би завеликим і читалось би як наклеєне.
+func eyeRoot(i int, cx, cy, scale float32) (float32, float32) {
+	dx := float32(eyeSpacing) / 2
+	if i == 0 {
+		dx = -dx
+	}
+	return cx + dx*scale, cy + float32(eyeOffsetY)*scale
 }
 
 // bodyScaleOf — поточний масштаб тіла з пружини (updateBody), із запобіжником для
@@ -1032,7 +1039,6 @@ func newUnitsWithHive(hive map[string]*Net) []Pixel {
 				SpawnY:       spawnY,
 				RespawnsLeft: cfg.Respawns,
 				Color:        col,
-				Label:        cfg.Label,
 				Cfg:          cfg,
 				Brain:        brain,
 			})

@@ -70,6 +70,9 @@ func (g *Game) drawInputDirs(screen *ebiten.Image) {
 
 // [ПАЛІТРА] Кольори стін — в одному місці, а не магічними числами в циклі
 // малювання. Ними ж фарбується межа рівня: вона теж стіна.
+// faceInk — чорнило обличчя: очі, а далі й рот. Одне місце, щоб вони не розʼїхались.
+var faceInk = color.RGBA{20, 20, 30, 255}
+
 var (
 	wallFill = color.RGBA{55, 55, 75, 255}  // тіло тайла
 	wallEdge = color.RGBA{80, 80, 110, 255} // світліший контур — дає обʼєм
@@ -714,6 +717,67 @@ func drawPixelBody(screen *ebiten.Image, p Pixel) {
 	drawBody(screen, p, col)
 }
 
+// drawEyes — [ОБЛИЧЧЯ] дві крапки-ока й рот. Другий прохід: це прості фігури,
+// тобто ті самі трикутники, що смуги HP, і власного розриву пакета вони не дають.
+//
+// ЧОМУ НЕ ШРИФТ. Раніше обличчя малювала мітка (`*_*`) через drawText — а це АТЛАС
+// ГЛІФІВ, інше джерельне зображення, ніж усі наші трикутники. Кожна мітка давала два
+// розриви пакета: у текст і назад. На тисячах юнітів це обвалювало FPS — зміряно ще
+// до цього проєкту, і саме тому мітки роками тримали лише на десятках юнітів.
+//
+// Зіниця несе СПРИЙНЯТТЯ: куди агент дивиться і чи бачить ціль узагалі. Тіло вже
+// показує НАМІР (форма з Q), тож обличчя навмисно взяло інший канал — інакше вийшла
+// б друга копія того самого приладу.
+//
+// Побічний наслідок, вартий окремої уваги: localSight досі був НЕВИДИМИЙ. Ти ховався
+// за стіною й лише здогадувався, що тебе загубили. Тепер це видно очима.
+func drawEyes(screen *ebiten.Image, p *Pixel) {
+	cx := p.X + pixelSize/2
+	cy := p.Y + pixelSize/2
+	scale := bodyScaleOf(p)
+	for i := 0; i < 2; i++ {
+		ex, ey := eyeRoot(i, cx, cy, scale)
+		// Зсув погляду — прямо в позицію ока: окремого білка немає, тож саме око і є
+		// зіницею. На різнокольорових тілах це єдиний варіант, що читається завжди.
+		ex += p.Pupil[0] * float32(pupilShift) * scale
+		ey += p.Pupil[1] * float32(pupilShift) * scale
+		vector.FillCircle(screen, cam.px(ex), cam.py(ey), cam.s(float32(eyeRadius)*scale),
+			faceInk, antiAlias)
+	}
+
+	// [РОТ] Капсула: прямокутник посередині й коло на кожному кінці.
+	//
+	// Саме цими примітивами, а не шляхом, з двох причин. Шлях малюється ПЕРШИМ
+	// проходом і опинився б ПІД тілом. А довільний багатокутник через DrawTriangles
+	// вимагав би НАШОГО білого зображення — іншого джерела, ніж у vector, — і дав би
+	// пінг-понг пакетів упереміш з очима. FillRect і FillCircle же йдуть з одного
+	// джерела, тож уся капсула лягає в той самий пакет, що й очі.
+	w, h, r := mouthShape(p.Mouth, scale)
+	my := cy + float32(mouthOffsetY)*scale
+	if inner := w - 2*r; inner > 0 {
+		vector.FillRect(screen, cam.px(cx-inner/2), cam.py(my-h/2),
+			cam.s(inner), cam.s(h), faceInk, antiAlias)
+	}
+	vector.FillCircle(screen, cam.px(cx-w/2+r), cam.py(my), cam.s(r), faceInk, antiAlias)
+	vector.FillCircle(screen, cam.px(cx+w/2-r), cam.py(my), cam.s(r), faceInk, antiAlias)
+}
+
+// mouthShape — ширина, висота й радіус кінців за станом рота (0 = риска, 1 = «о»).
+//
+// Окремою функцією заради тесту: малювання йде прямо в ebiten і назовні не віддає
+// нічого, а перевіряти тут є що — головна властивість рота саме в тому, що при
+// розкритті змінюється ФОРМА, а не лише розмір.
+func mouthShape(open, scale float32) (w, h, r float32) {
+	lerp := func(a, b float64) float32 { return float32(a + (b-a)*float64(open)) }
+	w = lerp(mouthLineW, mouthRoundW) * scale
+	h = lerp(mouthLineH, mouthRoundH) * scale
+	r = h / 2
+	if r > w/2 {
+		r = w / 2 // кінці не можуть бути товщі за саму фігуру
+	}
+	return w, h, r
+}
+
 // drawPixelOverlay — смуга HP і мітка: прості фігури й текст, тобто другий прохід.
 //
 // Побічний виграш, який видно оком: смуга тепер завжди ЗВЕРХУ. Раніше сусідній юніт,
@@ -742,11 +806,6 @@ func drawPixelOverlay(screen *ebiten.Image, p Pixel) {
 		vector.FillRect(screen, cam.px(barX), cam.py(barY), cam.s(filled), cam.s(barH), barColor, false)
 	}
 
-	if p.Label != "" {
-		cx := float64(cam.px(p.X + pixelSize/2))
-		cy := float64(cam.py(p.Y + pixelSize/2))
-		drawText(screen, p.Label, labelFontSize*float64(cam.zoom), cx, cy, color.RGBA{0, 0, 0, 255})
-	}
 }
 
 // drawBrainSensors візуалізує «під капотом» Q-learner-а:
@@ -904,10 +963,12 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 		}
 		drawLimbTips(screen, &g.units[i])
 		drawTentacleTip(screen, &g.units[i])
+		drawEyes(screen, &g.units[i])
 		drawPixelOverlay(screen, g.units[i])
 	}
 	drawLimbTips(screen, &g.player)
 	drawTentacleTip(screen, &g.player)
+	drawEyes(screen, &g.player)
 	drawPixelOverlay(screen, g.player)
 
 	// Прохід 3 — КУЛЬКИ, останніми й окремо. Вони єдина проста фігура, що йде за
