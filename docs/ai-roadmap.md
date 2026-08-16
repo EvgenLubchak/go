@@ -1449,9 +1449,9 @@ stuckLimit        = 24    // поріг застрягання (удар АБО 
 frustrationFrames = 24    // кадрів направленого виходу (escapeAction)
 
 // Феромони фрустрації / стигмергія — main.go (сітка живе в Game)
-frustrationDeposit = 2.5   // слід за одне застрягання
-frustrationDecay   = 0.985 // затухання сліду щокадру
-frustrationRepel   = 0.02  // сила відштовхування від слідів
+frustrationDeposit = 1     // слід за одне застрягання
+frustrationDecay   = 0.970 // затухання сліду щокадру
+frustrationRepel   = 0.05  // сила відштовхування від слідів
 frustrationRadius  = 3     // радіус сканування слідів
 ```
 

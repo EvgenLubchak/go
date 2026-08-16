@@ -210,10 +210,13 @@ func (g *Game) updatePlayer() {
 		g.player.VelX, g.player.VelY = 0, 0
 	case dashPhaseActive:
 		// Швидкість ривка — від БАЗОВОЇ стелі, а НЕ від піднятої віддачею. Інакше удар,
-		// що прилетів під час ривка, множив би стелю двічі: 5.0 × knockSpeedMulti 5.0 ×
-		// dashSpeedMulti 2.0 = 50px/кадр, тобто 500px за 10 кадрів — телепорт через пів
+		// що прилетів під час ривка, множив би стелю двічі: playerBaseSpeed 5.0 ×
+		// knockSpeedMulti 4.0 × dashSpeedMulti 2.0 = 40px/кадр — телепорт через пів
 		// екрана замість ривка. Дві незалежні механіки підняття стелі не мусять
 		// множитись; беремо більшу з двох.
+		//
+		// (Число перераховано: knockSpeedMulti з того часу став 4.0 замість 5.0, і
+		// добуток тут стояв старий. Висновок не змінився, арифметика — так.)
 		ds := base * dashSpeedMulti
 		g.player.VelX = g.player.DashDirX * ds
 		g.player.VelY = g.player.DashDirY * ds

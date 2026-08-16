@@ -101,7 +101,7 @@ RL (v3):          "ти зробив дію 3 → отримав +0.5"  ← зн
 
 8 променів з центру ворога у напрямках компаса (ті самі 8, що й дії). Кожен
 крокує до стіни (`isWallAt`) і повертає **близькість**: `1` = стіна впритул,
-`0` = чисто на всю довжину (`whiskerRange ≈ 140px ≈ 5 тайлів`). Так мережа
+`0` = чисто на всю довжину (`whiskerRange = 110px ≈ 4.4 тайла`). Так мережа
 «бачить» перешкоду ще до зіткнення.
 
 ---
@@ -1160,7 +1160,8 @@ flowRebuildEvery = 6  // (main.go) раз на скільки кадрів пе�
 
 brainHidden1  = 32    // 1-й прихований шар (згин простору входів)
 brainHidden2  = 16    // 2-й прихований шар (згин поверх згину)
-brainActions  = 8     // напрямки руху = виходи Q
+brainActions  = 9     // 8 напрямків руху + ухилення = виходи Q
+brainWhiskers = 8     // саме НАПРЯМКІВ; із появою дії №8 це вже різні числа
 brainWhiskers = 8
 
 // [RNN/GRU] рекурентна памʼять (припаркована — див. шапку brain_gru.go)
@@ -1194,8 +1195,9 @@ qTargetSync = 1000 ; qReplaySize = 4096 ; qBatch = 16 ; qMinReplay = 200
 // Reward — щільний (веде щокадру)
 rewardCloserScale = 0.5 ; rewardWallHit = -1.0 ; rewardNearWall = -0.3
 
-// [БІЙ] Reward — рідкісний (лише для мозків із CombatReward)
-rewardDamageDealt = 2.0 ; rewardDamageTaken = -2.0 ; rewardKill = 5.0
+// [БІЙ] Reward — рідкісний (лише для мозків із CombatReward).
+// Поділені на 20 після того, як відсічення ±1 плющило ривок і таран в ОДНУ оцінку.
+rewardDamageDealt = 0.1 ; rewardDamageTaken = -0.1 ; rewardKill = 0.25
 
 // Anti-stuck (направлений вихід)
 stuckHitInc = 4 ; stuckNoProgInc = 1 ; stuckLimit = 24 ; frustrationFrames = 24
@@ -1213,7 +1215,7 @@ impactSpeedFrac = 0.6   // ≥60% ВЛАСНОГО максимуму в бік 
 impactMinSpeed  = 0.4   // абсолютна підлога швидкості удару
 impactDamage    = 1     // шкода за удар
 impactInvuln    = 45    // кадрів невразливості після удару
-playerMaxHP     = 10
+playerMaxHP     = 50
 ```
 
 Кількість ворогів — **не** в `main.go`: кожен тип несе своє поле `Count`, а склад
