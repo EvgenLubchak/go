@@ -237,6 +237,36 @@ func (b *Brain) stepStack(cur [baseInputs]float32, hitWall bool) int {
 		action = b.selectAction(stacked)
 	}
 
+	// [СТРАХ] Поведінкові лічильники рішення — ДО перезапису prevAction нижче.
+	//
+	// flip = argmax змінився проти минулого рішення: «тремтіння» числом. Рахуємо і
+	// ε-випадкові, і фрустраційні дії НАВМИСНО — міряємо те, що видно оком, а не
+	// лише чисту жадібну політику. Знаменник — окремо (лише рішення, що мали
+	// попередника), інакше перший крок життя завищував би частку.
+	if b.hasPrev {
+		if visible {
+			b.mDecVisN++
+			if action != b.prevAction {
+				b.mFlipVisN++
+			}
+		} else {
+			b.mDecBlindN++
+			if action != b.prevAction {
+				b.mFlipBlindN++
+			}
+		}
+	}
+	// Натискання ухилення: ВСІ обрані — включно зі змарнованими об кулдаун чи відхід
+	// (спам це саме про них, гейт canDodge живе далі в boids.go). Окремо — натиснуті
+	// «під замахом на мене»: спамер збирає їх пропорційно вікну (~чверть), читач
+	// телеграфа — майже всі.
+	if action == actionDodge {
+		b.mDodgeN++
+		if cur[inDashAtMe] > fearTeleMin {
+			b.mDodgeTeleN++
+		}
+	}
+
 	// Закриваємо ПОПЕРЕДНІЙ крок: стан рішення → накопичена нагорода → стан цього
 	// рішення. Саме тому tdUpdate мусить бутстрапити через gammaStep, а не через
 	// gamma: крок накриває actSkip кадрів.
@@ -256,6 +286,17 @@ func (b *Brain) stepStack(cur [baseInputs]float32, hitWall bool) int {
 	// не віддає. Це зайвий прохід на агента за кадр; при наших десятках юнітів дешево,
 	// і воно того варте: пласка Q стане видимою на екрані як рівний квадрат.
 	b.lastQ, _, _ = b.net.forwardQ(stacked)
+
+	// [СТРАХ] Спред цінностей цього стану: Q₁−Q₂ зі щойно порахованого lastQ
+	// (окремий forward не потрібен). Колапс до нуля = діям байдуже = argmax віддано
+	// шумові. Ділимо по видимості — гіпотеза локальності травми (див. roadmap).
+	if s := qSpread(b.lastQ); visible {
+		b.mSpreadVisSum += s
+		b.mSpreadVisN++
+	} else {
+		b.mSpreadBlindSum += s
+		b.mSpreadBlindN++
+	}
 
 	b.shiftFrames(cur)
 	return action

@@ -25,7 +25,7 @@ import (
 // ==========================================================================
 
 const (
-	metricSamples = 480  // точок у кривій (ширина графіка ≈ 60с історії)
+	metricSamples = 480  // точок у кривій: ×metricEvery = 7200 тіків історії (2хв @60 TPS)
 	metricEvery   = 15   // семпл раз на N кадрів (не щокадру — шумно)
 	metricEMA     = 0.08 // згладжування (менше = плавніше, повільніше реагує)
 
@@ -82,6 +82,26 @@ type hiveStat struct {
 	eps     float32
 	inited  bool
 	curve   curve // крива reward саме цього вулика
+
+	// [БІЙ] Шкода ЦЬОГО вулика за період заміру. Зʼявилось, коли на полі стало ДВА
+	// бойові вулики: котловий рядок dmg внизу панелі перестав атрибутувати (завдані
+	// фіолетовими +17 стояли поруч із отриманими стражниками −47, і різницю робили
+	// ривки гравця, які взагалі нічиї — у гравця немає мозку).
+	//
+	// Для розрідженого типу це ще й ЄДИНІ читабельні числа: крива reward у нього
+	// фізично невидима — подія −0.8 ділиться на 18 агентів, множиться на EMA 0.08 і
+	// малюється в масштабі вбивці з розмахом ±1, тобто один ривок = третина пікселя.
+	combat   bool // чи має цей вулик бойову нагороду → чи показувати dmg у рядку
+	dmgDealt int
+	dmgTaken int
+
+	// [СТРАХ] Прилади паніки (розслідування — у roadmap). У кожній парі ПЕРШЕ число —
+	// «видячи», ДРУГЕ — «сліпо»: гіпотеза локальності травми каже, що сплющення
+	// (spread→0) і тремтіння (flip↑) мають жити ЛИШЕ у видячій половині, а сліпа —
+	// контроль. dQ і flip — EMA («що зараз»), dodge — накопичення з моменту M (як dmg).
+	spreadVis, spreadBlind float32 // EMA середнього (Q₁−Q₂) на рішення
+	flipVis, flipBlind     float32 // EMA частки рішень зі зміною argmax
+	dodgeN, dodgeTeleN     int     // натискань ухилення; з них — під замахом на себе
 }
 
 // Metrics збирає й зберігає показники навчання — ОКРЕМО по кожному вулику.
@@ -134,6 +154,12 @@ func (m *Metrics) resetCounters() {
 	m.dmgDealt, m.dmgTaken = 0, 0
 	m.unitFrames = 0
 	m.agents = nil
+	// Пер-вуликова шкода й натискання ухилення — теж лічильники ЗАМІРУ (криві
+	// навчання і EMA-прилади не чіпаємо: вони «що зараз», а не «скільки набігло»).
+	for _, h := range m.hives {
+		h.dmgDealt, h.dmgTaken = 0, 0
+		h.dodgeN, h.dodgeTeleN = 0, 0
+	}
 }
 
 // collect — раз/кадр (у Update, ПІСЛЯ trainBrains) збирає показники з мозків рою.
@@ -147,6 +173,13 @@ func (m *Metrics) collect(g *Game) {
 	type acc struct {
 		rSum float32
 		rN   int
+
+		// [СТРАХ] Кадрові суми лічильників паніки — з них нижче рахуються
+		// покадрові середні для EMA. Пара завжди (видячи, сліпо).
+		svSum, sbSum     float32
+		svN, sbN         int
+		fvFlips, fbFlips int
+		fvDec, fbDec     int
 	}
 	sums := map[string]*acc{}
 	seen := map[*Net]bool{}
@@ -198,9 +231,35 @@ func (m *Metrics) collect(g *Game) {
 		m.blindClosed += b.mBlindClosed
 		b.mBlindN, b.mBlindClosed = 0, 0
 
+		// Шкода — і в котел (порівнянність зі старими скрінами), і ВУЛИКУ (атрибуція).
+		if b.combat {
+			h.combat = true
+		}
+		h.dmgDealt += b.mDmgDealt
+		h.dmgTaken += b.mDmgTaken
 		m.dmgDealt += b.mDmgDealt
 		m.dmgTaken += b.mDmgTaken
 		b.mDmgDealt, b.mDmgTaken = 0, 0
+
+		// [СТРАХ] Забираємо лічильники паніки й скидаємо (пише паралельна фаза у
+		// ВЛАСНИЙ Brain — той самий контракт, що mBlindN). dodge — одразу у вулик
+		// (накопичення як dmg), спред і flip — у кадрові суми для EMA нижче.
+		ac := sums[key]
+		ac.svSum += b.mSpreadVisSum
+		ac.sbSum += b.mSpreadBlindSum
+		ac.svN += b.mSpreadVisN
+		ac.sbN += b.mSpreadBlindN
+		ac.fvFlips += b.mFlipVisN
+		ac.fbFlips += b.mFlipBlindN
+		ac.fvDec += b.mDecVisN
+		ac.fbDec += b.mDecBlindN
+		h.dodgeN += b.mDodgeN
+		h.dodgeTeleN += b.mDodgeTeleN
+		b.mSpreadVisSum, b.mSpreadBlindSum = 0, 0
+		b.mSpreadVisN, b.mSpreadBlindN = 0, 0
+		b.mFlipVisN, b.mFlipBlindN = 0, 0
+		b.mDecVisN, b.mDecBlindN = 0, 0
+		b.mDodgeN, b.mDodgeTeleN = 0, 0
 
 		// TD/maxQ — з МЕРЕЖІ, тож беремо раз на унікальну мережу.
 		if !seen[b.net] {
@@ -221,6 +280,31 @@ func (m *Metrics) collect(g *Game) {
 
 	for key, a := range sums {
 		h := m.hives[key]
+
+		// [СТРАХ] EMA приладів паніки — ДО того, як блок нагороди виставить inited
+		// (перший кадр = пряме присвоєння, як у tdErr/maxQ). Кадр без рішень цього
+		// класу (напр. жодного сліпого) EMA не рухає — тримаємо останнє значення,
+		// а не тягнемо його до нуля через порожній знаменник.
+		ema := func(cur *float32, frame float32) {
+			if !h.inited {
+				*cur = frame
+			} else {
+				*cur += (frame - *cur) * metricEMA
+			}
+		}
+		if a.svN > 0 {
+			ema(&h.spreadVis, a.svSum/float32(a.svN))
+		}
+		if a.sbN > 0 {
+			ema(&h.spreadBlind, a.sbSum/float32(a.sbN))
+		}
+		if a.fvDec > 0 {
+			ema(&h.flipVis, float32(a.fvFlips)/float32(a.fvDec))
+		}
+		if a.fbDec > 0 {
+			ema(&h.flipBlind, float32(a.fbFlips)/float32(a.fbDec))
+		}
+
 		var frameR float32
 		if a.rN > 0 {
 			frameR = a.rSum / float32(a.rN)
@@ -302,7 +386,15 @@ func (m *Metrics) draw(screen *ebiten.Image) {
 		graphH = metricBaseGraphH * metricScale
 		font   = metricBaseFont * metricScale
 	)
-	ph := float32(pad*2+graphH+rowH) + float32(rowH)*float32(len(m.order)+2) // +1 рядок конфігу, +2 рядки підсумків
+	// [СТРАХ] Бойові вулики займають ДВА рядки (другий — прилади паніки), тож
+	// висота панелі рахує їх окремо, інакше нижні підсумки вилізли б за фон.
+	combatRows := 0
+	for _, key := range m.order {
+		if m.hives[key].combat {
+			combatRows++
+		}
+	}
+	ph := float32(pad*2+graphH+rowH) + float32(rowH)*float32(len(m.order)+combatRows+2) // +1 рядок конфігу, +2 рядки підсумків
 	px := float32(12)
 	py := float32(screenHeight) - ph - 12
 	vector.FillRect(screen, px, py, float32(pw), ph, color.RGBA{0, 0, 0, 190}, false)
@@ -332,11 +424,29 @@ func (m *Metrics) draw(screen *ebiten.Image) {
 		onoff(frozenPolicy), m.firstEps()), font*0.85, float64(px)+pad, y, cfgCol)
 
 	// Рядок на КОЖЕН вулик — свої reward/TD/maxQ, кольором своїх юнітів.
+	// Бойовим вуликам — ще й ВЛАСНА шкода: для розрідженого типу (стражник) це єдині
+	// читабельні числа, бо його крива reward фізично невидима в спільному масштабі
+	// (одна подія −0.8 ÷ 18 агентів × EMA 0.08 ≈ третина пікселя).
 	for _, key := range m.order {
 		h := m.hives[key]
 		y += rowH
-		drawTextL(screen, fmt.Sprintf("%-7s %-9s %-6s r %+.3f  TD %.3f  Q %.2f",
-			h.label, h.mem, h.horizon, h.reward, h.tdErr, h.maxQ), font, float64(px)+pad, y, h.color)
+		row := fmt.Sprintf("%-7s %-9s %-6s r %+.3f  TD %.3f  Q %.2f",
+			h.label, h.mem, h.horizon, h.reward, h.tdErr, h.maxQ)
+		if h.combat {
+			row += fmt.Sprintf("  dmg +%d/-%d", h.dmgDealt, h.dmgTaken)
+		}
+		drawTextL(screen, row, font, float64(px)+pad, y, h.color)
+
+		// [СТРАХ] Другий рядок бойового вулика — прилади паніки. Формат пар скрізь
+		// «видячи|сліпо»; прогнози з розслідування: у «заляканого» dQ-vis → 0 при
+		// цілому dQ-blind, flip-vis росте, dodge майже без tele (спам). У здорового
+		// «чекальника» — навпаки: dodge ≈ tele (тисне лише під замах).
+		if h.combat {
+			y += rowH
+			drawTextL(screen, fmt.Sprintf("        dQ %.2f|%.2f   flip %2.0f|%2.0f%%   dodge %d tele %d",
+				h.spreadVis, h.spreadBlind, 100*h.flipVis, 100*h.flipBlind,
+				h.dodgeN, h.dodgeTeleN), font*0.9, float64(px)+pad, y, h.color)
+		}
 	}
 
 	// Криві reward — по одній на вулик, тим самим кольором, у СПІЛЬНОМУ масштабі
@@ -363,7 +473,9 @@ func (m *Metrics) draw(screen *ebiten.Image) {
 	}
 	rate := float32(0)
 	if m.window > 0 {
-		rate = float32(m.catches) * (120 * 60) / float32(m.window) // TPS=120
+		// «за хвилину» = тіків за хвилину ПОТОЧНОГО темпу. Тут довго стояло 120*60 з
+		// часів, коли дефолт був 120 TPS, — і на 60 TPS цифра брехала рівно вдвічі.
+		rate = float32(m.catches) * float32(gameTPS*60) / float32(m.window)
 	}
 	fy := float64(py+ph) - pad - rowH*0.2
 	// [ГОЛОВНА МЕТРИКА] Частка часу, коли агент НЕ бачив ціль.
