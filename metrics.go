@@ -102,6 +102,10 @@ type hiveStat struct {
 	spreadVis, spreadBlind float32 // EMA середнього (Q₁−Q₂) на рішення
 	flipVis, flipBlind     float32 // EMA частки рішень зі зміною argmax
 	dodgeN, dodgeTeleN     int     // натискань ухилення; з них — під замахом на себе
+
+	// flow-вулик: «сліпих» кадрів не буває (visible завжди true), а слот 15 — це HP,
+	// не телеграф. Його рядок страху коротший: лише видима половина, без tele.
+	flowNav bool
 }
 
 // Metrics збирає й зберігає показники навчання — ОКРЕМО по кожному вулику.
@@ -234,6 +238,9 @@ func (m *Metrics) collect(g *Game) {
 		// Шкода — і в котел (порівнянність зі старими скрінами), і ВУЛИКУ (атрибуція).
 		if b.combat {
 			h.combat = true
+		}
+		if b.flowNav {
+			h.flowNav = true
 		}
 		h.dmgDealt += b.mDmgDealt
 		h.dmgTaken += b.mDmgTaken
@@ -443,9 +450,17 @@ func (m *Metrics) draw(screen *ebiten.Image) {
 		// «чекальника» — навпаки: dodge ≈ tele (тисне лише під замах).
 		if h.combat {
 			y += rowH
-			drawTextL(screen, fmt.Sprintf("        dQ %.2f|%.2f   flip %2.0f|%2.0f%%   dodge %d tele %d",
+			fear := fmt.Sprintf("        dQ %.2f|%.2f   flip %2.0f|%2.0f%%   dodge %d tele %d",
 				h.spreadVis, h.spreadBlind, 100*h.flipVis, 100*h.flipBlind,
-				h.dodgeN, h.dodgeTeleN), font*0.9, float64(px)+pad, y, h.color)
+				h.dodgeN, h.dodgeTeleN)
+			if h.flowNav {
+				// Flow-вулик всевидющий і без телеграфа на вході: сліпі половини й
+				// tele для нього — не нулі, а НЕІСНУЮЧІ величини. Не малюємо, щоб
+				// «0.00|0%» не читалось як замір.
+				fear = fmt.Sprintf("        dQ %.2f   flip %2.0f%%   dodge %d",
+					h.spreadVis, 100*h.flipVis, h.dodgeN)
+			}
+			drawTextL(screen, fear, font*0.9, float64(px)+pad, y, h.color)
 		}
 	}
 

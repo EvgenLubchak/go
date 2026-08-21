@@ -260,9 +260,14 @@ func (b *Brain) stepStack(cur [baseInputs]float32, hitWall bool) int {
 	// (спам це саме про них, гейт canDodge живе далі в boids.go). Окремо — натиснуті
 	// «під замахом на мене»: спамер збирає їх пропорційно вікну (~чверть), читач
 	// телеграфа — майже всі.
+	//
+	// ⚠️ tele — ЛИШЕ для розкладки GatherInputs. У flow-вуликів слот 15 це ВЛАСНЕ HP
+	// (inOwnHP), і без цього гейта tele рахував «я живий»: перший же живий прогін
+	// видав ally_killer 686/686 — стовідсоткове «читання» телеграфа, якого в його
+	// входах фізично немає. Третя поспіль вада класу «той самий слот, інший сенс».
 	if action == actionDodge {
 		b.mDodgeN++
-		if cur[inDashAtMe] > fearTeleMin {
+		if !b.flowNav && cur[inDashAtMe] > fearTeleMin {
 			b.mDodgeTeleN++
 		}
 	}

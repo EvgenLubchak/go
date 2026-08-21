@@ -131,4 +131,21 @@ func TestStepStackCountsFear(t *testing.T) {
 	if b.mSpreadVisSum <= 0 {
 		t.Error("спред на домінантному argmax мусить бути додатним")
 	}
+
+	// [FLOW-ВУЛИК] У розкладці GatherKillerInputs слот 15 — ВЛАСНЕ HP, не телеграф.
+	// Без гейта !flowNav tele рахував «я живий»: перший живий прогін видав
+	// ally_killer dodge 686 / tele 686 — стовідсоткове «читання» ознаки, якої в його
+	// входах не існує. tele для flow-вуликів не рахується взагалі.
+	k := NewBrain()
+	k.flowNav = true
+	k.net.B3[actionDodge] = 100
+	var kin [baseInputs]float32
+	kin[inOwnHP] = 0.9 // той самий слот 15: у вбивці це HP → НЕ телеграф
+	if a := k.Step(kin, false); a != actionDodge {
+		t.Fatalf("flow-вулик: argmax не dodge (%d)", a)
+	}
+	if k.mDodgeN != 1 || k.mDodgeTeleN != 0 {
+		t.Errorf("flow-вулик: dodge %d/tele %d, очікувалось 1/0 — слот 15 у нього HP",
+			k.mDodgeN, k.mDodgeTeleN)
+	}
 }
