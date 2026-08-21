@@ -19,7 +19,7 @@
 | `metrics.go` | Панель метрик навчання (`G`): reward/TD/maxQ по вуликах, частка часу наосліп, blind-chase (котлова й по агентах), catch-rate, ярлик конфігурації |
 | `bench_test.go` | Безголовий стенд замірів: цикл гри без графіки, скриптований гравець, десятки прогонів на конфіг (`BOIDS_BENCH=1`) |
 | `level.go` | Тайлова мапа рівня, спавни, `isWallAt`/`isWallRect` |
-| `combat.go` | AABB collision, **[БІЙ] `resolveImpacts`** (шкода від closing speed + атрибуція), SPACE attack, смерть гравця, dead enemy removal |
+| `combat.go` | AABB collision, **[БІЙ] `resolveImpacts`** (шкода від closing speed + атрибуція), машина фаз РИВКА (SPACE: замах→ривок→відхід), `deathTransition`, респаун/видалення мертвих |
 | `render.go` | Малювання виду ЗВЕРХУ: тіло-восьмикутник, ворс, кінцівки, щупальце, кульки, HUD |
 | `render3d.go` | Raycaster: вид від 1-ї особи (стіни + спрайти). Див. [raycaster.md](raycaster.md) |
 | `sound.go` | Procedural 8-bit audio, drum patterns, BPM scaling |
@@ -168,22 +168,24 @@
 
 ```
 Update():
-  input → handlePlayerInput() | updatePrey()   ([SELF-PLAY] мозок-жертва замість клавіш)
-        → updatePlayer()       (friction, max speed, стіни й межа)
-        → updateFlowFields()   (multi-source BFS: по полю на кожну сторону)
-        → playerAttack()       (SPACE → damage units in radius)
-        → updateBoidMap()      (rebuild 2D grid of enemy positions)
-        → calcAcceleration()   (boids + Brain.Step) ← parallel goroutines
+  клавіші режимів → [hitstop: світ стоїть] → cam.follow → [пауза]
+  input → playerDashInput() + handlePlayerInput() | updatePrey()  ([SELF-PLAY] мозок-жертва)
+        → updatePlayer()       (friction, ривок, стіни й межа; тікають таймери ухилення гравця)
+        → updateFlowFields()   (multi-source BFS: по полю на кожну сторону, троттлинг)
+        → updateBoidMap()      (rebuild 2D grid of unit positions)
+        → calcAcceleration()   (boids + Brain.Step; ухилення = лише НАМІР) ← parallel goroutines
         → trainBrains()        (навчання кожної УНІКАЛЬНОЇ мережі, однопотоково)
         → metrics.collect()
-        → updateUnits()      (wander, burst, apply accel, bounce walls)
-        → resolveImpacts()     ([БІЙ] шкода від удару на швидкості + атрибуція)
-        → removeDeadUnits()  (filter slice in-place)
+        → updateUnits()        (відкладені кидки, таймери, apply accel, bounce walls)
+        → resolveImpacts()     ([БІЙ] шкода від closing speed + атрибуція + hitstop-запит)
+        → pushOffPlayer()      (юніти не стоять УСЕРЕДИНІ гравця; після шкоди — порядок критичний)
+        → handleDeadUnits()    (deathTransition → респаун на пост або видалення)
         → checkCollisions()    (HP гравця ≤ 0 → game over / respawn у self-play)
 
 Draw():
-  background → [flow-field] → units (сенсори, HP bar) → player → attack ring
-             → HUD (HP, LVL, FPS) → [панель метрик]
+  море → стіни (один шлях) → [феромони] → [flow-field] → ШЛЯХИ всіх юнітів
+       → ПРОСТІ ФІГУРИ всіх (очі, HP, зуби одним викликом) → КУЛЬКИ → ривок
+       → HUD (HP, LVL, FPS/TPS, зум/SS) → [панель метрик]
 ```
 
 ---
@@ -193,12 +195,17 @@ Draw():
 ### Game
 ```go
 type Game struct {
-    player   Pixel
-    units  []Pixel
-    boidMap  [boidMapH][boidMapW]int  // 2D grid: 0=empty, i+1=enemy index
-    tick       int
-    difficulty float32                 // multiplier: 1.0 at start, grows per level
-    mu         sync.Mutex              // reserved for future goroutines
+    player      Pixel
+    units       []Pixel
+    hive        map[string]*Net           // реєстр мереж: файл ваг → Net (переживає вимирання типу)
+    boidMap     [boidMapH][boidMapW]int   // 2D grid: 0=empty, i+1=unit index
+    frustration [boidMapH][boidMapW]float32 // феромони фрустрації (стигмергія)
+    flowToPlayerSide, flowToEnemySide FlowField // маршрути крізь лабіринт, по полю на сторону
+    tick        int
+    difficulty  float32 // multiplier: 1.0 at start
+    hitstop     int     // заморозка кадрів після удару за участю гравця
+    paused      bool
+    metrics     Metrics
 }
 ```
 
@@ -299,15 +306,18 @@ type UnitConfig struct {
 
 ## Enemy Types
 
-**Активні зараз** (список `unitRoster` у `pixel.go`; кількість — поле `Count` у
-кожному конфізі):
+**Склад поля** — список `unitRoster` у `pixel.go`; кількість — поле `Count` у
+кожному конфізі (`Count: 0` = тип у ростері, але вимкнений):
 
 | Type | Колір | Сторона | Мозок / поведінка |
 |------|-------|---------|-------------------|
 | **Learner** | зелений | ворог | Реактивний переслідувач, POMDP. **Baseline** — навмисно не знає лабіринту |
-| **Killer** | червоний | ворог | Знає лабіринт (**flow-field на вході**), швидший (1.6), 3 HP, **бойова нагорода** |
+| **Killer** | червоний | ворог | Знає лабіринт (**flow-field на вході**), швидший (1.6), **бойова нагорода** |
 | **AllyChaser** | блакитний | гравець | Реактивний, полює на найближчого ворога, бойова нагорода |
 | **AllyKiller** | фіолетовий | гравець | Flow-field до ВОРОГІВ — дзеркало червоного на твоєму боці |
+| **Warden** | золотий | ворог | СТРАЖНИК: лише бойова нагорода (`CombatOnly`), тримає місце, γ0.99, буфер 65536 |
+| **Boss** | малиновий | ворог | ОДИНАК з власною мережею (зараз `Count: 0` — вимкнений) |
+| **Hunter** | помаранчевий | ворог | бій + наосліп + рухомий (зараз `Count: 0` — вимкнений) |
 
 Кожен тип учиться **незалежно**: свій вулик і свій файл ваг (`WeightsFile` у конфізі),
 тож зміни для одного не чіпають інших. Склад поля — `unitRoster` + `Count` у конфігах.
