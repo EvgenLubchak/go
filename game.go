@@ -147,9 +147,27 @@ func (g *Game) restart() {
 
 // Update — головний цикл логіки, викликається ~60 разів на секунду.
 func (g *Game) Update() error {
-	if ebiten.IsKeyPressed(ebiten.KeyEscape) {
-		g.saveBrains() // зберігаємо мозок перед виходом
-		return errExit
+	// ESC: при відкритій панелі — ЗАКРИТИ ПАНЕЛЬ, інакше — вихід зі збереженням.
+	// Звичка «ESC = закрити модалку» не має коштувати сесії. JustPressed (а не
+	// IsKeyPressed, як було) навмисно: інакше той самий утримуваний ESC, що закрив
+	// панель, наступного ж кадру вийшов би з гри.
+	if inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
+		if panelOpen {
+			panelOpen = false
+		} else {
+			g.saveBrains() // зберігаємо мозок перед виходом
+			return errExit
+		}
+	}
+
+	// Tab — [ПАНЕЛЬ НАЛАШТУВАНЬ] (див. panel.go). Гра під панеллю НЕ спиняється —
+	// половина її ручок це прилади порівняння на живому кадрі; придушується лише
+	// ввід гравця, бо стрілки/WASD віддані навігації.
+	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
+		panelOpen = !panelOpen
+	}
+	if panelOpen {
+		handlePanelInput()
 	}
 
 	// P — [ПАУЗА] застиглий світ. Перемикачі виду нижче лишаються робочими: саме
@@ -188,27 +206,10 @@ func (g *Game) Update() error {
 		startBeat(g.difficulty) // перегенерувати патерн під новий темп
 	}
 
-	// N — згладжування контурів. Перемикач, а не константа, бо це ПРИЛАД ЗАМІРУ:
-	// різницю у FPS видно на тому самому екрані, де стоїть перемикач (див. antiAlias).
-	if inpututil.IsKeyJustPressed(ebiten.KeyN) {
-		antiAlias = !antiAlias
-	}
-
-	// H — [СУПЕРСЕМПЛІНГ] згладжування ЦІЛИМ КАДРОМ замість кожного шляху окремо.
-	// Другий прилад поруч із N: вони роблять одне й те саме різною ціною, і порівняти
-	// їх можна лише перемикаючи по одному.
-	//
-	// Цикл по ssLadder, а не крок: між 1.5 і 2 різниця тонка, а між 2 і 4 — прірва.
-	if inpututil.IsKeyJustPressed(ebiten.KeyH) {
-		i := 0
-		for j, s := range ssLadder {
-			if s == renderScale {
-				i = j
-				break
-			}
-		}
-		renderScale = ssLadder[(i+1)%len(ssLadder)]
-	}
+	// AA і SS переїхали з клавіш N/H на ПАНЕЛЬ (Tab, блок «Графіка») — перший крок
+	// виносу перемикачів. Роль приладів порівняння не постраждала: гра під панеллю
+	// живе, тож FPS видно тим самим оком. Зміни персистяться в settings.json
+	// (лише відхилення від дефолтів — див. settings.go).
 
 	// F — перемикач виду: зверху ↔ від першої особи (raycaster)
 	if inpututil.IsKeyJustPressed(ebiten.KeyF) {
@@ -298,7 +299,7 @@ func (g *Game) Update() error {
 
 	if aiPlayer && g.player.Brain != nil {
 		g.updatePrey() // [SELF-PLAY] гравцем керує мозок-жертва
-	} else {
+	} else if !panelOpen { // [ПАНЕЛЬ] стрілки/WASD/Space віддані навігації панелі
 		// [РИВОК] Пробіл читаємо ПЕРЕД рухом: напрямок удару беремо з клавіш, а
 		// handlePlayerInput у фазах атаки все одно нічого не додасть.
 		g.playerDashInput()

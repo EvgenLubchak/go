@@ -15,3 +15,6 @@ boids-macos
 # Brain — вивчені ваги (генеруються під час гри), по файлу на ТИП мозку:
 # brain_weights.json — рій-переслідувач, killer_weights.json — вбивця
 *_weights.json
+
+# Користувацькі налаштування (лише відхилення від дефолтів, див. settings.go)
+settings.json

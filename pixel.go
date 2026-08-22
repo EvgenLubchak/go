@@ -295,7 +295,7 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           0,
+		Count:           3,
 		Faction:         factionPlayer, // ← свій; рій його атакує, він рій
 		WeightsFile:     allyFile,
 		Respawns:        2,
@@ -329,7 +329,7 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           1,
+		Count:           2,
 		Faction:         factionPlayer,
 		WeightsFile:     allyKillerFile,
 		Respawns:        5,
