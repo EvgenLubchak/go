@@ -13,6 +13,8 @@ func sandboxSettings(t *testing.T) {
 	t.Helper()
 	savedPath, savedAA, savedSS := settingsPath, antiAlias, renderScale
 	savedTPS, savedSound, savedPat := gameTPS, soundEnabled, currentPatternIdx
+	savedFlow := showFlowField
+	t.Cleanup(func() { showFlowField = savedFlow })
 	settingsPath = filepath.Join(t.TempDir(), "settings.json")
 	t.Cleanup(func() {
 		settingsPath, antiAlias, renderScale = savedPath, savedAA, savedSS
@@ -257,5 +259,41 @@ func TestSoundPersistsPatternDoesNot(t *testing.T) {
 	loadSettings()
 	if soundEnabled == soundEnabledDefault {
 		t.Error("round-trip загубив звук")
+	}
+}
+
+// TestFlowFieldLayerCycles — тристановий шар ходить циклом в ОБИДВА боки без
+// відʼємних індексів і НЕ потрапляє у файл (діагностичний шар — стан сесії).
+func TestFlowFieldLayerCycles(t *testing.T) {
+	sandboxSettings(t)
+	showFlowField = 0
+
+	var ff *panelItem
+	for i := range panelItems {
+		if strings.HasPrefix(panelItems[i].name, "Flow-field") {
+			ff = &panelItems[i]
+		}
+	}
+	if ff == nil {
+		t.Fatal("панель не має пункту Flow-field")
+	}
+	if ff.persist {
+		t.Fatal("діагностичний шар позначено персистентним")
+	}
+
+	ff.next(nil)
+	ff.next(nil)
+	if showFlowField != 2 {
+		t.Errorf("два кроки вперед: %d, очікувалось 2", showFlowField)
+	}
+	ff.next(nil) // wrap → 0
+	ff.prev(nil) // назад через нуль → 2
+	if showFlowField != 2 {
+		t.Errorf("назад через нуль: %d, очікувалось 2", showFlowField)
+	}
+
+	saveSettings()
+	if raw, _ := os.ReadFile(settingsPath); strings.Contains(string(raw), "flow") {
+		t.Errorf("шар flow-field потрапив у файл: %s", raw)
 	}
 }

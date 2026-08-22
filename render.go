@@ -1005,7 +1005,7 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 		}
 	}
 
-	// [FLOW-FIELD] Поле напрямків до гравця (клавіша V) — під юнітами,
+	// [FLOW-FIELD] Поле напрямків до гравця (шар із панелі Tab) — під юнітами,
 	// щоб стрілки не перекривали ворогів і гравця.
 	if showFlowField != 0 {
 		g.drawFlowField(screen)

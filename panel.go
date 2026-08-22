@@ -167,6 +167,18 @@ var panelItems = []panelItem{
 	},
 	{
 		group: "Ігрові налаштування",
+		name:  "Flow-field — шар поля",
+		value: func() string {
+			names := [3]string{"вимк", "до сторони гравця", "до ворогів"}
+			return markDefault(names[showFlowField%3], names[0])
+		},
+		next: func(_ *Game) { showFlowField = (showFlowField + 1) % 3 },
+		prev: func(_ *Game) { showFlowField = (showFlowField + 2) % 3 },
+		// НЕ персиститься: діагностичний шар — стан сесії, як ритм.
+		persist: false,
+	},
+	{
+		group: "Ігрові налаштування",
 		name:  "TPS — темп симуляції",
 		value: func() string {
 			return markDefault(fmt.Sprintf("%d", gameTPS), fmt.Sprintf("%d", gameTPSDefault))

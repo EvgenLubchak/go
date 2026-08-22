@@ -67,7 +67,7 @@ type Game struct {
 
 	// [FLOW-FIELD] Два поля маршрутів крізь лабіринт (multi-source BFS):
 	// одне веде до сторони гравця, друге — до ворогів. Кожна сторона читає те,
-	// що веде до супротивника. Візуалізація — клавіша V (циклює поля).
+	// що веде до супротивника. Візуалізація — панель Tab (шар flow-field).
 	flowToPlayerSide FlowField
 	flowToEnemySide  FlowField
 	flowTick         int // лічильник перебудов (троттлинг)
@@ -242,10 +242,8 @@ func (g *Game) Update() error {
 		g.restart()
 	}
 
-	// V — [FLOW-FIELD] циклює: вимк → поле до сторони гравця → поле до ворогів
-	if inpututil.IsKeyJustPressed(ebiten.KeyV) {
-		showFlowField = (showFlowField + 1) % 3
-	}
+	// Шар flow-field переїхав із клавіші V на панель (Tab): тристановий цикл
+	// «вимк → до сторони гравця → до ворогів», тепер в обидва боки.
 
 	if g.gameOver {
 		return nil // R обробляється вище — працює і тут, і в живій грі
