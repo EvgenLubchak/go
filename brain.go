@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -1501,13 +1503,39 @@ func SaveNet(n *Net) error {
 // Повертає також loaded: чи ваги реально прийшли з файлу (навчена → ε на floor).
 func newNetFor(path string, mem memContract, gamma, clip float32) (n *Net, loaded bool) {
 	if n = loadNetFrom(path, mem, gamma, clip); n != nil {
+		logWeights(path, "завантажено")
 		return n, true
 	}
 	n = NewNet()
 	n.mem = mem
 	n.gamma, n.clip = gamma, clip
 	n.file = path
+	// Розрізняємо ДВІ причини старту з нуля: «файлу немає» — штатний чистий
+	// експеримент; «файл є, але відкинутий» — тихий фолбек, який вартує знати.
+	reason := "з нуля (файлу немає)"
+	if _, err := os.Stat(path); err == nil {
+		reason = "з нуля (файл Є, але НЕсумісний: контракт/γ/розміри)"
+	}
+	logWeights(path, reason)
 	return n, false
+}
+
+// logWeights — один рядок у консоль про долю файлу ваг, з АБСОЛЮТНИМ шляхом.
+//
+// Народжено загадкою: запуск кнопкою Play у JetBrains мав ІНШУ робочу теку, тож гра
+// читала й писала власну лінію ваг деінде — і «видалені» ваги воскресали панічною
+// поведінкою, ледь не зіпсувавши серію експериментів. Відносний шлях у файлі ваг
+// означає, що его доля залежить від cwd; абсолютний шлях у консолі робить будь-яку
+// таку підміну видимою з першого рядка запуску.
+func logWeights(path, verdict string) {
+	if path == "" {
+		return // ефемерна мережа (без файлу): Abs("") дав би просто cwd — шум, не слід
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	log.Printf("ваги: %s — %s", abs, verdict)
 }
 
 // saveNetTo серіалізує мережу (стек + GRU ваги) у JSON за вказаним шляхом.
