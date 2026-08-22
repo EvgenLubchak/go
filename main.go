@@ -43,7 +43,7 @@ var (
 	soundEnabled        = soundEnabledDefault // фоновий ритм: панель Tab, персиститься
 	difficultyGrowth    = false               // false — складність не росте (для тренування AI)
 	showWhiskers        = false               // показувати сенсори стін і обрану дію Learner-а
-	showMetrics         = false               // показувати панель метрик навчання (крива reward/TD) — клавіша G
+	showMetrics         = false               // показувати панель метрик навчання (крива reward/TD) — клавіша M
 	showInput           = true                // [ВВЕДЕННЯ] віджет натиснутих напрямків у правому низу
 	showFrustration     = false               // показувати теплову карту феромонів фрустрації
 	pheromonesEnabled   = false               // вмикає феромони фрустрації (стигмергію); false = чистий Q-learning без слідів

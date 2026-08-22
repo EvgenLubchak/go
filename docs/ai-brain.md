@@ -1249,7 +1249,7 @@ playerMaxHP     = 20
 | `combat.go` | **[БІЙ]** `resolveImpacts` (closing speed + атрибуція шкоди), `applyImpactDamage`, смерть гравця, удар SPACE |
 | `pixel.go` | Конфіги типів (4 бойові), **`unitRoster`** зі складом поля, `Count`/`Faction`/`WeightsFile`, `newUnits` (вулик на тип) |
 | `render.go` | `drawBrainSensors` (вуса+стрілка), теплокарта феромонів, HP у HUD |
-| `metrics.go` | Панель (`G`): рядок і крива на КОЖЕН вулик своїм кольором + blind-chase, catch-rate. Розмір — від `metricScale` |
+| `metrics.go` | Панель (`M`; скидання — `G`): рядок і крива на КОЖЕН вулик своїм кольором + blind-chase, catch-rate. Розмір — від `metricScale` |
 | `render3d.go` | Raycaster: вид від 1-ї особи (див. [raycaster.md](raycaster.md)) |
 | `main.go` | Прапорці (`sharedBrain`, `localSight`, `aiPlayer`, `friendlyFire`, `antiAlias`, `renderScale`, `showFlowField`…) і типові значення |
 | `*_weights.json` | Збережені ваги, **по файлу на тип мозку** (`brain_` — рій, `killer_` — вбивця). Формат містить розміри для перевірки сумісності |

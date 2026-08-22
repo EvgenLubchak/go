@@ -16,7 +16,7 @@
 | `brain_stack.go` | Шлях памʼяті **frame-stacking** — за замовчуванням: `forwardQ`, `tdUpdate`, `stepStack` |
 | `brain_gru.go` | ⚠️ **ПРИПАРКОВАНО** — шлях памʼяті GRU (лише явний `MemoryGRU`): `forwardGRU`, `tdUpdateSeq` (BPTT), `stepGRU`. Причини — у шапці файлу |
 | `flowfield.go` | **Pathfinding**: BFS-хвиля від гравця, поле напрямків, `dirAt`/`distAt`, візуалізація (`V`) |
-| `metrics.go` | Панель метрик навчання (`G`): reward/TD/maxQ по вуликах, частка часу наосліп, blind-chase (котлова й по агентах), catch-rate, ярлик конфігурації |
+| `metrics.go` | Панель метрик навчання (`M`; скидання — `G`): reward/TD/maxQ по вуликах, частка часу наосліп, blind-chase (котлова й по агентах), catch-rate, ярлик конфігурації |
 | `bench_test.go` | Безголовий стенд замірів: цикл гри без графіки, скриптований гравець, десятки прогонів на конфіг (`BOIDS_BENCH=1`) |
 | `level.go` | Тайлова мапа рівня, спавни, `isWallAt`/`isWallRect` |
 | `combat.go` | AABB collision, **[БІЙ] `resolveImpacts`** (шкода від closing speed + атрибуція), машина фаз РИВКА (SPACE: замах→ривок→відхід), `deathTransition`, респаун/видалення мертвих |

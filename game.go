@@ -63,7 +63,7 @@ type Game struct {
 	// Реєстр тримає мережу незалежно від того, чи лишилось живе тіло.
 	hive map[string]*Net
 
-	metrics Metrics // [МЕТРИКИ] крива навчання рою (клавіша G)
+	metrics Metrics // [МЕТРИКИ] крива навчання рою (клавіша M)
 
 	// [FLOW-FIELD] Два поля маршрутів крізь лабіринт (multi-source BFS):
 	// одне веде до сторони гравця, друге — до ворогів. Кожна сторона читає те,
@@ -202,14 +202,17 @@ func (g *Game) Update() error {
 		g.firstPerson = !g.firstPerson
 	}
 
-	// G — перемикач панелі метрик (крива навчання)
-	if inpututil.IsKeyJustPressed(ebiten.KeyG) {
+	// M — перемикач панелі метрик (крива навчання). ⚠️ ОБМІНЯНА МІСЦЯМИ з G:
+	// M мнемонічніша для «метрик», а скидання переїхало на G. Стара звичка
+	// «G = показати метрики» тепер СКИДАЄ лічильники — перевчитись свідомо.
+	if inpututil.IsKeyJustPressed(ebiten.KeyM) {
 		showMetrics = !showMetrics
 	}
 
-	// M — скинути лічильники заміру (blind-chase / catch). Тиснемо, коли рій уже
+	// G — скинути лічильники заміру (blind-chase / catch). Тиснемо, коли рій уже
 	// навчився → далі метрики відображають саме навчену політику, а не всю історію.
-	if inpututil.IsKeyJustPressed(ebiten.KeyM) {
+	// (До обміну жила на M — див. коментар вище.)
+	if inpututil.IsKeyJustPressed(ebiten.KeyG) {
 		g.metrics.resetCounters()
 	}
 

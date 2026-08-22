@@ -1202,7 +1202,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		drawText(screen, "R - restart    ESC - exit", gameOverFontSize*0.6, cx, cy+28, white)
 	}
 
-	// [МЕТРИКИ] Панель кривої навчання (клавіша G) — поверх усього.
+	// [МЕТРИКИ] Панель кривої навчання (клавіша M) — поверх усього.
 	if showMetrics {
 		g.metrics.draw(screen)
 	}
