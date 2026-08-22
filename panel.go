@@ -78,6 +78,32 @@ func markDefault(cur, def string) string {
 	return cur + "  (типово " + def + ")"
 }
 
+// toggleSound — вмикає/вимикає фоновий ритм. Увімкнення грає ПОТОЧНИЙ патерн
+// (startBeat без просування — інакше кожен фліп звуку крутив би плейлист).
+// g може бути nil у тестах — тоді аудіо не чіпаємо, лише прапорець і файл.
+func toggleSound(g *Game) {
+	soundEnabled = !soundEnabled
+	if g != nil {
+		if soundEnabled {
+			startBeat(g.difficulty)
+		} else {
+			stopBeat()
+		}
+	}
+	saveSettings()
+}
+
+// cyclePattern — інший ритм у циклі, в обидва боки (замінив клавішу B, яка вміла
+// лише вперед і мовчала при вимкненому звуці). Вибір працює й БЕЗ звуку — патерн
+// просто заграє, коли звук увімкнуть.
+func cyclePattern(g *Game, dir int) {
+	n := len(patterns)
+	currentPatternIdx = ((currentPatternIdx+dir)%n + n) % n
+	if g != nil && soundEnabled {
+		startBeat(g.difficulty)
+	}
+}
+
 // toggleTPS — 60 ↔ 120 (логіка колишньої клавіші T). Усе в грі рахується в
 // КАДРАХ, тож це рівномірне сповільнення всього одразу; біт переганяємо, бо він
 // єдиний живе в реальних секундах (див. gameTPS у main.go). g може бути nil у
@@ -113,6 +139,31 @@ var panelItems = []panelItem{
 		next:    func(_ *Game) { cycleSS(+1); saveSettings() },
 		prev:    func(_ *Game) { cycleSS(-1); saveSettings() },
 		persist: true,
+	},
+	{
+		group:   "Ігрові налаштування",
+		name:    "Звук — фоновий ритм",
+		value:   func() string { return markDefault(onoff(soundEnabled), onoff(soundEnabledDefault)) },
+		next:    toggleSound,
+		prev:    toggleSound,
+		persist: true,
+	},
+	{
+		group: "Ігрові налаштування",
+		name:  "Ритм — барабанний патерн",
+		value: func() string {
+			n := len(patterns)
+			name := patterns[((currentPatternIdx%n)+n)%n].name
+			if !soundEnabled {
+				return name + "  (звук вимк)"
+			}
+			return name
+		},
+		next: func(g *Game) { cyclePattern(g, +1) },
+		prev: func(g *Game) { cyclePattern(g, -1) },
+		// НЕ персиститься: патерн — стан сесії (скидається рестартом, чергується
+		// щорівня), а не налаштування комфорту.
+		persist: false,
 	},
 	{
 		group: "Ігрові налаштування",

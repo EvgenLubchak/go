@@ -177,12 +177,8 @@ func (g *Game) Update() error {
 		g.paused = !g.paused
 	}
 
-	// B — вручну переключити музичний патерн (експерименти з ритмом). Раніше сиділа
-	// на P; перевішана, бо при soundEnabled=false вона все одно нічого не робить,
-	// а P потрібніша під паузу.
-	if inpututil.IsKeyJustPressed(ebiten.KeyB) {
-		startBeat(g.difficulty)
-	}
+	// Звук і барабанний патерн переїхали з клавіші B на панель (Tab): B була
+	// мертвою при вимкненому звуці, а сам soundEnabled узагалі не мав ручки.
 
 	// [ЗУМ] +/− наближають і віддаляють вид зверху. Камера тягнеться за гравцем із
 	// відставанням і відсікається до меж світу — тож на 1.0 вона сама стає в центр
@@ -284,7 +280,7 @@ func (g *Game) Update() error {
 	g.tick++
 	if difficultyGrowth && g.tick%levelUpEvery == 0 && g.difficulty < maxDifficulty {
 		g.difficulty += difficultyStep
-		startBeat(g.difficulty) // темп зростає щорівня
+		advanceBeat(g.difficulty) // темп зростає щорівня, патерн чергується
 	}
 
 	if aiPlayer && g.player.Brain != nil {

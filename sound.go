@@ -154,8 +154,26 @@ func writeSamples(buf []byte, startSample int, freq, durationSec, amplitude floa
 // заводити для цього загальний хелпер означало б натякати, що він є.
 func tpsScale() float64 { return float64(gameTPS) / 120.0 }
 
-// startBeat зупиняє поточний програвач і запускає наступний патерн у циклі.
-// На рестарті — викликати з попереднім скиданням currentPatternIdx = 0.
+// advanceBeat — наступний патерн у циклі й грати його (чергування щорівня;
+// «наступний ритм» на панелі).
+func advanceBeat(difficulty float32) {
+	currentPatternIdx = (currentPatternIdx + 1) % len(patterns)
+	startBeat(difficulty)
+}
+
+// stopBeat — тиша (панель: звук off). Безпечно за будь-якого стану.
+func stopBeat() {
+	if beatPlayer != nil {
+		_ = beatPlayer.Close()
+		beatPlayer = nil
+	}
+}
+
+// startBeat зупиняє поточний програвач і грає ПОТОЧНИЙ патерн (БЕЗ просування).
+//
+// Раніше він ще й просував лічильник — і тоді будь-який виклик «перегенеруй біт»
+// (зміна темпу!) ЗАОДНО міняв патерн. Просування тепер окремо: advanceBeat —
+// чергування щорівня та «наступний» із панелі.
 func startBeat(difficulty float32) {
 	if !soundEnabled {
 		return
@@ -166,8 +184,8 @@ func startBeat(difficulty float32) {
 		beatPlayer = nil
 	}
 
-	p := patterns[currentPatternIdx%len(patterns)]
-	currentPatternIdx++
+	n := len(patterns)
+	p := patterns[((currentPatternIdx%n)+n)%n]
 
 	pcm := generateBeatFromPattern(p, difficulty)
 	loop := audio.NewInfiniteLoop(bytes.NewReader(pcm), int64(len(pcm)))

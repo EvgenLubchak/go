@@ -11,10 +11,12 @@ import (
 // sandboxSettings — тимчасовий settings.json + відкат глобалей після тесту.
 func sandboxSettings(t *testing.T) {
 	t.Helper()
-	savedPath, savedAA, savedSS, savedTPS := settingsPath, antiAlias, renderScale, gameTPS
+	savedPath, savedAA, savedSS := settingsPath, antiAlias, renderScale
+	savedTPS, savedSound, savedPat := gameTPS, soundEnabled, currentPatternIdx
 	settingsPath = filepath.Join(t.TempDir(), "settings.json")
 	t.Cleanup(func() {
-		settingsPath, antiAlias, renderScale, gameTPS = savedPath, savedAA, savedSS, savedTPS
+		settingsPath, antiAlias, renderScale = savedPath, savedAA, savedSS
+		gameTPS, soundEnabled, currentPatternIdx = savedTPS, savedSound, savedPat
 	})
 }
 
@@ -200,5 +202,60 @@ func TestSettingsInvalidTPSRejected(t *testing.T) {
 	loadSettings()
 	if gameTPS != 120 {
 		t.Errorf("легальний tps 120 не застосувався: %d", gameTPS)
+	}
+}
+
+// TestSoundPersistsPatternDoesNot — звук це налаштування комфорту (персиститься),
+// патерн — стан сесії (скидається рестартом, чергується щорівня) і у файл НЕ йде.
+// g=nil у діях: аудіо в тестах не чіпаємо, лише прапорці й файл.
+func TestSoundPersistsPatternDoesNot(t *testing.T) {
+	sandboxSettings(t)
+	soundEnabled, currentPatternIdx = soundEnabledDefault, 0
+
+	var snd, pat *panelItem
+	for i := range panelItems {
+		if strings.HasPrefix(panelItems[i].name, "Звук") {
+			snd = &panelItems[i]
+		}
+		if strings.HasPrefix(panelItems[i].name, "Ритм") {
+			pat = &panelItems[i]
+		}
+	}
+	if snd == nil || pat == nil {
+		t.Fatal("панель не має пунктів Звук/Ритм")
+	}
+	if snd.persist == false || pat.persist == true {
+		t.Fatal("persist розкладено навпаки: звук мусить зберігатись, патерн — ні")
+	}
+
+	snd.next(nil)
+	if soundEnabled == soundEnabledDefault {
+		t.Error("фліп звуку не змінив прапорець")
+	}
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil || !strings.Contains(string(raw), `"sound"`) {
+		t.Error("звук не зберігся у файл")
+	}
+
+	// Цикл патернів: уперед по колу і назад через нуль — без відʼємного індексу.
+	n := len(patterns)
+	pat.next(nil)
+	if currentPatternIdx != 1 {
+		t.Errorf("наступний патерн: індекс %d, очікувалось 1", currentPatternIdx)
+	}
+	pat.prev(nil)
+	pat.prev(nil)
+	if currentPatternIdx != n-1 {
+		t.Errorf("назад через нуль: індекс %d, очікувалось %d", currentPatternIdx, n-1)
+	}
+	if raw, _ := os.ReadFile(settingsPath); strings.Contains(string(raw), "pattern") {
+		t.Error("патерн потрапив у файл — а він стан сесії")
+	}
+
+	// Round-trip звуку: «перезапуск» повертає ввімкнене.
+	soundEnabled = soundEnabledDefault
+	loadSettings()
+	if soundEnabled == soundEnabledDefault {
+		t.Error("round-trip загубив звук")
 	}
 }

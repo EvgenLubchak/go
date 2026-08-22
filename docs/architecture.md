@@ -371,7 +371,7 @@ Square wave: sin(t) ≥ 0 → +amplitude, else −amplitude (retro sound)
 Loop: audio.NewInfiniteLoop — auto-rewinds at end of measure
 ```
 
-Toggle: `soundEnabled = true/false` (var in main.go)
+Перемикачі: панель Tab → «Звук» (персиститься в settings.json) і «Ритм — барабанний патерн» (стан сесії, не персиститься)
 
 ---
 

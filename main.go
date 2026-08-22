@@ -27,9 +27,10 @@ import (
 // вписане літералом у двох місцях, зміна дефолту тихо ламала індикатор — він або
 // світився завжди, або не світився ніколи.
 const (
-	gameTPSDefault     = 60    // темп: 60 тіків, м'якший до батареї й до GPU
-	antiAliasDefault   = false // per-path AA вимкнено: його роботу робить суперсемплінг
-	renderScaleDefault = 1.5   // суперсемплінг: 2.25 пікселя буфера на екранний
+	gameTPSDefault      = 60    // темп: 60 тіків, м'якший до батареї й до GPU
+	antiAliasDefault    = false // per-path AA вимкнено: його роботу робить суперсемплінг
+	renderScaleDefault  = 1.5   // суперсемплінг: 2.25 пікселя буфера на екранний
+	soundEnabledDefault = false // фоновий ритм вимкнено (панель Tab → звук)
 )
 
 // [GO: PACKAGE-LEVEL VAR + INIT]
@@ -39,17 +40,17 @@ const (
 // [GO: VAR vs CONST] — var дозволяє умовні перевірки без попереджень лінтера.
 var (
 	fontFaceSource      *etext.GoTextFaceSource
-	soundEnabled        = false // false — вимкнути фоновий ритм
-	difficultyGrowth    = false // false — складність не росте (для тренування AI)
-	showWhiskers        = false // показувати сенсори стін і обрану дію Learner-а
-	showMetrics         = false // показувати панель метрик навчання (крива reward/TD) — клавіша G
-	showInput           = true  // [ВВЕДЕННЯ] віджет натиснутих напрямків у правому низу
-	showFrustration     = false // показувати теплову карту феромонів фрустрації
-	pheromonesEnabled   = false // вмикає феромони фрустрації (стигмергію); false = чистий Q-learning без слідів
-	epsilonDecayEnabled = false // ε: false = постійна (qEpsilonConst); true = автоспад max→min
-	sharedBrain         = true  // true = всі учні ділять ОДНУ мережу (вулик-розум); false = кожен свою
-	localSight          = true  // [POMDP] true = агент бачить гравця лише поблизу+по прямій; false = всевидющий
-	aiPlayer            = false // [SELF-PLAY] true = гравцем керує мозок-жертва (вчиться тікати); false = людина
+	soundEnabled        = soundEnabledDefault // фоновий ритм: панель Tab, персиститься
+	difficultyGrowth    = false               // false — складність не росте (для тренування AI)
+	showWhiskers        = false               // показувати сенсори стін і обрану дію Learner-а
+	showMetrics         = false               // показувати панель метрик навчання (крива reward/TD) — клавіша G
+	showInput           = true                // [ВВЕДЕННЯ] віджет натиснутих напрямків у правому низу
+	showFrustration     = false               // показувати теплову карту феромонів фрустрації
+	pheromonesEnabled   = false               // вмикає феромони фрустрації (стигмергію); false = чистий Q-learning без слідів
+	epsilonDecayEnabled = false               // ε: false = постійна (qEpsilonConst); true = автоспад max→min
+	sharedBrain         = true                // true = всі учні ділять ОДНУ мережу (вулик-розум); false = кожен свою
+	localSight          = true                // [POMDP] true = агент бачить гравця лише поблизу+по прямій; false = всевидющий
+	aiPlayer            = false               // [SELF-PLAY] true = гравцем керує мозок-жертва (вчиться тікати); false = людина
 	// [ТЕМП] Частота тіків. Перемикається на панелі (Tab → «Ігрові налаштування»).
 	//
 	// Це БЕЗПЕЧНО за побудовою, і причина варта запису: у грі НІДЕ немає реального часу.

@@ -36,9 +36,10 @@ var settingsPath = "settings.json"
 
 // userSettings — серіалізована форма. Вказівники = PATCH-семантика (див. шапку).
 type userSettings struct {
-	AA  *bool    `json:"aa,omitempty"`
-	SS  *float32 `json:"ss,omitempty"`
-	TPS *int     `json:"tps,omitempty"`
+	AA    *bool    `json:"aa,omitempty"`
+	SS    *float32 `json:"ss,omitempty"`
+	TPS   *int     `json:"tps,omitempty"`
+	Sound *bool    `json:"sound,omitempty"`
 }
 
 // loadSettings читає файл і накладає ВАЛІДНІ відхилення на рантайм-змінні.
@@ -60,7 +61,7 @@ func loadSettings() {
 		log.Printf("налаштування: %s — зіпсований JSON, дефолти (%v)", abs, err)
 		return
 	}
-	if s.AA == nil && s.SS == nil && s.TPS == nil {
+	if s.AA == nil && s.SS == nil && s.TPS == nil && s.Sound == nil {
 		log.Printf("налаштування: %s — відхилень немає, дефолти", abs)
 		return
 	}
@@ -82,6 +83,12 @@ func loadSettings() {
 		} else {
 			log.Printf("налаштування: %s — ss %g (типово %g)", abs, renderScale, renderScaleDefault)
 		}
+	}
+	if s.Sound != nil {
+		// Аудіо тут НЕ чіпаємо: loadSettings іде до старту гри, а startBeat у main
+		// читає цей прапорець сам.
+		soundEnabled = *s.Sound
+		log.Printf("налаштування: %s — sound %v (типово %v)", abs, soundEnabled, soundEnabledDefault)
 	}
 	if s.TPS != nil {
 		// Темп має рівно два легальні значення — все в грі рахується в кадрах, і
@@ -112,6 +119,10 @@ func saveSettings() {
 	if gameTPS != gameTPSDefault {
 		v := gameTPS
 		s.TPS = &v
+	}
+	if soundEnabled != soundEnabledDefault {
+		v := soundEnabled
+		s.Sound = &v
 	}
 	raw, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
