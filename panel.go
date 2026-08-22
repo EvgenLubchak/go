@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"image/color"
+	"log"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -17,8 +18,10 @@ import (
 //	миша/тачпад   рух курсора над рядком переносить вибір; клік = перемкнути.
 //	              Тачпад мака для нас — звичайна миша: рух = курсор, тап = клік
 //	              (glfw не віддає жестів). Ціль кліку — ВЕСЬ рядок, не чекбокс.
-//	клавіатура    ↑↓ (та W/S) — вибір; Enter/Space/→ — вперед по значеннях;
-//	              ← — назад. Руки не покидають клавіатуру під час замірів.
+//	клавіатура    ↑↓ (та W/S) — вибір; Enter/→ — вперед по значеннях; ← — назад.
+//	              Space і A/D дій НЕ мають: гра під панеллю живе, і рефлекси
+//	              WASD/ривка не повинні перемикати налаштування (перевірено
+//	              першим же дебагом — див. handlePanelInput).
 //
 // Вибір переносить той, хто РУХАВСЯ ОСТАННІМ: стрілки не бʼються з нерухомим
 // курсором (hover спрацьовує лише на зміну позиції курсора).
@@ -127,8 +130,29 @@ func panelRowAt(cx, cy int) int {
 	return -1
 }
 
+// panelAct — ЄДИНА точка застосування дії панелі, зі СЛІДОМ У КОНСОЛІ: перший
+// же дебаг показав, що без сліду неможливо відрізнити «одна дія спрацювала
+// двічі» від «прилетіли дві дії» (подвійний тап тачпада, рефлекторна клавіша).
+// Кожна зміна — один рядок: джерело, пункт, старе → нове.
+func panelAct(i, dir int, src string) {
+	it := &panelItems[i]
+	before := it.value()
+	if dir < 0 {
+		it.prev()
+	} else {
+		it.next()
+	}
+	log.Printf("панель[%s] %s: %s → %s", src, it.name, before, it.value())
+}
+
 // handlePanelInput — увесь ввід відкритої панелі (клавіатура + миша/тачпад).
 // Викликається з Update лише коли panelOpen.
+//
+// ⚠️ ДІЇ — ЛИШЕ Enter, ←/→ і клік. Space та A/D зумисно ПРИБРАНІ після першого
+// ж дебагу: гра під панеллю живе, і пальці за звичкою продовжують «грати» —
+// рефлекторний Space (це ж ривок!) чи D (рух!) непомітно перемикали вибраний
+// рядок. Так «максимальний пресет» AA + SS×4 і зʼявлявся нізвідки. W/S у
+// навігації лишаються: вибір без зміни значення — нешкідливий рефлекс.
 func handlePanelInput() {
 	n := len(panelItems)
 	if inpututil.IsKeyJustPressed(ebiten.KeyArrowUp) || inpututil.IsKeyJustPressed(ebiten.KeyW) {
@@ -137,12 +161,14 @@ func handlePanelInput() {
 	if inpututil.IsKeyJustPressed(ebiten.KeyArrowDown) || inpututil.IsKeyJustPressed(ebiten.KeyS) {
 		panelSel = (panelSel + 1) % n
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) || inpututil.IsKeyJustPressed(ebiten.KeyA) {
-		panelItems[panelSel].prev()
+	if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
+		panelAct(panelSel, -1, "←")
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) || inpututil.IsKeyJustPressed(ebiten.KeyD) ||
-		inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeySpace) {
-		panelItems[panelSel].next()
+	if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
+		panelAct(panelSel, +1, "→")
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyEnter) {
+		panelAct(panelSel, +1, "Enter")
 	}
 
 	cx, cy := ebiten.CursorPosition()
@@ -155,7 +181,7 @@ func handlePanelInput() {
 	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
 		if row := panelRowAt(cx, cy); row >= 0 {
 			panelSel = row
-			panelItems[row].next()
+			panelAct(row, +1, "клік")
 		}
 	}
 }
