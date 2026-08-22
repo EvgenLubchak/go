@@ -426,9 +426,9 @@ func (m *Metrics) draw(screen *ebiten.Image) {
 	if frozenPolicy {
 		cfgCol = color.RGBA{120, 235, 140, 255} // заморожено → зелений, видно здалеку
 	}
-	drawTextL(screen, fmt.Sprintf("local:%s  shared:%s  ai:%s  frz:%s  eps %.3f",
+	drawTextL(screen, fmt.Sprintf("local:%s  shared:%s  ai:%s  frz:%s  ddqn:%s  eps %.3f",
 		onoff(localSight), onoff(sharedBrain), onoff(aiPlayer),
-		onoff(frozenPolicy), m.firstEps()), font*0.85, float64(px)+pad, y, cfgCol)
+		onoff(frozenPolicy), onoff(doubleDQN), m.firstEps()), font*0.85, float64(px)+pad, y, cfgCol)
 
 	// Рядок на КОЖЕН вулик — свої reward/TD/maxQ, кольором своїх юнітів.
 	// Бойовим вуликам — ще й ВЛАСНА шкода: для розрідженого типу (стражник) це єдині

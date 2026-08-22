@@ -345,7 +345,18 @@ func (b *Brain) shiftFrames(cur [baseInputs]float32) {
 func (n *Net) tdUpdate(s [brainInputs]float32, a int, reward float32, s2 [brainInputs]float32, terminal bool) float32 {
 	// Ціль за Беллманом по TARGET-мережі (max Q наступного стану — як константа).
 	q2 := n.forwardQTarget(s2)
-	maxNext := q2[argmaxQ(q2)]
+	next := argmaxQ(q2)
+	// [DOUBLE DQN] (клавіша 2) Розчеплення вибору й оцінки. Класичний max зміщений
+	// угору: та сама мережа і обирає дію, і оцінює її — власний шум сам себе
+	// підтверджує, γ розносить зсув на весь горизонт. Подвійна ціль: дію обирає
+	// ЖИВА мережа, оцінює її TARGET — шуми в них різні (target відстає на до
+	// qTargetSync оновлень), помилка одного не підтверджує іншу.
+	// Лише стек-шлях: у GRU ціль живе в tdUpdateSeq, а шлях припарковано.
+	if doubleDQN {
+		qLive, _, _ := n.forwardQ(s2)
+		next = argmaxQ(qLive)
+	}
+	maxNext := q2[next]
 	// [ПОВТОР ДІЇ] Дискаунт на крок, а не на кадр: при actSkip > 1 один перехід
 	// накриває actSkip кадрів, і бутстрапити через n.gamma означало б рахувати
 	// майбутнє дорожчим, ніж воно є.
