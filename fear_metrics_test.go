@@ -132,20 +132,25 @@ func TestStepStackCountsFear(t *testing.T) {
 		t.Error("спред на домінантному argmax мусить бути додатним")
 	}
 
-	// [FLOW-ВУЛИК] У розкладці GatherKillerInputs слот 15 — ВЛАСНЕ HP, не телеграф.
-	// Без гейта !flowNav tele рахував «я живий»: перший живий прогін видав
-	// ally_killer dodge 686 / tele 686 — стовідсоткове «читання» ознаки, якої в його
-	// входах не існує. tele для flow-вуликів не рахується взагалі.
+	// [FLOW-ВУЛИК] tele для flow-вуликів не рахується ВЗАГАЛІ — у їхніх входах
+	// телеграфа не існує (гравець не замахується на них як на ціль ривка).
+	//
+	// Історія гейта: за СТАРОЇ розкладки слот телеграфа у вбивці ніс власне HP, і
+	// без гейта tele рахував «я живий» — перший живий прогін видав ally_killer
+	// dodge 686 / tele 686. Канонічна розкладка ту пастку вбила структурно
+	// (HP і телеграф — різні слоти), тож тепер тест кладе flow-мозку НЕНУЛЬОВИЙ
+	// телеграф навмисно: перевіряється сам гейт !flowNav, а не збіг нулів.
 	k := NewBrain()
 	k.flowNav = true
 	k.net.B3[actionDodge] = 100
 	var kin [baseInputs]float32
-	kin[inOwnHP] = 0.9 // той самий слот 15: у вбивці це HP → НЕ телеграф
+	kin[inOwnHP] = 0.9
+	kin[inDashAtMe] = 0.5 // у справжнього вбивці тут нуль; кладемо, щоб тест не був порожнім
 	if a := k.Step(kin, false); a != actionDodge {
 		t.Fatalf("flow-вулик: argmax не dodge (%d)", a)
 	}
 	if k.mDodgeN != 1 || k.mDodgeTeleN != 0 {
-		t.Errorf("flow-вулик: dodge %d/tele %d, очікувалось 1/0 — слот 15 у нього HP",
+		t.Errorf("flow-вулик: dodge %d/tele %d, очікувалось 1/0 — гейт !flowNav не тримає",
 			k.mDodgeN, k.mDodgeTeleN)
 	}
 }
