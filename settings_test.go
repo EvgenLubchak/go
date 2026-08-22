@@ -11,10 +11,10 @@ import (
 // sandboxSettings — тимчасовий settings.json + відкат глобалей після тесту.
 func sandboxSettings(t *testing.T) {
 	t.Helper()
-	savedPath, savedAA, savedSS := settingsPath, antiAlias, renderScale
+	savedPath, savedAA, savedSS, savedTPS := settingsPath, antiAlias, renderScale, gameTPS
 	settingsPath = filepath.Join(t.TempDir(), "settings.json")
 	t.Cleanup(func() {
-		settingsPath, antiAlias, renderScale = savedPath, savedAA, savedSS
+		settingsPath, antiAlias, renderScale, gameTPS = savedPath, savedAA, savedSS, savedTPS
 	})
 }
 
@@ -129,7 +129,7 @@ func TestPanelActionsPersist(t *testing.T) {
 		t.Fatal("панель не має пунктів AA/SS — таблиця розійшлась із тестом")
 	}
 
-	ss.next()
+	ss.next(nil)
 	if renderScale != 2 {
 		t.Errorf("панельний крок SS: %g, очікувалось 2", renderScale)
 	}
@@ -137,17 +137,68 @@ func TestPanelActionsPersist(t *testing.T) {
 	if err != nil || !strings.Contains(string(raw), `"ss"`) {
 		t.Error("крок SS не зберігся у файл")
 	}
-	ss.prev()
+	ss.prev(nil)
 	if renderScale != renderScaleDefault {
 		t.Errorf("панельний крок SS назад: %g", renderScale)
 	}
 
-	aa.next()
+	aa.next(nil)
 	if antiAlias == antiAliasDefault {
 		t.Error("панельний фліп AA не змінив значення")
 	}
 	raw, _ = os.ReadFile(settingsPath)
 	if !strings.Contains(string(raw), `"aa"`) {
 		t.Error("фліп AA не зберігся у файл")
+	}
+
+	// TPS: перемикач 60↔120 через таблицю (g=nil у тесті: біт не чіпається).
+	var tps *panelItem
+	for i := range panelItems {
+		if strings.HasPrefix(panelItems[i].name, "TPS") {
+			tps = &panelItems[i]
+		}
+	}
+	if tps == nil {
+		t.Fatal("панель не має пункту TPS")
+	}
+	gameTPS = gameTPSDefault
+	tps.next(nil)
+	if gameTPS == gameTPSDefault {
+		t.Error("панельний фліп TPS не змінив темп")
+	}
+	raw, _ = os.ReadFile(settingsPath)
+	if !strings.Contains(string(raw), `"tps"`) {
+		t.Error("фліп TPS не зберігся у файл")
+	}
+	tps.next(nil)
+	if gameTPS != gameTPSDefault {
+		t.Errorf("другий фліп TPS не повернув дефолт: %d", gameTPS)
+	}
+	raw, _ = os.ReadFile(settingsPath)
+	if strings.Contains(string(raw), `"tps"`) {
+		t.Errorf("tps повернувся до дефолту, але ключ лишився: %s", raw)
+	}
+}
+
+// TestSettingsInvalidTPSRejected — TPS має рівно два легальні значення; невідоме
+// ВІДКИДАЄТЬСЯ (не клемпиться — 90 однаково далекий від обох), лишається дефолт.
+func TestSettingsInvalidTPSRejected(t *testing.T) {
+	sandboxSettings(t)
+
+	gameTPS = gameTPSDefault
+	if err := os.WriteFile(settingsPath, []byte(`{"tps": 90}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	loadSettings()
+	if gameTPS != gameTPSDefault {
+		t.Errorf("нелегальний tps 90 застосувався: %d", gameTPS)
+	}
+
+	if err := os.WriteFile(settingsPath, []byte(`{"tps": 120}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	loadSettings()
+	if gameTPS != 120 {
+		t.Errorf("легальний tps 120 не застосувався: %d", gameTPS)
 	}
 }

@@ -36,8 +36,9 @@ var settingsPath = "settings.json"
 
 // userSettings — серіалізована форма. Вказівники = PATCH-семантика (див. шапку).
 type userSettings struct {
-	AA *bool    `json:"aa,omitempty"`
-	SS *float32 `json:"ss,omitempty"`
+	AA  *bool    `json:"aa,omitempty"`
+	SS  *float32 `json:"ss,omitempty"`
+	TPS *int     `json:"tps,omitempty"`
 }
 
 // loadSettings читає файл і накладає ВАЛІДНІ відхилення на рантайм-змінні.
@@ -59,7 +60,7 @@ func loadSettings() {
 		log.Printf("налаштування: %s — зіпсований JSON, дефолти (%v)", abs, err)
 		return
 	}
-	if s.AA == nil && s.SS == nil {
+	if s.AA == nil && s.SS == nil && s.TPS == nil {
 		log.Printf("налаштування: %s — відхилень немає, дефолти", abs)
 		return
 	}
@@ -82,6 +83,18 @@ func loadSettings() {
 			log.Printf("налаштування: %s — ss %g (типово %g)", abs, renderScale, renderScaleDefault)
 		}
 	}
+	if s.TPS != nil {
+		// Темп має рівно два легальні значення — все в грі рахується в кадрах, і
+		// довільний TPS означав би довільну швидкість симуляції. Невідоме значення
+		// ВІДКИДАЄМО (не клемпимо: 90 однаково далекий від обох), лишаємо дефолт.
+		if *s.TPS == 60 || *s.TPS == 120 {
+			gameTPS = *s.TPS
+			log.Printf("налаштування: %s — tps %d (типово %d)", abs, gameTPS, gameTPSDefault)
+		} else {
+			log.Printf("налаштування: %s — tps %d не підтримується (лише 60/120), дефолт %d",
+				abs, *s.TPS, gameTPSDefault)
+		}
+	}
 }
 
 // saveSettings пише у файл ЛИШЕ відхилення від дефолтів; повна відповідність
@@ -95,6 +108,10 @@ func saveSettings() {
 	if renderScale != renderScaleDefault {
 		v := renderScale
 		s.SS = &v
+	}
+	if gameTPS != gameTPSDefault {
+		v := gameTPS
+		s.TPS = &v
 	}
 	raw, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

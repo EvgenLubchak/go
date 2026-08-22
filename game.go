@@ -167,7 +167,7 @@ func (g *Game) Update() error {
 		panelOpen = !panelOpen
 	}
 	if panelOpen {
-		handlePanelInput()
+		handlePanelInput(g)
 	}
 
 	// P — [ПАУЗА] застиглий світ. Перемикачі виду нижче лишаються робочими: саме
@@ -193,18 +193,8 @@ func (g *Game) Update() error {
 	if inpututil.IsKeyJustPressed(ebiten.KeyMinus) || inpututil.IsKeyJustPressed(ebiten.KeyKPSubtract) {
 		cam.zoom = clamp(cam.zoom-camZoomStep, camZoomMin, camZoomMax)
 	}
-	// T — темп гри: 120 ↔ 60 тіків. Усе в грі рахується в КАДРАХ, тож це рівномірне
-	// сповільнення всього одразу; біт переганяємо, бо він єдиний живе в реальних
-	// секундах (див. gameTPS у main.go).
-	if inpututil.IsKeyJustPressed(ebiten.KeyT) {
-		if gameTPS == 120 {
-			gameTPS = 60
-		} else {
-			gameTPS = 120
-		}
-		ebiten.SetTPS(gameTPS)
-		startBeat(g.difficulty) // перегенерувати патерн під новий темп
-	}
+	// Темп гри (TPS) переїхав із клавіші T на панель (Tab, «Ігрові налаштування») —
+	// див. toggleTPS у panel.go. Персиститься в settings.json.
 
 	// AA і SS переїхали з клавіш N/H на ПАНЕЛЬ (Tab, блок «Графіка») — перший крок
 	// виносу перемикачів. Роль приладів порівняння не постраждала: гра під панеллю

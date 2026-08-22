@@ -50,8 +50,8 @@ type panelItem struct {
 	group   string
 	name    string
 	value   func() string
-	next    func()
-	prev    func()
+	next    func(g *Game)
+	prev    func(g *Game)
 	persist bool // true → зміна пишеться в settings.json (лише ручки комфорту)
 }
 
@@ -78,23 +78,50 @@ func markDefault(cur, def string) string {
 	return cur + "  (типово " + def + ")"
 }
 
+// toggleTPS — 60 ↔ 120 (логіка колишньої клавіші T). Усе в грі рахується в
+// КАДРАХ, тож це рівномірне сповільнення всього одразу; біт переганяємо, бо він
+// єдиний живе в реальних секундах (див. gameTPS у main.go). g може бути nil у
+// тестах — тоді біт не чіпаємо (звук і так вимкнений поза грою).
+func toggleTPS(g *Game) {
+	if gameTPS == 120 {
+		gameTPS = 60
+	} else {
+		gameTPS = 120
+	}
+	ebiten.SetTPS(gameTPS)
+	if g != nil {
+		startBeat(g.difficulty)
+	}
+	saveSettings()
+}
+
 var panelItems = []panelItem{
 	{
-		group:   "Графіка",
+		group:   "Ігрові налаштування",
 		name:    "AA — згладжування шляхів",
 		value:   func() string { return markDefault(onoff(antiAlias), onoff(antiAliasDefault)) },
-		next:    func() { antiAlias = !antiAlias; saveSettings() },
-		prev:    func() { antiAlias = !antiAlias; saveSettings() },
+		next:    func(_ *Game) { antiAlias = !antiAlias; saveSettings() },
+		prev:    func(_ *Game) { antiAlias = !antiAlias; saveSettings() },
 		persist: true,
 	},
 	{
-		group: "Графіка",
+		group: "Ігрові налаштування",
 		name:  "SS — суперсемплінг",
 		value: func() string {
 			return markDefault(fmt.Sprintf("%g×", renderScale), fmt.Sprintf("%g×", float32(renderScaleDefault)))
 		},
-		next:    func() { cycleSS(+1); saveSettings() },
-		prev:    func() { cycleSS(-1); saveSettings() },
+		next:    func(_ *Game) { cycleSS(+1); saveSettings() },
+		prev:    func(_ *Game) { cycleSS(-1); saveSettings() },
+		persist: true,
+	},
+	{
+		group: "Ігрові налаштування",
+		name:  "TPS — темп симуляції",
+		value: func() string {
+			return markDefault(fmt.Sprintf("%d", gameTPS), fmt.Sprintf("%d", gameTPSDefault))
+		},
+		next:    toggleTPS,
+		prev:    toggleTPS,
 		persist: true,
 	},
 }
@@ -134,13 +161,13 @@ func panelRowAt(cx, cy int) int {
 // же дебаг показав, що без сліду неможливо відрізнити «одна дія спрацювала
 // двічі» від «прилетіли дві дії» (подвійний тап тачпада, рефлекторна клавіша).
 // Кожна зміна — один рядок: джерело, пункт, старе → нове.
-func panelAct(i, dir int, src string) {
+func panelAct(g *Game, i, dir int, src string) {
 	it := &panelItems[i]
 	before := it.value()
 	if dir < 0 {
-		it.prev()
+		it.prev(g)
 	} else {
-		it.next()
+		it.next(g)
 	}
 	log.Printf("панель[%s] %s: %s → %s", src, it.name, before, it.value())
 }
@@ -153,7 +180,7 @@ func panelAct(i, dir int, src string) {
 // рефлекторний Space (це ж ривок!) чи D (рух!) непомітно перемикали вибраний
 // рядок. Так «максимальний пресет» AA + SS×4 і зʼявлявся нізвідки. W/S у
 // навігації лишаються: вибір без зміни значення — нешкідливий рефлекс.
-func handlePanelInput() {
+func handlePanelInput(g *Game) {
 	n := len(panelItems)
 	if inpututil.IsKeyJustPressed(ebiten.KeyArrowUp) || inpututil.IsKeyJustPressed(ebiten.KeyW) {
 		panelSel = (panelSel - 1 + n) % n
@@ -162,13 +189,13 @@ func handlePanelInput() {
 		panelSel = (panelSel + 1) % n
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
-		panelAct(panelSel, -1, "←")
+		panelAct(g, panelSel, -1, "←")
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
-		panelAct(panelSel, +1, "→")
+		panelAct(g, panelSel, +1, "→")
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyEnter) {
-		panelAct(panelSel, +1, "Enter")
+		panelAct(g, panelSel, +1, "Enter")
 	}
 
 	cx, cy := ebiten.CursorPosition()
@@ -181,7 +208,7 @@ func handlePanelInput() {
 	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
 		if row := panelRowAt(cx, cy); row >= 0 {
 			panelSel = row
-			panelAct(row, +1, "клік")
+			panelAct(g, row, +1, "клік")
 		}
 	}
 }
@@ -195,19 +222,16 @@ func drawPanel(screen *ebiten.Image) {
 	dim := color.RGBA{150, 160, 175, 255}
 	white := color.RGBA{230, 235, 240, 255}
 
-	group := ""
 	y := float64(panelY + panelPad + panelHeadH - 10)
 	drawTextL(screen, "НАЛАШТУВАННЯ", panelFontSz, panelX+panelPad, y-4, dim)
+	// Назва групи — у рядку заголовка справа: v1 має ОДНУ групу, і довге
+	// «[Ігрові налаштування]» в рядку пункту билось би зі стовпчиком значень.
+	// Кілька груп вимагатимуть власних рядків-заголовків і нової геометрії.
+	drawTextL(screen, "["+panelItems[0].group+"]", panelFontSz*0.85,
+		float64(panelX+panelW)-225, y-4, dim)
 
 	for i, it := range panelItems {
 		x0, y0, x1, y1 := panelRowRect(i)
-		if it.group != group {
-			group = it.group
-			// Заголовок групи малюємо В рядку першого пункту групи справа —
-			// v1 має одну групу, тож окремих рядків-заголовків поки не заводимо.
-			drawTextL(screen, "["+group+"]", panelFontSz*0.85, float64(x1)-110,
-				float64(y0)+float64(panelRowH)*0.62, dim)
-		}
 		if i == panelSel {
 			vector.FillRect(screen, x0, y0, x1-x0, y1-y0, color.RGBA{50, 75, 95, 255}, false)
 		}
