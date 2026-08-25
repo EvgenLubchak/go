@@ -925,7 +925,13 @@ func (p *Pixel) reviveAt(x, y float32) {
 	p.InvulnTimer = 0
 	p.HitTimer = 0
 	p.KnockTimer = 0
-	p.DodgeTimer, p.DodgeCooldown = 0, 0 // [УХИЛЕННЯ] нове життя — чиста перезарядка
+	// [УХИЛЕННЯ] нове життя — чиста перезарядка. DodgeRecover теж, і саме він тут
+	// найважливіший: canSteer і canDodge обидва на нього дивляться, а dodgeRecovery
+	// це 100 кадрів. Без цього рядка юніт, убитий У ВІДХОДІ, відроджувався на посту
+	// без керування й без ухилення на ~1.7 с — безкоштовне вікно для гравця. Гілка
+	// гравця (respawnPlayer, restart) скидала всі три від початку й покрита тестом,
+	// гілка юнітів розійшлась із нею мовчки.
+	p.DodgeTimer, p.DodgeCooldown, p.DodgeRecover = 0, 0, 0
 	p.resetFur()
 	if p.Brain != nil {
 		p.Brain.resetForNewLife()
