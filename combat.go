@@ -318,6 +318,17 @@ func (g *Game) resolveImpacts() {
 		if !ok {
 			continue
 		}
+		// [ЛОБ-У-ЛОБ] Укус ворога рахується ДО твого удару — з тієї ж причини, що в
+		// циклі юніт↔юніт нижче. Твій ривок відкидає ворога на knockbackImpulse, і
+		// перевірка після нього читала вже відкинуту швидкість: ворог, який летів тобі
+		// назустріч, на цьому кадрі не міг вкусити у відповідь ніколи. Тобто розмін
+		// «ти вдарив і дістав» був недосяжний, а ривок не мав ціни.
+		//
+		// Для стражника це було найдорожче: його бʼють саме ривком, а нанесена шкода —
+		// його ЄДИНЕ джерело позитивної нагороди (CombatOnly). Він отримував лише біль.
+		eMax := e.Cfg.MaxSpeed * g.difficulty
+		enemyHits := eMax > 0 && closingSpeed(e.VelX, e.VelY, -nx, -ny) >= impactThreshold(eMax)
+
 		// [РИВОК] Гравець ранить ЛИШЕ в активній фазі. Перевірки швидкості більше
 		// немає, і це не оптимізація, а зміна правила: раніше шкода була ПОБІЧНИМ
 		// ЕФЕКТОМ того, що ти швидко їхав, тепер вона — РЕЗУЛЬТАТ рішення вдарити.
@@ -334,9 +345,7 @@ func (g *Game) resolveImpacts() {
 				g.freezeOnHit(hitstopDealt)
 			}
 		}
-		// Ворог кидається на гравця (напрямок навпаки).
-		eMax := e.Cfg.MaxSpeed * g.difficulty
-		if eMax > 0 && closingSpeed(e.VelX, e.VelY, -nx, -ny) >= impactThreshold(eMax) {
+		if enemyHits {
 			if applyImpactDamage(e, &g.player, impactDamage) {
 				g.freezeOnHit(hitstopTaken)
 			}
@@ -360,10 +369,35 @@ func (g *Game) resolveImpacts() {
 				if nx, ny, ok := unitTo(a.X, a.Y, b.X, b.Y); ok {
 					aMax := a.Cfg.MaxSpeed * g.difficulty
 					bMax := b.Cfg.MaxSpeed * g.difficulty
-					if aMax > 0 && closingSpeed(a.VelX, a.VelY, nx, ny) >= impactThreshold(aMax) {
+					// [ЛОБ-У-ЛОБ] ОБИДВІ умови рахуються ДО того, як застосована хоч
+					// одна. Це не стиль — це єдиний спосіб дати третьому рядку таблиці
+					// в шапці модуля («лоб-у-лоб → обидва отримали») статись узагалі.
+					//
+					// applyImpactDamage відкидає ЦІЛЬ на knockbackImpulse = 5.0, а це
+					// втричі більше за найвищу MaxSpeed у грі (1.6). Тож перевірка,
+					// зроблена ПІСЛЯ чужого удару, читала вже відкинуту швидкість: щоб
+					// пережити імпульс і все одно вдарити, юнітові треба було зближатись
+					// на поріг+5.0 ≈ 5.96 при стелі 1.6. Тобто не «рідко», а ніколи —
+					// крім вузького вікна піднятої стелі (knockSpeedMulti) після чужого
+					// удару, де стеля 6.4 формально дозволяє.
+					//
+					// Наслідок був системний, а не косметичний. По-перше, з механіки
+					// зникав РИЗИК атаки — та сама половина, з якої й виводилось, що
+					// hit-and-run оптимальний математично. По-друге, вигравав завжди
+					// МЕНШИЙ ІНДЕКС у слайсі, бо його перевіряли першим, а індекс — це
+					// лише порядок у unitRoster. Стражники стоять у ньому після юнітів
+					// гравця, тож глушився саме їхній удар — у типу, де нанесена шкода
+					// це єдине джерело позитивної нагороди (CombatOnly).
+					//
+					// Та сама пастка, що названа нижче для separateUnits: «інакше удар
+					// рахувався б по вже відбитій швидкості». Правило знайшли тоді, місце
+					// застосування — не все.
+					aHits := aMax > 0 && closingSpeed(a.VelX, a.VelY, nx, ny) >= impactThreshold(aMax)
+					bHits := bMax > 0 && closingSpeed(b.VelX, b.VelY, -nx, -ny) >= impactThreshold(bMax)
+					if aHits {
 						applyImpactDamage(a, b, impactDamage)
 					}
-					if bMax > 0 && closingSpeed(b.VelX, b.VelY, -nx, -ny) >= impactThreshold(bMax) {
+					if bHits {
 						applyImpactDamage(b, a, impactDamage)
 					}
 				}
