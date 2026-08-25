@@ -492,7 +492,7 @@ var (
 		//
 		// (Стеля, якщо колись повертатись: 40 × MaxSpeed ≤ 50, бо dashAimAt екстраполює
 		// на dashLeadFrames = 40, а ривок дістає 50px. Тобто максимум 1.25.)
-		MaxSpeed: 0.9,
+		MaxSpeed:        0.9,
 		AggressionForce: 0.0,
 		BurstChance:     0.0,
 		BurstForce:      0.0,
