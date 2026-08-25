@@ -179,6 +179,12 @@ func TestMemoryBench(t *testing.T) {
 	if os.Getenv("BOIDS_BENCH") == "" {
 		t.Skip("довгий стенд; запуск: BOIDS_BENCH=1 go test -run TestMemoryBench -v -timeout 60m")
 	}
+	// [МЕТОДИКА] Важелі експерименту — явно, а не з гри. Та сама причина, що в
+	// BENCH_COMBAT нижче: усі записані бази зняті за конкретних умов, і мовчки
+	// змінити їх означає знецінити записане. doubleDQN протікав саме так — його
+	// дефолт перевернули «на час експерименту», і стенд поїхав би разом із ним.
+	pinExperimentFlags(t)
+
 	seeds := benchEnvInt("BENCH_SEEDS", 10)
 	warmup := benchEnvInt("BENCH_WARMUP", 20000)
 	measure := benchEnvInt("BENCH_MEASURE", 6000)
