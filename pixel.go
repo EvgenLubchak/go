@@ -260,13 +260,13 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0, // не впливає (лише debug-коло)
 		PounceMulti:     0.0,
-		Count:           0, // мало: вони сильніші за рій
+		Count:           1, // мало: вони сильніші за рій
 		Faction:         factionEnemy,
 		WeightsFile:     killerFile,
 		// [РЕСПАУН] НУЛЬ повернень: вимер — вимер назавжди. ⚠️ Коментар тут роками
 		// брехав «безкінечно»; насправді склад вбивць НЕ сталий, і коли всіх 15 вибʼють,
 		// тип зникає до рестарту. Свідомо це чи ні — питання балансу, а не запису.
-		Respawns:      0,
+		Respawns:      2,
 		MaxHP:         10,                           // витримує на удар більше за рій
 		Color:         color.RGBA{255, 90, 60, 255}, // червоний — щоб одразу вирізняти
 		IsLearner:     true,
@@ -295,7 +295,7 @@ var (
 		BurstForce:      0.0,
 		DetectionRange:  0.0,
 		PounceMulti:     0.0,
-		Count:           3,
+		Count:           2,
 		Faction:         factionPlayer, // ← свій; рій його атакує, він рій
 		WeightsFile:     allyFile,
 		Respawns:        2,
@@ -318,7 +318,7 @@ var (
 	// WeightsFile: мережа бачить лише ВІДНОСНІ входи («напрямок до моєї цілі»), тож
 	// політика має бути та сама, зате досвіду вдвічі більше.
 	ConfigAllyKiller = UnitConfig{
-		TentJoints:      5,
+		TentJoints:      4,
 		WanderStrength:  0.0, // [RL] як у вбивці
 		AlignmentRate:   0.0,
 		CohesionRate:    0.0,
@@ -332,7 +332,7 @@ var (
 		Count:           2,
 		Faction:         factionPlayer,
 		WeightsFile:     allyKillerFile,
-		Respawns:        5,
+		Respawns:        2,
 		MaxHP:           19,
 		Color:           color.RGBA{140, 100, 255, 255}, // фіолетовий — твій вбивця
 		IsLearner:       true,

@@ -140,7 +140,7 @@ const (
 	//
 	// Той самий візерунок, що в updateBody: `u.Cfg.MaxSpeed`, а якщо нуль — playerBaseSpeed.
 	// Гравець не окремий випадок у коді, він лише інше джерело тих самих чисел.
-	playerTentJoints = 3
+	playerTentJoints = 7
 
 	tentSeg     = 3.5  // довжина сегмента (px)
 	tentWidth   = 4.5  // товщина лінії
